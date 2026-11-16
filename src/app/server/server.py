@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import urllib.parse
 import urllib.request
 from http import HTTPStatus
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler
 
 from config import load_config, normalize_renderer_name, renderer_name_is_valid, save_config, save_proxy_port
@@ -73,6 +74,7 @@ from library_paths import (
     list_library_directories,
 )
 from library_query_spec import parse_library_item_ids
+from netease_music import MUSIC as NETEASE, MusicBoxError, STREAM_PREFIX as NETEASE_STREAM_PREFIX, song_id as netease_song_id
 from dlna.control_point import (
     cached_upnp_devices,
     configure_local_renderer_identity,
@@ -921,6 +923,69 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def serve_netease_catalog(self, path, query):
+        try:
+            if path == "/api/netease/search":
+                result = {"items": NETEASE.search((query.get("q") or [""])[0])}
+            elif path == "/api/netease/playlists":
+                result = {"playlists": NETEASE.playlists()}
+            elif path.startswith("/api/netease/playlists/"):
+                value = netease_song_id("netease:" + path.removeprefix("/api/netease/playlists/"))
+                if not value:
+                    return self.send_json({"ok": False, "message": "无效的网易云歌单"}, 400)
+                result = {"items": NETEASE.playlist(value)}
+            else:
+                return self.send_json({"ok": False, "message": "未知的网易云操作"}, 404)
+        except MusicBoxError as exc:
+            return self.send_json({"ok": False, "message": str(exc)}, 502)
+        return self.send_json({"ok": True, **result})
+
+    def serve_netease_stream(self, value, head_only=False):
+        if (self.client_address[0] not in ("127.0.0.1", "::1")
+                or self.headers.get("X-Fnaudio-Internal")):
+            return self.send_json({"ok": False, "message": "此地址仅供 NAS 播放器使用"}, 403)
+        if not netease_song_id("netease:" + value):
+            return self.send_json({"ok": False, "message": "无效的网易云曲目"}, 404)
+        selected = self.headers.get("Range") or ""
+        if selected and not re.fullmatch(r"bytes=[0-9]{1,12}-[0-9]{0,12}", selected):
+            return self.send_json({"ok": False, "message": "无效的音频范围"}, 416)
+        # The CDN honors Range but may omit Accept-Ranges. MPD checks that
+        # header before seeking, so verify the upstream 206 on the first read.
+        try:
+            source = NETEASE.open_stream(value, selected or "bytes=0-")
+        except (MusicBoxError, OSError, HTTPException):
+            return self.send_json({"ok": False, "message": "无法取得网易云完整音频"}, 502)
+        with source:
+            length = source.headers.get("Content-Length", "")
+            upstream_range = source.headers.get("Content-Range", "")
+            match = re.fullmatch(r"bytes ([0-9]{1,15})-([0-9]{1,15})/([0-9]{1,15})", upstream_range)
+            ranged = source.status == 206 and match is not None
+            if not length.isdigit() or len(length) > 15 or source.status not in (200, 206):
+                return self.send_json({"ok": False, "message": "网易云音频响应不完整"}, 502)
+            if ranged:
+                start, end, total = (int(part) for part in match.groups())
+                expected_start = int(selected[6:].split("-", 1)[0]) if selected else 0
+                if (start != expected_start or not start <= end < total
+                        or int(length) != end - start + 1 or (not selected and end + 1 != total)):
+                    return self.send_json({"ok": False, "message": "网易云音频响应不完整"}, 502)
+            elif (selected or source.status == 206) and not ranged:
+                return self.send_json({"ok": False, "message": "网易云音频不支持该范围"}, 416)
+            self.send_response(206 if selected else 200)
+            self.send_header("Content-Type", source.headers.get_content_type())
+            self.send_header("Content-Length", length)
+            self.send_header("Cache-Control", "no-store")
+            if ranged:
+                self.send_header("Accept-Ranges", "bytes")
+            if selected:
+                self.send_header("Content-Range", upstream_range)
+            self.end_headers()
+            if not head_only:
+                try:
+                    while chunk := source.read(65536):
+                        self.wfile.write(chunk)
+                except (OSError, HTTPException):
+                    self.close_connection = True
+
     def handle_get(self, head_only=False):
         if not request_target_allowed(self.path):
             self.close_connection = True
@@ -931,6 +996,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self.send_json({"ok": False, "error": "too many query parameters"}, 400)
         path = parsed.path
+        if path.startswith(NETEASE_STREAM_PREFIX):
+            return self.serve_netease_stream(path.removeprefix(NETEASE_STREAM_PREFIX), head_only)
         if path.startswith("/dlna/"):
             return self.handle_dlna_get(path, head_only)
         if path.startswith("/upnp/cover/"):
@@ -939,6 +1006,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if requires_resource_auth(path) and not self.authorize_api_request("HEAD" if head_only else "GET", path):
             return
+        if path.startswith("/api/netease/"):
+            return self.serve_netease_catalog(path, query)
         if path == "/api/health":
             mpd = MPD_SERVICE.status() if MPD_SERVICE else {}
             metadata = METADATA_SERVICE.status() if METADATA_SERVICE else {}
@@ -1096,7 +1165,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Metadata enrichment is best-effort; hydration must still
                     # return the authoritative library rows on cache errors.
                     pass
-            return self.send_json({"items": [public_item(x, self.server.config) for x in items]})
+            return self.send_json({"items": [public_item(x, self.server.config) for x in items] + NETEASE.hydrate(ids)})
         if path == "/api/library/location":
             item_id = (query.get("id") or [""])[0]
             location = query_library_item_location(self.server.config, item_id)
@@ -2443,6 +2512,12 @@ def find_library_item(config, item_id):
     return item if item and is_library_item_path(config, item.get("path")) else None
 
 
+def find_playback_item(config, item_id):
+    if netease_song_id(item_id):
+        return NETEASE.track(item_id)
+    return find_library_item(config, item_id)
+
+
 def find_upnp_device(device_id):
     devices = cached_upnp_devices() or discover_upnp()
     return select_upnp_device(devices, device_id)
@@ -2539,6 +2614,7 @@ def restore_playback_session(config, _retry=0, _generation=None):
         queue_ids = playback_queue_ids(playback.get("queue"))
         rows = query_library_items_by_ids(config, queue_ids)
         by_id = {str(item.get("id") or ""): item for item in rows}
+        by_id.update((track_id, NETEASE.track(track_id)) for track_id in queue_ids if netease_song_id(track_id))
         queue = [by_id[track_id] for track_id in queue_ids if track_id in by_id]
         current = str(playback.get("current_id") or "")
         if not _playback_restore_generation_is_current(_generation):
@@ -2553,7 +2629,7 @@ def restore_playback_session(config, _retry=0, _generation=None):
         # client issues a transport command. Promote it immediately so the
         # explicit current-song metadata lane can fetch lyrics/artwork even
         # when whole-library metadata enrichment remains disabled.
-        if current and METADATA_SERVICE:
+        if current and METADATA_SERVICE and not netease_song_id(current):
             try:
                 METADATA_SERVICE.prioritize_track(current)
             except Exception as exc:
@@ -2576,7 +2652,7 @@ def restore_playback_session(config, _retry=0, _generation=None):
             result = MPD_SERVICE.sync_playback_queue(
                 tracks,
                 current,
-                resolver=lambda track_id: find_library_item(config, track_id),
+                resolver=lambda track_id: find_playback_item(config, track_id),
                 current_item=restored_current,
                 start=backend_start,
                 repeat=str(playback.get("repeat") or "off"),
@@ -2655,11 +2731,21 @@ def restore_playback_session(config, _retry=0, _generation=None):
 
 def playback_queue(config, payload):
     request = queue_request(payload)
+    tracks = request["tracks"]
+    online_ids = [
+        netease_song_id(normalize_track_id(track.get("id")) or normalize_track_id(track.get("track_id")))
+        for track in tracks
+    ]
+    if any(online_ids):
+        if playback_target_kind(PLAYBACK_CORE.state.target_id) != "mpd":
+            return {"ok": False, "message": "请先选择 NAS 本机播放设备"}, 409
+        # Ignore fields supplied by the browser for online tracks. The stable
+        # provider ID is the only thing we accept from the queue request.
+        tracks = [NETEASE.track("netease:" + value) if value else track for track, value in zip(tracks, online_ids)]
     # A user queue edit supersedes any startup restore retry that may still be
     # waiting on MPD.  Otherwise the delayed retry can reload an older
     # persisted session and overwrite this newly selected queue.
     cancel_playback_restore_retry()
-    tracks = request["tracks"]
     current = request["current_id"]
     repeat = request["repeat"]
     shuffle = request["shuffle"]
@@ -2677,7 +2763,7 @@ def playback_queue(config, payload):
             service.sync_playback_queue(
                 state.queue,
                 state.current_track_id,
-                resolver=lambda track_id: find_library_item(config, track_id),
+                resolver=lambda track_id: find_playback_item(config, track_id),
                 repeat=state.repeat,
                 shuffle=state.shuffle,
                 play=was_playing,
@@ -2693,7 +2779,7 @@ def playback_queue(config, payload):
     # clients commonly persist the queue first and issue the native load a
     # moment later; prioritize the selected track here as well so the lyrics,
     # artwork and candidate workers do not wait for a second transport call.
-    if current and METADATA_SERVICE:
+    if current and METADATA_SERVICE and not netease_song_id(current):
         try:
             METADATA_SERVICE.prioritize_track(str(current))
         except Exception as exc:
@@ -2727,7 +2813,7 @@ def playback_load_selected(handler, target_id, item, position=0):
         "config": handler.server.config,
         "item": item,
         "position": safe_float(position),
-        "resolve_track": lambda track_id: find_library_item(handler.server.config, track_id),
+        "resolve_track": lambda track_id: find_playback_item(handler.server.config, track_id),
     }
     core_result = PLAYBACK_CORE.dispatch(
         PlaybackCommand("load", safe_float(position), TrackRef.from_mapping(item), context)
@@ -2744,7 +2830,7 @@ def playback_load_selected(handler, target_id, item, position=0):
         revision = save_current_playback_session(handler.server.config)
         if revision is None:
             return playback_persistence_failure(target_kind)
-        if METADATA_SERVICE:
+        if METADATA_SERVICE and not netease_song_id(item["id"]):
             METADATA_SERVICE.prioritize_track(item["id"])
     if target_kind == "browser":
         return {"ok": True, "kind": target_kind, "target_id": "local", "track_id": item["id"], "core": core_result["state"], "revision": revision}, 200
@@ -2917,6 +3003,9 @@ def playback_control(handler, payload):
             "message": "unsupported playback action",
             "core": PLAYBACK_CORE.snapshot(),
         }, 400
+    if (target_kind != "mpd" and action in ("play", "resume", "next", "previous")
+            and netease_song_id(PLAYBACK_CORE.state.current_track_id)):
+        return {"ok": False, "message": "网易云歌曲仅支持 NAS 本机播放"}, 409
     if action == "repeat" and "repeat" in payload:
         if payload.get("repeat") not in ("off", "all", "one"):
             return {
@@ -2948,7 +3037,9 @@ def playback_control(handler, payload):
         }, 404
     if action == "load":
         item_id = normalize_track_id(payload.get("track_id"))
-        item = find_library_item(handler.server.config, item_id) if item_id else None
+        if netease_song_id(item_id) and target_kind != "mpd":
+            return {"ok": False, "message": "网易云歌曲仅支持 NAS 本机播放"}, 409
+        item = find_playback_item(handler.server.config, item_id) if item_id else None
         if not item:
             return {
                 "ok": False,
@@ -2988,18 +3079,18 @@ def playback_control(handler, payload):
                 context={
                     "handler": handler,
                     "config": handler.server.config,
-                    "resolve_track": lambda track_id: find_library_item(handler.server.config, track_id),
+                    "resolve_track": lambda track_id: find_playback_item(handler.server.config, track_id),
                 },
             )
         )
         track_id = result.get("state", {}).get("current")
-        item = find_library_item(handler.server.config, track_id) if track_id else None
+        item = find_playback_item(handler.server.config, track_id) if track_id else None
         if not item:
             return {"ok": False, "kind": target_kind, "message": "no next track", "core": PLAYBACK_CORE.snapshot()}, 404
         revision = save_current_playback_session(handler.server.config)
         if revision is None:
             return playback_persistence_failure(target_kind)
-        if METADATA_SERVICE:
+        if METADATA_SERVICE and not netease_song_id(item["id"]):
             METADATA_SERVICE.prioritize_track(item["id"])
         if target_kind == "browser":
             return {"ok": True, "kind": target_kind, "track_id": item["id"], "core": PLAYBACK_CORE.snapshot(), "revision": revision}, 200
@@ -3630,6 +3721,7 @@ def main():
             and current == "STOPPED"
             and snapshot.target_kind == "mpd"
             and snapshot.playing
+            and not netease_song_id(snapshot.current_track_id)
         )
         if not managed_track_ended:
             PLAYBACK_CORE.sync_output_status(

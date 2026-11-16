@@ -97,6 +97,7 @@
        <button class="nav-item" type="button" data-view="queue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M3 11h18M3 17h10m4-2 4 3-4 3Z"/></svg> <span>当前队列</span><b id="queueCount">0</b></button>
       <div id="playlistNav"></div>
       <button class="nav-item new-playlist" id="newPlaylistBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建播放列表</span></button>
+      <button class="nav-item" id="neteaseBtn" type="button"><span>网易云音乐</span></button>
       <div class="nav-title secondary">音乐库</div>
        <button class="nav-item active" type="button" data-view="folders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z"/></svg> <span>文件夹</span></button>
        <button class="nav-item" type="button" data-view="all"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/></svg> <span>全部音乐</span><b id="allCount">0</b></button>
@@ -153,6 +154,23 @@
     </div>
   </section>
   <audio id="audio" preload="metadata"></audio>
+  <dialog id="neteaseDialog" aria-labelledby="neteaseTitle" data-dialog-initial-focus="neteaseKeyword">
+    <div class="dialog-head">
+      <h2 id="neteaseTitle">网易云音乐</h2>
+      <form method="dialog"><button class="secondary-button" type="submit">关闭</button></form>
+    </div>
+    <form id="neteaseSearch" class="netease-controls">
+      <input id="neteaseKeyword" type="search" maxlength="120" placeholder="搜索歌曲或歌手" aria-label="搜索网易云歌曲" required>
+      <button class="secondary-button" type="submit">搜索</button>
+    </form>
+    <div class="netease-controls">
+      <select id="neteasePlaylists" aria-label="网易云账号歌单"><option value="">我的网易云歌单</option></select>
+      <button class="secondary-button" type="button" id="neteasePlayAll" disabled>播放列表</button>
+      <button class="secondary-button" type="button" id="neteaseOutput">选择输出</button>
+    </div>
+    <p class="dialog-help" id="neteaseStatus" role="status"></p>
+    <ol id="neteaseResults"></ol>
+  </dialog>
   <dialog id="deviceDialog" aria-labelledby="deviceDialogTitle"><div class="dialog-head"><div><h2 id="deviceDialogTitle">播放设备</h2><span class="dialog-current-target" id="deviceCurrentTarget">正在读取当前输出…</span></div><button class="icon-button dialog-close-button" id="closeDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><div class="device-search" id="deviceSearchWrap" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="deviceSearchInput" type="search" maxlength="120" placeholder="搜索设备名称" aria-label="搜索设备名称" autocomplete="off"></div><div class="device-list-wrap" id="deviceList"></div><div class="device-dialog-footer"><span id="deviceRefreshStatus">正在搜索播放设备…</span><button class="secondary-button" id="scanDevices" type="button">重新扫描</button></div></dialog>
   <dialog id="folderDialog" aria-labelledby="folderDialogTitle">
     <div class="settings-shell">

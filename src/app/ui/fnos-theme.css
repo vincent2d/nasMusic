@@ -2189,3 +2189,39 @@ html, body {
     grid-row: 2 !important;
   }
 }
+#neteaseDialog {
+  width: min(38rem, calc(100vw - 2rem));
+  max-height: min(78vh, 42rem);
+}
+
+.netease-controls {
+  display: flex;
+  gap: .5rem;
+  padding: .5rem 1rem;
+}
+
+.netease-controls input,
+.netease-controls select {
+  min-width: 0;
+  flex: 1;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+
+#neteaseStatus {
+  margin: .5rem 1rem;
+}
+
+#neteaseResults {
+  margin: 0;
+  padding: 0 1rem 1rem;
+  list-style: none;
+}
+
+#neteaseResults button {
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+  white-space: normal;
+}

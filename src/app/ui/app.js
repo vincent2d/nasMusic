@@ -1290,6 +1290,7 @@ function currentItem() { return state.queue[state.index]; }
 function isRemoteTarget() { return globalThis.fnAudioPlaybackTargetPolicy.isRemote(state.playTarget); }
 function isDacTarget(target = state.playTarget) { return globalThis.fnAudioPlaybackTargetPolicy.isDac(target); }
 function isMpdTarget(target = state.playTarget) { return globalThis.fnAudioPlaybackTargetPolicy.isMpd(target); }
+function isNeteaseTrack(id) { return String(id || "").startsWith("netease:"); }
 function writeStoredUserMedia(key, value) {
   // The server copy is authoritative, and the 4 MB read bound already tolerates
   // a missing or truncated shadow, so a quota or private-mode failure must cost
@@ -2124,6 +2125,7 @@ function updateFavoriteControls() {
   // read-only surface with no header buttons (R489).
   const node = $("favoriteCurrentBtn");
   if (!node) return;
+  node.disabled = isNeteaseTrack(item?.id);
   node.classList.toggle("active-control", active);
   node.setAttribute("aria-pressed", String(active));
   const label = active ? "取消收藏当前歌曲" : "收藏当前歌曲";
@@ -4755,6 +4757,7 @@ async function playTracks(tracks = [], currentId = "") {
   resetPlaybackProgress();
   loadCurrent();
   render();
+  return true;
 }
 async function playSelectedTracks(ids = []) {
   // Selection is a list of ids and the id -> item lookups are bounded by the
@@ -4985,6 +4988,10 @@ async function warmCurrentTrackCache(item) {
 async function loadCurrent() {
   const item = currentItem();
   if (!item) return;
+  if (isNeteaseTrack(item.id) && !isMpdTarget()) {
+    alert("网易云歌曲仅在 NAS 播放，请先选择 NAS 音频输出。");
+    return;
+  }
   const loadToken = ++state.playbackLoadToken;
   syncState();
   if (isRemoteTarget()) {
@@ -5574,6 +5581,7 @@ function rememberVisibleMetadataPrefetchKey(key, limit = 256) {
   return true;
 }
 function prefetchCurrentTrackMetadata(item = currentItem()) {
+  if (isNeteaseTrack(item?.id)) return;
   const trackId = String(item?.id || "");
   if (!trackId) return;
   if (state.metadataPrefetchTrackId === trackId) {
@@ -9452,7 +9460,7 @@ function createPlaylist(name, values = []) {
     return null;
   }
   const playlist = { id: makePlaylistId(), name: cleanName, trackIds: [] };
-  playlist.trackIds.push(...playlistTrackIds(values));
+  playlist.trackIds.push(...playlistTrackIds(values).filter(id => !isNeteaseTrack(id)));
   state.playlists.push(playlist);
   savePlaylists();
   renderPlaylistNav();
@@ -9460,7 +9468,7 @@ function createPlaylist(name, values = []) {
 }
 function addTracksToPlaylist(playlistId, values = []) {
   const playlist = state.playlists.find(x => x.id === playlistId);
-  const ids = playlistTrackIds(values);
+  const ids = playlistTrackIds(values).filter(id => !isNeteaseTrack(id));
   if (!playlist || !ids.length) return;
   ids.forEach(id => { if (!playlist.trackIds.includes(id)) playlist.trackIds.push(id); });
   savePlaylists();
@@ -10868,14 +10876,14 @@ function invalidateLibraryResponseCacheForMetadataRevision() {
 }
 function toggleFavorite(trackId) {
   const id = String(trackId);
-  if (!itemById(id)) return;
+  if (isNeteaseTrack(id) || !itemById(id)) return;
   if (isFavorite(id)) state.favorites = state.favorites.filter(x => x !== id);
   else state.favorites.unshift(id);
   saveFavorites();
   refreshFavoritePresentation();
 }
 function toggleSelectedFavorites(ids = []) {
-  const valid = (ids || []).map(String).filter(id => itemById(id));
+  const valid = (ids || []).map(String).filter(id => !isNeteaseTrack(id) && itemById(id));
   if (!valid.length) return;
   const allFavorite = valid.every(isFavorite);
   if (allFavorite) state.favorites = state.favorites.filter(id => !valid.includes(String(id)));
@@ -10974,6 +10982,93 @@ async function selectPlaybackTarget(id, name) {
   scheduleUserStateSave();
   if ($("deviceDialog").open) loadDevices().catch(() => {});
 }
+
+function bindNeteaseDialog() {
+  const dialog = $("neteaseDialog");
+  const status = $("neteaseStatus");
+  const playlists = $("neteasePlaylists");
+  const results = $("neteaseResults");
+  const playAll = $("neteasePlayAll");
+  let tracks = [];
+  let request = 0;
+  let starting = false;
+
+  async function play(id) {
+    if (starting || !tracks.length) return;
+    if (!isMpdTarget()) {
+      status.textContent = "请先在播放设备菜单选择一台 NAS 音频输出。";
+      return;
+    }
+    starting = true;
+    try {
+      cacheLibraryItems(tracks);
+      if (await playTracks(tracks, id)) dialog.close();
+    } finally {
+      starting = false;
+    }
+  }
+
+  async function showTracks(path) {
+    const revision = ++request;
+    status.textContent = "正在读取歌曲…";
+    tracks = [];
+    playAll.disabled = true;
+    results.replaceChildren();
+    try {
+      const data = await fetchJsonChecked(path, {}, "无法读取网易云歌曲");
+      if (revision !== request) return;
+      tracks = data.items || [];
+      const rows = tracks.map(item => {
+        const row = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "nav-item";
+        button.textContent = [item.title, item.artist].filter(Boolean).join(" · ");
+        button.addEventListener("click", () => play(item.id));
+        row.append(button);
+        return row;
+      });
+      results.replaceChildren(...rows);
+      playAll.disabled = !tracks.length;
+      status.textContent = tracks.length ? `${tracks.length} 首 · NAS 本机播放` : "没有找到歌曲";
+    } catch (error) {
+      if (revision === request) status.textContent = error.message;
+    }
+  }
+
+  $("neteaseBtn").addEventListener("click", async () => {
+    const revision = request;
+    setMobileNavigation(false);
+    dialog.showModal();
+    try {
+      const data = await fetchJsonChecked("api/netease/playlists", {}, "无法读取网易云歌单");
+      const selected = playlists.value;
+      playlists.replaceChildren(new Option("我的网易云歌单", ""),
+        ...data.playlists.map(playlist => new Option(playlist.name, playlist.id)));
+      playlists.value = selected;
+    } catch (error) {
+      if (revision === request) status.textContent = error.message;
+    }
+  });
+  $("neteaseSearch").addEventListener("submit", event => {
+    event.preventDefault();
+    const keyword = $("neteaseKeyword").value.trim();
+    if (!keyword) return;
+    playlists.value = "";
+    showTracks(`api/netease/search?q=${encodeURIComponent(keyword)}`);
+  });
+  playlists.addEventListener("change", () => {
+    if (playlists.value) showTracks(`api/netease/playlists/${encodeURIComponent(playlists.value)}`);
+  });
+  playAll.addEventListener("click", () => play(tracks[0]?.id));
+  $("neteaseOutput").addEventListener("click", () => {
+    dialog.close();
+    $("deviceBtn").click();
+  });
+}
+
+if ($("neteaseDialog")) bindNeteaseDialog();
+
 function cancelRemoteLoad() {
   try { state.remoteLoadController?.abort(); } catch (_) {}
   state.remoteLoadController = null;

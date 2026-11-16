@@ -20,6 +20,7 @@ from .mpd_client import (
     mpd_update_hint,
 )
 from playback_cue_position import project_cue_seek
+from netease_music import song_id as netease_song_id
 from .mpd_errors import classify_mpd_exception, mpd_error
 from .plugins import OutputPlugin
 
@@ -111,7 +112,10 @@ class MpdOutput(OutputPlugin):
     def open(self, track: TrackRef, state: PlaybackState, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         item = (context or {}).get("item") or track.item
         path = str(item.get("path") or "")
-        if not path:
+        online = bool(netease_song_id(track.track_id))
+        if online and not callable(getattr(self.service, "sync_playback_queue", None)):
+            return self._failure("网易云播放需要 NAS 本机 MPD 服务", state.target_id, "backend_unavailable")
+        if not path and not online:
             return self._failure("曲目没有本地文件路径", state.target_id, "source_missing")
         try:
             selected = self._select_target_output(state)
@@ -307,7 +311,7 @@ class MpdOutput(OutputPlugin):
                     shuffle=state.shuffle,
                 )
             except MpdError as exc:
-                if not self._is_missing_mpd_library_entry(exc):
+                if netease_song_id(item.get("id")) or not self._is_missing_mpd_library_entry(exc):
                     raise
                 uri = self._failing_entry_uri(exc, path)
                 hint = mpd_update_hint(uri) if uri else ""

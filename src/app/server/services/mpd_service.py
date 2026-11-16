@@ -45,6 +45,7 @@ from playback.mpd_errors import (
     legacy_decoder_error_summary,
 )
 from playback.alsa_output import alsa_devices, find_ffmpeg, probe_alsa_hw_params
+from netease_music import stream_uri as netease_stream_uri
 from transcode import transcode_to_audio
 from .process_supervisor import ProcessSupervisor
 
@@ -840,6 +841,10 @@ class MpdService:
             except Exception:
                 break
             track_id = str(getattr(track, "track_id", "") or "")
+            online_uri = netease_stream_uri(track_id, self.config.get("server_port"))
+            if online_uri:
+                entries.append({"track_id": track_id, "uri": online_uri, "cue_track": False})
+                continue
             item = dict(getattr(track, "item", {}) or {})
             if callable(resolver):
                 try:
