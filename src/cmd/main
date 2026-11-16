@@ -1,0 +1,318 @@
+#!/bin/bash
+
+umask 077
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+install -d -m 700 "${TRIM_PKGETC}" "${TRIM_PKGVAR}"
+touch "${LOG_FILE}"
+chmod 600 "${LOG_FILE}" "${TRIM_PKGETC}/config.json" 2>/dev/null || true
+PYTHON_BIN="/var/apps/python312/target/bin/python3"
+if [ -f "${TRIM_APPDEST}/target/server/server.py" ]; then
+  APP_ROOT="${TRIM_APPDEST}/target/server"
+elif [ -f "${TRIM_APPDEST}/server/server.py" ]; then
+  APP_ROOT="${TRIM_APPDEST}/server"
+else
+  APP_ROOT="${TRIM_APPDEST}/target/server"
+fi
+SERVER_PORT="53199"
+if [ -f "${TRIM_PKGETC}/config.json" ]; then
+  configured_port="$(sed -n 's/.*"server_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${TRIM_PKGETC}/config.json" | head -n 1)"
+  case "${configured_port}" in
+    ''|*[!0-9]*) ;;
+    *) SERVER_PORT="${configured_port}" ;;
+  esac
+fi
+# A damaged config must not make the service try to bind a privileged or
+# otherwise invalid port. Keep the persisted value and the actual bind target
+# identical by normalizing before any probe or launch.
+case "${SERVER_PORT}" in
+  ''|*[!0-9]*) SERVER_PORT="53199" ;;
+  ???????*) SERVER_PORT="53199" ;;
+  *)
+    if [ "${SERVER_PORT}" -lt 1024 ] || [ "${SERVER_PORT}" -gt 65535 ]; then
+      SERVER_PORT="53199"
+    fi
+    ;;
+esac
+UI_ROOT="${TRIM_APPDEST}/target/ui"
+if [ ! -d "${UI_ROOT}" ] && [ -d "${TRIM_APPDEST}/ui" ]; then
+  UI_ROOT="${TRIM_APPDEST}/ui"
+fi
+if ! mkdir -p "${UI_ROOT}"; then
+  echo "Unable to create UI runtime directory: ${UI_ROOT}" >&2
+  exit 1
+fi
+# fnAudio is exposed through the fnOS CGI entry. manifest.service_port is
+# package metadata only; the configured backend port is validated below.
+
+log_msg() {
+  mkdir -p "${TRIM_PKGVAR}"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+valid_pid() {
+  candidate="$1"
+  case "${candidate}" in
+    ''|*[!0-9]*|0|0*|1|"$$") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+check_process() {
+  valid_pid "$1" || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+is_fnaudio_server_pid() {
+  candidate="$1"
+  valid_pid "${candidate}" || return 1
+  [ -r "/proc/${candidate}/cmdline" ] || return 1
+  cmdline="$(tr '\000' ' ' < "/proc/${candidate}/cmdline" 2>/dev/null)"
+  case "${cmdline}" in
+    *"${APP_ROOT}/server.py"*"--port"*|*"/var/apps/fnaudio/"*"server.py"*"--port"*|*"/usr/local/apps/@appcenter/fnaudio/"*"server.py"*"--port"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_fnaudio_mpd_pid() {
+  candidate="$1"
+  valid_pid "${candidate}" || return 1
+  [ -r "/proc/${candidate}/cmdline" ] || return 1
+  cmdline="$(tr '\000' ' ' < "/proc/${candidate}/cmdline" 2>/dev/null)"
+  case "${cmdline}" in
+    *mpd*"${TRIM_APPDEST}/share/mpd/mpd.conf"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_pid() {
+  candidate="$1"
+  wait_seconds="${2:-10}"
+  valid_pid "${candidate}" || return 0
+  if check_process "${candidate}"; then
+    kill -TERM "${candidate}" 2>/dev/null || true
+    for i in $(seq 1 "${wait_seconds}"); do
+      check_process "${candidate}" || break
+      sleep 1
+    done
+    check_process "${candidate}" && kill -KILL "${candidate}" 2>/dev/null || true
+  fi
+}
+
+cleanup_stale_servers() {
+  keep_pid="${1:-}"
+  for proc in /proc/[0-9]*; do
+    [ -r "${proc}/cmdline" ] || continue
+    candidate="${proc##*/}"
+    [ "${candidate}" = "${keep_pid}" ] && continue
+    cmdline="$(tr '\000' ' ' < "${proc}/cmdline" 2>/dev/null)"
+    case "${cmdline}" in
+      *"@appcenter/fnaudio/"*"server.py"*"--port"*|*"/var/apps/fnaudio/"*"server.py"*"--port"*|*"${APP_ROOT}/server.py"*"--port"*)
+        log_msg "Stopping stale fnAudio server PID ${candidate}"
+        stop_pid "${candidate}" 10
+        ;;
+    esac
+  done
+}
+
+configured_port_available() {
+  "${PYTHON_BIN}" - "${SERVER_PORT}" <<'PY'
+import socket
+import sys
+
+port = max(1024, min(65535, int(sys.argv[1])))
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", port))
+PY
+}
+
+wait_for_configured_port() {
+  local attempts=0
+  while [ "${attempts}" -lt 20 ]; do
+    configured_port_available && return 0
+    # During fnOS upgrades the old server can remain in shutdown briefly after
+    # its PID has been terminated. Keep cleaning only fnAudio-owned processes
+    # while waiting, so the App Center callback does not report a false failure.
+    cleanup_stale_servers ""
+    attempts=$((attempts + 1))
+    sleep 0.5
+  done
+  return 1
+}
+
+persist_backend_port() {
+  export FNAUDIO_SERVER_PORT="${SERVER_PORT}"
+  if ! "${PYTHON_BIN}" - "${TRIM_PKGETC}/config.json" <<'PY'
+import json, os, stat, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh: payload = json.load(fh)
+except Exception: payload = {}
+if not isinstance(payload, dict): payload = {}
+payload["server_port"] = int(os.environ["FNAUDIO_SERVER_PORT"])
+mode = stat.S_IMODE(os.stat(path).st_mode) if os.path.exists(path) else 0o600
+fd, temporary = tempfile.mkstemp(prefix=".config.json.", dir=os.path.dirname(path) or ".")
+try:
+    os.fchmod(fd, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temporary, path)
+except Exception:
+    try: os.unlink(temporary)
+    except OSError: pass
+    raise
+PY
+  then
+    return 1
+  fi
+  if ! chmod 600 "${TRIM_PKGETC}/config.json"; then return 1; fi
+  service_port_tmp="${UI_ROOT}/service_port.json.tmp.$$"
+  if ! printf '{"server_port":%s}\n' "${SERVER_PORT}" > "${service_port_tmp}" \
+      || ! mv -f -- "${service_port_tmp}" "${UI_ROOT}/service_port.json"; then
+    rm -f -- "${service_port_tmp}"
+    return 1
+  fi
+  chmod 644 "${UI_ROOT}/service_port.json"
+}
+
+port_ready() {
+  "${PYTHON_BIN}" - "$1" <<'PY' >/dev/null 2>&1
+import socket, sys
+port = int(sys.argv[1])
+with socket.create_connection(("127.0.0.1", port), timeout=1):
+    pass
+PY
+}
+
+status() {
+  if [ -f "${PID_FILE}" ]; then
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if check_process "${pid}" && is_fnaudio_server_pid "${pid}"; then return 0; fi
+    rm -f "${PID_FILE}"
+  fi
+  return 1
+}
+
+start_process() (
+  # fnOS may issue overlapping start callbacks during install/upgrade. Serialize
+  # the check-and-bind sequence so two callbacks cannot both pass the port probe.
+  start_lock_dir="${TRIM_PKGVAR}/start.lock"
+  lock_acquired=0
+  for i in $(seq 1 40); do
+    if mkdir "${start_lock_dir}" 2>/dev/null; then
+      lock_acquired=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [ "${lock_acquired}" -ne 1 ]; then
+    log_msg "Unable to acquire fnAudio start lock"
+    exit 1
+  fi
+  trap 'rmdir -- "${start_lock_dir}" 2>/dev/null || true' EXIT
+
+  mkdir -p "${TRIM_PKGETC}" "${TRIM_PKGVAR}"
+  active_pid=""
+  if [ -f "${PID_FILE}" ]; then
+    active_pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    check_process "${active_pid}" || active_pid=""
+  fi
+  # Older packages stored their PID and config under the application tree.
+  # Upgrading could therefore leave the old server listening on its previous
+  # port. Keep the currently supervised process, but remove every other
+  # fnAudio server before deciding whether a new one is needed.
+  cleanup_stale_servers "${active_pid}"
+  if status; then return 0; fi
+  if [ ! -x "${PYTHON_BIN}" ]; then
+    log_msg "Python runtime not found: ${PYTHON_BIN}"
+    return 1
+  fi
+  if [ ! -f "${APP_ROOT}/server.py" ]; then
+    log_msg "Application server not found: ${APP_ROOT}/server.py"
+    return 1
+  fi
+  wait_for_configured_port || {
+    log_msg "Configured TCP port ${SERVER_PORT} is already in use; change it in App Center settings"
+    return 1
+  }
+  if ! persist_backend_port; then
+    log_msg "Unable to persist configured backend port ${SERVER_PORT}"
+    return 1
+  fi
+  cmd=(env "TRIM_API_TOKEN=${TRIM_API_TOKEN:-}" "${PYTHON_BIN}" "${APP_ROOT}/server.py"
+    --host 0.0.0.0 --port "${SERVER_PORT}" --config "${TRIM_PKGETC}/config.json")
+  if [ -n "${TRIM_API_TOKEN:-}" ]; then
+    log_msg "Starting fnAudio with fnOS API token available"
+  else
+    log_msg "Starting fnAudio without fnOS API token"
+  fi
+  nohup "${cmd[@]}" >> "${LOG_FILE}" 2>&1 &
+  printf "%s" "$!" > "${PID_FILE}"
+  chmod 600 "${PID_FILE}" 2>/dev/null || true
+  # 60 x 0.5 s.  The server binds its port before it starts the audio backend
+  # (see server.py), so the normal case answers in well under a second; the
+  # wider window only covers a slow first start on a loaded box.  It used to be
+  # 6 s, which a cold MPD start against a powered-off USB DAC could exceed all
+  # by itself - the app then looked like it refused to start.
+  for i in $(seq 1 60); do
+    port_ready "${SERVER_PORT}" && return 0
+    if ! check_process "$!"; then
+      log_msg "fnAudio server exited during startup; see log above"
+      rm -f "${PID_FILE}"
+      return 1
+    fi
+    sleep 0.5
+  done
+  log_msg "fnAudio server process started but TCP port ${SERVER_PORT} is not ready yet"
+  stop_pid "$!" 5
+  rm -f "${PID_FILE}"
+  return 1
+)
+
+stop_process() {
+  # Stop the supervisor first. Otherwise it can immediately restart MPD while
+  # this script is trying to terminate the existing child process.
+  if [ -f "${PID_FILE}" ]; then
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if is_fnaudio_server_pid "${pid}"; then
+      stop_pid "${pid}" 10
+    fi
+    rm -f "${PID_FILE}"
+  fi
+
+  # PID files moved from the legacy application directory to @appdata. Sweep
+  # matching server command lines as a migration-safe fallback so an upgrade
+  # cannot leave two playback supervisors running at once.
+  cleanup_stale_servers ""
+
+  mpd_pid_file="${TRIM_APPDEST}/share/mpd/mpd.pid"
+  if [ -f "${mpd_pid_file}" ]; then
+    mpd_pid="$(head -n 1 "${mpd_pid_file}" | tr -d '[:space:]')"
+    if is_fnaudio_mpd_pid "${mpd_pid}"; then
+      stop_pid "${mpd_pid}" 5
+    fi
+  fi
+
+  # A stale PID file must not leave a private MPD process playing after the
+  # application is stopped. The pattern is specific to fnAudio's MPD config,
+  # so system MPD instances are never touched.
+  for proc in /proc/[0-9]*; do
+    [ -r "${proc}/cmdline" ] || continue
+    cmdline="$(tr '\000' ' ' < "${proc}/cmdline" 2>/dev/null)"
+    case "${cmdline}" in
+      *"mpd"*"fnaudio"*"mpd.conf"*) stop_pid "${proc##*/}" 5 ;;
+    esac
+  done
+  rm -f "${mpd_pid_file}" 2>/dev/null || true
+}
+
+case "$1" in
+  start) start_process ;;
+  stop) stop_process ;;
+  status) status && exit 0 || exit 3 ;;
+  *) exit 1 ;;
+esac

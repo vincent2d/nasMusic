@@ -1,0 +1,184 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+
+const index = fs.readFileSync("app/ui/index.html", "utf8");
+const css = fs.readFileSync("app/ui/app.css", "utf8");
+const themeCss = fs.readFileSync("app/ui/fnos-theme.css", "utf8");
+const app = fs.readFileSync("app/ui/app.js", "utf8");
+
+const sidebarStart = index.indexOf('<aside class="sidebar">');
+const mainStart = index.indexOf('<main class="shell">');
+assert.ok(mainStart >= 0 && sidebarStart > mainStart);
+const sidebarMarkup = index.slice(sidebarStart, index.indexOf("</aside>", sidebarStart));
+
+assert.match(sidebarMarkup, /id="searchInput"/);
+assert.doesNotMatch(sidebarMarkup, /id="mobileBackBtn"/);
+assert.doesNotMatch(sidebarMarkup, /class="mobile-menu-tools"/);
+assert.match(index, /class="mobile-library-search"[\s\S]*?id="mobileSearchInput"[\s\S]*?type="search"/);
+assert.match(index, /id="searchClearBtn"/);
+assert.match(index, /id="mobileSearchClearBtn"/);
+assert.match(app, /function updateSearchClearButtons\(\)/);
+assert.match(app, /searchClearBtn.*addEventListener\("click"/s);
+assert.match(themeCss, /\.library-search,[\s\S]*?border-radius:\s*6px\s*!important;/);
+assert.match(themeCss, /\.search-clear\s*\{[^}]*display:\s*none\s*!important;/);
+assert.match(index, /interactive-widget=overlays-content/);
+const sidebarScrollStart = sidebarMarkup.indexOf('<div class="sidebar-scroll">');
+const sidebarSettingsStart = sidebarMarkup.indexOf('<div class="sidebar-settings">');
+const sidebarSettingsEnd = sidebarMarkup.indexOf('</div>', sidebarSettingsStart);
+assert.ok(sidebarScrollStart >= 0 && sidebarSettingsStart > sidebarScrollStart, "library navigation needs its own scroll container");
+assert.ok(sidebarSettingsEnd > sidebarSettingsStart && sidebarMarkup.indexOf('id="mobileSettingsNavBtn"') > sidebarSettingsStart, "settings must live in the fixed sidebar footer, outside the scrolling navigation");
+// R463: settings is the everyday entry, logout is the last action, so the two
+// swap places in the footer.  Logout also has to read as destructive: it is the
+// only entry painted in the theme's danger colour, including on hover.
+assert.ok(sidebarMarkup.indexOf('id="mobileSettingsNavBtn"') < sidebarMarkup.indexOf('id="mobileLogoutBtn"'), "settings must come before logout in the sidebar footer");
+assert.match(css, /\.nav-item\.mobile-logout-nav-item[^{]*\{[^}]*color:var\(--ui-danger\)/, "logout must use the theme danger colour");
+assert.match(css, /\.nav-item\.mobile-logout-nav-item svg\{[^}]*stroke:currentColor/, "the logout icon must follow the label colour");
+assert.ok(sidebarMarkup.indexOf('id="newPlaylistBtn"') < sidebarSettingsStart, "playlists remain inside the scrolling library navigation");
+assert.doesNotMatch(sidebarMarkup, /sidebar-footer|本地音乐库/, "the retired local-library status row must not remain below settings");
+assert.match(index, /<style id="critical-icon-sizing">[\s\S]*?\.nav-item>svg\{width:18px;height:18px;flex:0 0 18px\}[\s\S]*?\.group-icon>svg\{width:24px;height:24px;flex:0 0 24px\}[\s\S]*?<\/style>/, "first-paint library icons need fixed dimensions before external stylesheets finish loading");
+assert.match(app, /folders: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">/, "dynamically rendered library category icons must carry intrinsic dimensions");
+assert.doesNotMatch(index, /class="mobile-library-tabs"/);
+assert.doesNotMatch(app, /function handleMobileBack\(\)/);
+assert.doesNotMatch(app, /\$\("mobileBackBtn"\)/);
+assert.doesNotMatch(app, /querySelector\("\.mobile-library-tabs"\)/);
+assert.match(app, /const mobileSearchInput = \$\("mobileSearchInput"\)/);
+assert.match(app, /function configureMobileKeyboardOverlay\(\)/);
+assert.match(app, /navigator\.virtualKeyboard/);
+assert.match(app, /virtualKeyboard\.overlaysContent = true/);
+assert.match(app, /function setMobileSearchFocusState\(active\)/);
+assert.match(app, /document\.body\.classList\.toggle\("mobile-search-active", enabled\)/);
+assert.match(app, /function updateNowMarquee\(\)\s*\{\s*if \(document\.body\.classList\.contains\("mobile-search-active"\)\) return;/);
+assert.match(app, /const nodes = \["nowTitle", "nowArtist"\]\.map\(id => \$\(id\)\)[\s\S]*?const distances = nodes\.map\([\s\S]*?distances\.forEach\(/, "Marquee must batch both layout reads before any style write");
+assert.match(app, /setStyleVarIfChanged\(node, "--marquee-distance", value\)/, "An unchanged marquee distance must not touch style during the renderer poll");
+assert.match(app, /function setStyleVarIfChanged\(node, name, value\) \{\s*if \(!node \|\| !node\.style\) return;/, "Style-variable writes need the same missing-node guard as text writes");
+assert.match(app, /function updateMobilePagerVisibility\(\)\s*\{\s*if \(document\.body\.classList\.contains\("mobile-search-active"\)\) return;/);
+assert.match(app, /mobileSearchInput\.addEventListener\("focus", \(\) => setMobileSearchFocusState\(true\)\)/);
+assert.match(app, /mobileSearchInput\.addEventListener\("blur", \(\) => setMobileSearchFocusState\(false\)\)/);
+assert.doesNotMatch(app, /window\.addEventListener\("resize", setMobileSearchFocusState/);
+assert.doesNotMatch(app, /actionButton\("显示歌词", "lyrics"\)/);
+assert.match(index, /id="deleteTrackDialog" class="native-delete-dialog"/);
+assert.match(index, /id="moveTrackToTrash"[^>]*>移入回收站<\/button>/);
+assert.match(index, /id="deleteTrackPermanently"[^>]*>彻底删除<\/button>/);
+assert.match(app, /if \(pages <= 1\) return "";/);
+assert.match(app, /function updateMobilePagerVisibility\(\)/);
+
+assert.match(css, /\.content\{\s*display:flex!important;\s*flex-direction:column!important;/);
+assert.match(css, /\.library-scroll\{\s*display:flex!important;\s*flex:1 1 auto!important;/);
+assert.match(css, /\.library-scroll \.track-list\{\s*flex:1 1 auto!important;[\s\S]*?overflow-y:auto!important;/);
+// The 52px strip is the contract. `display` is not: the same media block hides
+// the pager and re-shows it through `.pager.mobile-visible` further down, so a
+// `display:block` on the sizing rule would be overridden anyway.
+assert.match(css, /\.pager\{\s*flex:0 0 52px!important;\s*min-height:52px!important;/, "the mobile pager must reserve a 52px strip");
+assert.match(css, /\.lyrics-view\{[\s\S]*?grid-template-rows:minmax\(0,1fr\)!important;/,
+  "the compact lyrics view is one row: the header row is gone with the header");
+assert.doesNotMatch(css, /\.lyrics-header/, "the compact lyrics page has no header bar");
+assert.doesNotMatch(css, /\.lyrics-close/, "the compact lyrics header no longer carries a back button");
+assert.match(css, /\.lyrics-panel\{gap:6px!important;padding:calc\(18px \+ env\(safe-area-inset-top,0px\)\) 14px 10px!important\}/,
+  "with no header the panel carries the notch inset itself");
+assert.doesNotMatch(css, /grid-template-rows:calc\(56px \+ env\(safe-area-inset-top,0px\)\)/);
+assert.match(css, /\.sidebar\{[\s\S]*?width:min\(76vw,268px\)!important;[\s\S]*?padding:8px 10px 14px!important;/);
+assert.match(css, /\.mobile-library-search\{[\s\S]*?flex:0 0 42px!important;[\s\S]*?margin:8px 10px 6px!important;[\s\S]*?border-radius:10px!important;/);
+assert.match(css, /\.mobile-library-search:focus-within\{[\s\S]*?box-shadow:0 0 0 3px var\(--ui-selected\)!important/);
+assert.doesNotMatch(css, /\.mobile-menu-back\{/);
+assert.doesNotMatch(css, /\.mobile-library-tabs\b/, "retired mobile library tabs must not remain in the base stylesheet");
+assert.match(css, /\.pager-inner\{[\s\S]*?width:100%!important;[\s\S]*?justify-content:center!important;/);
+assert.match(css, /\.pager-nav\{[\s\S]*?width:100%!important;[\s\S]*?justify-content:center!important;/);
+assert.match(css, /\.pager-page-summary\{flex:0 0 auto!important;/);
+// 手机端不再有横向标签条：左侧导航变成整页列表，每行 60px 触控高度。
+assert.ok(!css.includes(".settings-tabs") && !themeCss.includes(".settings-tabs"), "the retired horizontal settings tab strip must not remain in any stylesheet");
+assert.match(themeCss, /\.settings-nav button \{[^}]*min-height: 60px;/, "phone settings rows must stay a 60px touch target");
+assert.match(themeCss, /\.settings-shell\.is-detail \.settings-nav \{ display: none; \}/, "picking a group must replace the phone list with its pane");
+assert.match(themeCss, /\.settings-shell:not\(\.is-detail\) \.settings-foot \{ display: none; \}/, "the phone list level must not reserve a save bar");
+
+assert.match(css, /body\.mobile-search-active \.player\{[^}]*position:fixed!important;[^}]*display:grid!important;[^}]*bottom:0!important;[^}]*contain:layout paint!important;/);
+assert.doesNotMatch(css, /body\.mobile-search-active \.player\{[^}]*position:absolute!important;/);
+assert.doesNotMatch(css, /body\.mobile-search-active \.player\{[^}]*display:none!important/);
+assert.doesNotMatch(css, /body\.mobile-search-active \.content\{height:calc\(100dvh - 60px\)!important/);
+assert.match(css, /body\.mobile-search-active \.now-playing \.is-overflowing\{animation-play-state:paused!important;/);
+assert.match(css, /\.pager\.mobile-visible\{display:block!important\}/);
+// Guard the rule that actually renders: the 136px three-row footer is the one
+// that wins inside the 760px block, so pinning the retired 144px variant would
+// have protected nothing.
+assert.match(css, /\.player\{grid-template-columns:1fr!important;grid-template-rows:44px 24px 50px!important;height:136px!important/, "the mobile footer must stay a fixed 136px three-row grid");
+assert.match(css, /\.player-actions\{display:none!important\}/, "the base mobile stylesheet must not restore the footer action row");
+const finalMobileContract = css.slice(css.lastIndexOf("/* Mobile navigation owns settings"));
+assert.match(css, /\.player-actions\{display:none!important\}/, "the mobile stylesheet must hide the footer action row");
+assert.match(css, /\.transport\{[^}]*width:100%!important;[^}]*min-width:0!important;[^}]*margin:0 auto!important;[^}]*justify-content:center!important;[^}]*padding:0!important\}/, "the mobile transport group must be centered against the full footer width");
+assert.match(css, /\.progress\{[^}]*box-sizing:border-box!important;[^}]*width:100%!important;[^}]*max-width:100%!important;[^}]*min-width:0!important;[^}]*overflow:hidden!important;/, "the mobile seek container must stay inside the viewport");
+assert.ok(css.includes('.progress input{box-sizing:border-box!important;display:block!important;width:100%!important;max-width:100%!important;min-width:0!important}'), "the mobile seek input must not widen its grid track");
+assert.match(finalMobileContract, /\.topbar\{height:56px!important;grid-template-rows:56px!important\}/, "the final mobile header must occupy only one visible row");
+assert.doesNotMatch(index, /class="top-actions"/, "the header must not carry the retired top-action row");
+assert.doesNotMatch(finalMobileContract, /\.top-actions/, "the mobile contract must not re-declare the retired top-action row");
+assert.match(css, /#favoriteCurrentBtn:not\(\.active-control\):hover/);
+assert.match(css, /#shuffleBtn:not\(\.active-control\):hover/);
+assert.match(css, /@media \(hover:none\)/, "Touch devices must not retain a false active-looking hover state");
+
+const finalThemeMobileContract = themeCss.slice(themeCss.lastIndexOf("/* The compact mobile header"));
+assert.doesNotMatch(themeCss, /\.top-actions/, "the retired top-action row must not be re-declared at any breakpoint");
+assert.match(themeCss, /\.sidebar-scroll\s*\{[^}]*flex:\s*1 1 auto\s*!important;[^}]*overflow-y:\s*auto\s*!important;/, "only library navigation should scroll");
+assert.match(themeCss, /\.sidebar-settings\s*\{[^}]*flex:\s*0 0 auto\s*!important;[^}]*border-top:/, "settings must remain in a fixed sidebar row");
+assert.match(themeCss, /\.sidebar\s*\{[^}]*overflow:\s*hidden\s*!important;/, "the sidebar itself must not scroll settings away");
+assert.match(themeCss, /:root\s*\{[^}]*--ui-sidebar-width:\s*188px\s*;/, "desktop sidebar width must use the compact FNOS layout token");
+assert.match(themeCss, /\.sidebar\s*\{[^}]*width:\s*min\(72vw,\s*260px\)\s*!important;/, "mobile drawer width must stay compact");
+assert.match(themeCss, /\.sidebar\s*\{[^}]*padding-right:\s*0\s*!important;/, "sidebar scrollbar must reach the outer right edge");
+assert.match(themeCss, /\.sidebar-scroll\s*\{[^}]*scrollbar-gutter:\s*stable\s*!important;/, "scrolling navigation must reserve its scrollbar at the edge");
+assert.match(themeCss, /\.sidebar-scroll\s*\{[^}]*scrollbar-width:\s*thin\s*!important;/, "sidebar scrollbar must use a narrow track");
+assert.match(themeCss, /\.sidebar-settings\s*\{[^}]*height:\s*44px\s*!important;[^}]*min-height:\s*44px\s*!important;[^}]*padding-block:\s*2px\s*!important;[^}]*box-sizing:\s*border-box\s*!important;/, "desktop settings row must match the 44px pager height");
+assert.match(themeCss, /#pager:empty\s*\{\s*display:\s*none\s*!important;/, "an empty pager must not reserve a blank strip beside sidebar settings");
+assert.match(finalThemeMobileContract, /:root\s*\{\s*--ui-header-height:\s*56px\s*;/, "the compact mobile header must update the body grid row as well as its visible height");
+assert.doesNotMatch(finalThemeMobileContract, /\.top-actions/, "the compact mobile contract must not re-declare the retired top-action row");
+assert.match(finalThemeMobileContract, /\.mobile-pagebar\s*\{[\s\S]*?display:\s*flex\s*!important;[\s\S]*?justify-content:\s*flex-start\s*!important;/, "the compact mobile navigation must preserve the original left-aligned layout");
+assert.match(themeCss, /html\.fnaudio-android-client \.mobile-pagebar\s*\{[\s\S]*?display:\s*flex\s*!important;[\s\S]*?justify-content:\s*flex-start\s*!important;[\s\S]*?text-align:\s*left\s*!important;/, "Android WebView must keep the header content left-aligned even when it reports a wide CSS viewport");
+assert.doesNotMatch(themeCss, /html\.fnaudio-android-client \.top-actions/, "Android WebView must not carry a desktop action row");
+assert.match(finalThemeMobileContract, /\.transport\s*\{[\s\S]*?width:\s*max-content\s*!important;[\s\S]*?margin-inline:\s*auto\s*!important;[\s\S]*?justify-self:\s*center\s*!important;/, "the loaded FNOS theme must keep transport controls centered");
+assert.match(themeCss, /\.progress input,[\s\S]*?#seek\s*\{[\s\S]*?flex:\s*1 1 0\s*!important;[\s\S]*?width:\s*auto\s*!important;[\s\S]*?min-width:\s*0\s*!important;/, "the loaded FNOS theme must let the seek range absorb remaining width without overflow");
+// The rail that actually paints is the .player .progress copy, not the base one;
+// guard the one on screen (R484).
+assert.match(themeCss, /\.player \.progress input::-webkit-slider-runnable-track\s*\{[\s\S]*?height:\s*4px\s*!important;[\s\S]*?background:\s*linear-gradient\(/, "the seek rail must use the thin blue and gray visual style");
+assert.match(themeCss, /\.player \.progress input::-webkit-slider-thumb\s*\{[\s\S]*?width:\s*10px\s*!important;[\s\S]*?height:\s*10px\s*!important;[\s\S]*?background:\s*var\(--ui-surface\)\s*!important;/, "the seek rail must use a handle that clears the 4px band on both sides");
+assert.match(themeCss, /\.now-meta #nowTime\s*\{[^}]*display:\s*block\s*!important;/, "the elapsed and total time must appear under the song information");
+assert.match(themeCss, /\.player \.progress #elapsed,\s*\.player \.progress #duration\s*\{[^}]*display:\s*none\s*!important;/, "the time labels must not occupy either end of the progress rail");
+assert.match(themeCss, /\.player \.progress #transportStateUnknown\s*\{[^}]*display:\s*none\s*!important;/, "unknown transport state must remain hidden");
+assert.match(themeCss, /\.player \.progress\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*!important;/, "progress must use one full-width track without time columns");
+
+// R460: the mobile library column must fill the body grid row (header / content /
+// player) instead of the whole viewport.  A viewport-minus-header height is taller
+// than that row by exactly the player height, so the pagination strip overflows into
+// the player's row, gets painted over, and cannot be tapped -- the 0.2.125 Android
+// regression this guard exists to prevent.
+assert.doesNotMatch(css, /height:calc\(100dvh - 56px\)!important/, "the mobile library column must not be sized as viewport minus header");
+assert.doesNotMatch(themeCss, /height:\s*calc\(100dvh - 56px\)\s*!important/, "the FNOS theme must not size the library column as viewport minus header");
+assert.match(themeCss, /\.shell,\s*\.content\s*\{\s*height:\s*100%\s*!important;\s*\}/, "the mobile library column must fill the body grid row so the player keeps its own row");
+assert.match(themeCss, /html\.fnaudio-android-client \.shell,\s*\n?html\.fnaudio-android-client \.content\s*\{\s*\n?\s*height:\s*100%\s*!important;/, "the Android client must inherit the same row-filling height");
+assert.match(finalMobileContract, /\.shell,\.content\{height:100%!important\}/, "the base mobile stylesheet must fill the grid row instead of the viewport");
+
+// R467: the app renders its own clear button (#mobileSearchClearBtn). The WebKit
+// cancel button used to be only dimmed, so typing produced two ✕ for one action.
+assert.match(css, /\.mobile-library-search input::-webkit-search-cancel-button\{display:none!important\}/,
+  "the native search cancel button must stay hidden next to #mobileSearchClearBtn");
+
+// R483: 设置改成「左侧导航 + 固定底部保存栏」。框架宽度钉在 880，高度钉在 680，
+// 只有当前 pane 滚动；因此切换分组不会再让窗口跳动。
+assert.doesNotMatch(themeCss, /width: min\(760px/, "the settings dialog must not keep the cramped 760px frame");
+assert.match(themeCss, /#folderDialog \{\s*width: min\(880px, calc\(100vw - 48px\)\) !important;/,
+  "the settings dialog must use the 880px desktop frame");
+assert.match(themeCss, /#folderDialog\[open\] \{[^}]*height: min\(680px, calc\(100dvh - 48px\)\) !important;/,
+  "the desktop settings dialog must pin its height instead of following the active pane");
+assert.match(themeCss, /\.settings-pane\[hidden\] \{ display: none !important; \}/,
+  "inactive panes need an explicit guard against the pane sizing rule");
+assert.match(themeCss, /\.settings-shell \{\s*display: grid;\s*grid-template-rows: 56px minmax\(0, 1fr\) auto;/,
+  "header, body and save bar must be the three rows that make the bar permanent");
+assert.match(themeCss, /\.settings-body \{ display: grid; grid-template-columns: 208px minmax\(0, 1fr\); min-height: 0; \}/,
+  "the rail must keep a fixed 208px column so the panes do not reflow");
+assert.match(themeCss, /\.settings-pane > \.settings-group \{ max-width: 560px; \}/,
+  "settings copy must keep a readable measure inside the wide frame");
+assert.doesNotMatch(themeCss, /settings-pane-actions/, "the per-pane action bars must be gone");
+
+// The dark header's sort arrow is the only cue for which column is sorted; the
+// accent alone reaches just 3.24:1 on the dark header surface.
+assert.match(themeCss, /:root\[data-theme="dark"\] \.track-sort-indicator \{ filter: brightness\(1\.6\); \}/,
+  "the dark sort indicator must be brightened above the non-text contrast floor");
+assert.match(themeCss, /@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme="light"\]\) \.track-sort-indicator \{ filter: brightness\(1\.6\); \}/,
+  "the system-dark variant must brighten the sort indicator too");
+
+console.log("Mobile layout regression checks passed.");

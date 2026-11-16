@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Serve the real fnAudio UI against deterministic browser-E2E API fixtures."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import urllib.parse
+
+
+TRACKS = [
+    {
+        "id": "fixture-1",
+        "title": "晨光",
+        "artist": "测试歌手",
+        "album": "离线专辑",
+        "track_no": 1,
+        "duration": 185,
+        "format": "flac",
+        "mime": "audio/flac",
+        "is_dsd": False,
+        "modified": 1,
+        "cover_url": "",
+        "url": "media/fixture-1",
+    },
+    {
+        "id": "fixture-2",
+        "title": "DSD Reference",
+        "artist": "Lab Artist",
+        "album": "Native DSD",
+        "track_no": 2,
+        "duration": 242,
+        "format": "dsf",
+        "mime": "audio/x-dsf",
+        "is_dsd": True,
+        "modified": 2,
+        "cover_url": "",
+        "url": "media/fixture-2",
+    },
+    {
+        "id": "fixture-3",
+        "title": "No Artwork",
+        "artist": "",
+        "album": "",
+        "track_no": 3,
+        "duration": 98,
+        "format": "mp3",
+        "mime": "audio/mpeg",
+        "is_dsd": False,
+        "modified": 3,
+        "cover_url": "",
+        "url": "media/fixture-3",
+    },
+    {
+        "id": "fixture-4",
+        "title": "Already Covered",
+        "artist": "Lab Artist",
+        "album": "Native DSD",
+        "track_no": 4,
+        "duration": 201,
+        "format": "flac",
+        "mime": "audio/flac",
+        "is_dsd": False,
+        "modified": 4,
+        "cover_url": "fixture-cover.svg",
+        "url": "media/fixture-4",
+    },
+]
+
+
+# The real metadata service generally makes an initial request enqueue work,
+# then returns a completed projection on a later poll.  Keep that lifecycle in
+# the browser fixture so the E2E suite exercises the UI's recovery and keyed
+# row patching paths rather than only the generic {ok:true} fallback.
+# The settings pane renders its provider rows and counters from these two
+# documents, so the fixture has to answer with the same shape the service does.
+METADATA_PROVIDERS = [
+    {"id": "netease", "enabled": True, "capabilities": ["search", "track", "album", "cover", "lyrics"]},
+    {"id": "kuwo", "enabled": True, "capabilities": ["search", "track", "album", "cover"]},
+    {"id": "kugou", "enabled": False, "capabilities": ["search", "track", "lyrics"]},
+    {"id": "migu", "enabled": False, "capabilities": ["search", "track", "album"]},
+    {"id": "joox", "enabled": False, "capabilities": ["search", "track"]},
+    {"id": "musicbrainz", "enabled": True, "capabilities": ["search", "track", "album"]},
+]
+
+
+def metadata_status_payload():
+    return {
+        "ok": True,
+        "running": True,
+        "enabled": True,
+        "tag_write_enabled": False,
+        "tag_write_in_progress": False,
+        "fetch_workers": 4,
+        "entities": 12,
+        "lyrics": 3,
+        "jobs": {"pending": 96, "retry": 2, "running": 4, "failed": 6, "no_match": 8},
+        "job_types": {
+            "lyrics": {"pending": 40},
+            "track": {"pending": 56},
+            "tag_write": {"pending": 18},
+        },
+        # Counts alone cannot say what failed, so the service also ships a
+        # bounded sample and a per-type breakdown; the fixture carries the same
+        # shape or the dialog would only ever be exercised with numbers (R519).
+        "issue_counts": {
+            "lyrics": {"failed": 2, "no_match": 6},
+            "track_artwork": {"failed": 0, "no_match": 2},
+            "tag_write": {"failed": 4, "no_match": 0},
+        },
+        "issue_jobs": [
+            {
+                "job_type": "tag_write", "status": "failed", "track_id": "fixture-1",
+                "title": "晨光", "artist": "测试歌手", "attempts": 3,
+                "updated_at": 1730000400, "error": "permission denied",
+            },
+            {
+                "job_type": "tag_write", "status": "failed", "track_id": "fixture-2",
+                "title": "DSD Reference", "artist": "Lab Artist", "attempts": 2,
+                "updated_at": 1730000300, "error": "provider unavailable",
+            },
+            {
+                "job_type": "lyrics", "status": "no_match", "track_id": "fixture-3",
+                "title": "No Artwork", "artist": "", "attempts": 1,
+                "updated_at": 1730000200, "error": "",
+            },
+            {
+                "job_type": "track_artwork", "status": "no_match", "track_id": "fixture-4",
+                "title": "Already Covered", "artist": "Lab Artist", "attempts": 1,
+                "updated_at": 1730000100, "error": "",
+            },
+        ],
+        "track_matches": {"auto": 21, "confirmed": 3, "review": 2},
+    }
+
+
+METADATA_FIXTURES = {
+    "fixture-1": {
+        "best": {"title": "晨光", "artist": "测试歌手", "album": "离线专辑"},
+        "image_url": "metadata/artwork/fixture-artwork-1",
+    },
+    "fixture-2": {
+        "best": {"title": "DSD Reference", "artist": "Lab Artist", "album": "Native DSD"},
+        "image_url": "metadata/artwork/fixture-artwork-2",
+    },
+    "fixture-3": {
+        "best": {"title": "No Artwork", "artist": "Provider Artist", "album": "Provider Album"},
+        "image_url": "metadata/artwork/fixture-artwork-3",
+    },
+}
+
+ARTWORK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="8" fill="#2869d8"/>'
+    '<path d="M39 12v28.5a9 9 0 1 1-4-7.5V19l17-4v23.5a9 9 0 1 1-4-7.5V12z" fill="white"/>'
+    '</svg>'
+).encode("utf-8")
+MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+MAX_QUEUE_ITEMS = 4096
+
+
+def bounded_query_int(value, default, minimum, maximum):
+    """Parse a query integer without allowing invalid fixture requests to 500."""
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        return default
+    try:
+        return max(minimum, min(maximum, int(value, 10)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def request_body_length(value, maximum=MAX_REQUEST_BODY_BYTES):
+    if value is None or value == "":
+        return 0
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        return None
+    try:
+        length = int(value, 10)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return length if length <= maximum else None
+
+
+def playback_core():
+    return {
+        "queue": [],
+        "current": "",
+        "target_id": "local",
+        "target_kind": "browser",
+        "transport": "STOPPED",
+        "playing": False,
+        "position": 0,
+        "duration": 0,
+        "repeat": "off",
+        "shuffle": False,
+        "state_version": 1,
+    }
+
+
+class FixtureHandler(BaseHTTPRequestHandler):
+    server_version = "fnAudio-E2E"
+
+    def log_message(self, _format, *_args):
+        return
+
+    def send_json(self, payload, status=200, head_only=False):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
+    def send_artwork(self, head_only=False):
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("Content-Length", str(len(ARTWORK_SVG)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(ARTWORK_SVG)
+
+    def do_HEAD(self):
+        self.handle_get(True)
+
+    def do_GET(self):
+        self.handle_get(False)
+
+    def handle_get(self, head_only=False):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        if path == "/api/access":
+            return self.send_json({"profile": "lan", "ok": True}, head_only=head_only)
+        if path == "/api/state/user":
+            return self.send_json({"ok": True, "state": {"initialized": False, "revision": 0}}, head_only=head_only)
+        if path == "/api/library":
+            search = str((query.get("search") or [""])[0]).casefold()
+            rows = [item for item in TRACKS if not search or search in " ".join(str(item.get(key) or "") for key in ("title", "artist", "album")).casefold()]
+            view = str((query.get("view") or ["all"])[0])
+            group = str((query.get("group") or [""])[0])
+            if group and view in ("albums", "artists", "composers", "genres"):
+                key = {"albums": "album", "artists": "artist", "composers": "composer", "genres": "genre"}[view]
+                rows = [item for item in rows if str(item.get(key) or "未分类") == group]
+            offset = bounded_query_int((query.get("offset") or [""])[0], 0, 0, 100000)
+            limit = bounded_query_int((query.get("limit") or [""])[0], 120, 1, 500)
+            return self.send_json({"items": rows[offset:offset + limit], "count": len(rows), "limit": limit, "offset": offset}, head_only=head_only)
+        if path == "/api/library/items":
+            wanted = {value for value in str((query.get("ids") or [""])[0]).split(",") if value}
+            return self.send_json({"items": [item for item in TRACKS if item["id"] in wanted]}, head_only=head_only)
+        if path == "/api/library/status":
+            # Mirror the server payload: the health card reads library_paths /
+            # exists / readable / supported_formats, so a fixture that omits
+            # them makes every install look like a missing directory.
+            return self.send_json({
+                "scanning": False,
+                "found": len(TRACKS),
+                "scanned": len(TRACKS),
+                "message": "音乐库已就绪",
+                "library_path": "/fixture/music",
+                "library_paths": ["/fixture/music"],
+                "exists": True,
+                "readable": True,
+                "supported_formats": ["DFF", "DSF", "FLAC", "MP3"],
+            }, head_only=head_only)
+        if path == "/api/library/groups":
+            view = str((query.get("view") or ["albums"])[0])
+            key = {"artists": "artist", "albums": "album", "genres": "genre", "composers": "composer"}.get(view, "album")
+            names = sorted({str(item.get(key) or "未分类") for item in TRACKS})
+            return self.send_json({"groups": [{"name": name, "count": sum(1 for item in TRACKS if str(item.get(key) or "未分类") == name)} for name in names], "count": len(names)}, head_only=head_only)
+        if path == "/api/library/roots":
+            return self.send_json({"roots": [{"root": "/fixture/music", "path": "/fixture/music", "name": "测试音乐"}]}, head_only=head_only)
+        if path == "/api/library/dirs":
+            # Deterministic stand-in for the server-side directory browser that
+            # clients without the fnOS host picker fall back to.  The first
+            # level mirrors the fnOS picker: user storage ("我的文件"), never the
+            # volume root that carries @appdata, docker and thumb.
+            requested = str((query.get("path") or [""])[0])
+            home = "/vol1/1000"
+            if not requested:
+                return self.send_json({
+                    "ok": True,
+                    "path": "",
+                    "parent": "",
+                    "entries": [],
+                    "roots": [{"name": "我的文件", "path": home}],
+                    "truncated": False,
+                }, head_only=head_only)
+            tree = {
+                home: ("", [("Music", home + "/Music"), ("Media", home + "/Media")]),
+                home + "/Music": (home, [("Albums", home + "/Music/Albums")]),
+                home + "/Music/Albums": (home + "/Music", []),
+            }
+            if requested not in tree:
+                return self.send_json({"ok": False, "message": "目录不存在或无法访问"}, 400, head_only=head_only)
+            parent, children = tree[requested]
+            return self.send_json({
+                "ok": True,
+                "path": requested,
+                "parent": parent,
+                "entries": [{"name": name, "path": child} for name, child in children],
+                "roots": [{"name": "我的文件", "path": home}],
+                "truncated": False,
+            }, head_only=head_only)
+        if path == "/api/library/folders":
+            return self.send_json({"folders": [], "count": 0}, head_only=head_only)
+        if path == "/api/playback/targets":
+            return self.send_json({"targets": [{"id": "local", "name": "当前设备", "kind": "browser", "online": True, "selected": True}], "current_target": "local", "current_target_name": "当前设备"}, head_only=head_only)
+        if path in ("/api/playback/core", "/api/playback/status"):
+            core = playback_core()
+            return self.send_json({"state": core, "status": core, "core": core, "kind": "browser"}, head_only=head_only)
+        if path == "/api/dlna/renderer/status":
+            return self.send_json({"available": False, "state": {}}, head_only=head_only)
+        if path == "/api/config/metadata":
+            return self.send_json({
+                "ok": True,
+                "enabled": True,
+                "tag_write_enabled": False,
+                "orphan_grace_days": 7,
+                "providers": METADATA_PROVIDERS,
+                "recommended": METADATA_PROVIDERS,
+                "status": metadata_status_payload(),
+            }, head_only=head_only)
+        if path == "/api/metadata/status":
+            return self.send_json(metadata_status_payload(), head_only=head_only)
+        if path == "/api/metadata/track":
+            track_id = str((query.get("track_id") or [""])[0])
+            fixture = METADATA_FIXTURES.get(track_id)
+            if not fixture:
+                return self.send_json({"track_id": track_id, "status": "no_match", "best": {}, "candidates": []}, head_only=head_only)
+            with self.server.metadata_lock:
+                count = self.server.metadata_track_requests.get(track_id, 0) + 1
+                self.server.metadata_track_requests[track_id] = count
+            if count == 1:
+                return self.send_json({
+                    "track_id": track_id,
+                    "status": "pending",
+                    "pending": True,
+                    "best": {},
+                    "candidates": [],
+                }, head_only=head_only)
+            result = {
+                "track_id": track_id,
+                "status": "review",
+                "pending": False,
+                "candidates": [fixture["best"]],
+                **fixture,
+            }
+            return self.send_json(result, head_only=head_only)
+        if path.startswith("/metadata/artwork/fixture-artwork-"):
+            return self.send_artwork(head_only=head_only)
+        if path == "/fixture-cover.svg":
+            return self.send_artwork(head_only=head_only)
+        if path == "/api/config/library":
+            return self.send_json({"library_paths": ["/fixture/music"], "server_port": 53199}, head_only=head_only)
+        if path == "/api/dlna/diagnostics":
+            return self.send_json({"available": True, "events": []}, head_only=head_only)
+        if path == "/api/lyrics":
+            return self.send_json({"lyrics": "[00:00.00]E2E lyric", "source": "fixture", "pending": False}, head_only=head_only)
+        if path == "/api/transcode/status":
+            return self.send_json({"ready": False, "mode": "mp3", "mime": "audio/mpeg"}, head_only=head_only)
+        if path.startswith("/api/"):
+            return self.send_json({"ok": True}, head_only=head_only)
+        return self.serve_static(path, head_only)
+
+    def do_POST(self):
+        if str(self.headers.get("Transfer-Encoding") or "").strip():
+            self.close_connection = True
+            return self.send_json({"ok": False, "error": "transfer encoding is unsupported"}, status=400)
+        length = request_body_length(self.headers.get("Content-Length"))
+        if length is None:
+            return self.send_json({"ok": False, "error": "invalid or oversized content length"}, status=400)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return self.send_json({"ok": False, "error": "invalid json"}, status=400)
+        if not isinstance(payload, dict):
+            return self.send_json({"ok": False, "error": "invalid payload"}, status=400)
+        core = playback_core()
+        if self.path.startswith("/api/playback/queue"):
+            queue = payload.get("queue")
+            if not isinstance(queue, list):
+                queue = []
+            core["queue"] = [str(item.get("id") if isinstance(item, dict) else item) for item in queue[:MAX_QUEUE_ITEMS]]
+            core["current"] = str(payload.get("current_id") or payload.get("current") or "")
+        return self.send_json({"ok": True, "core": core, "state": {"initialized": True, "revision": 1}})
+
+    def serve_static(self, path, head_only=False):
+        relative = urllib.parse.unquote(path).lstrip("/") or "index.html"
+        target = (self.server.ui_root / relative).resolve()
+        try:
+            target.relative_to(self.server.ui_root)
+        except ValueError:
+            self.send_error(403)
+            return
+        if not target.is_file():
+            self.send_error(404)
+            return
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--ui-root", default=str(Path(__file__).resolve().parents[1] / "src" / "app" / "ui"))
+    args = parser.parse_args()
+    server = ThreadingHTTPServer((args.host, args.port), FixtureHandler)
+    server.ui_root = Path(args.ui_root).resolve()
+    server.metadata_track_requests = {}
+    server.metadata_lock = threading.Lock()
+    print("http://%s:%s/" % (args.host, server.server_port), flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

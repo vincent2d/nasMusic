@@ -1,0 +1,1550 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench
+ * design-system: design.md · designed-as-app
+ * Existing app.css owns functional states and generated column geometry.
+ * This single presentation boundary supersedes its historical !important rules.
+ * Never set display on [hidden] or closed dialogs. */
+
+html, body { overflow-x: clip !important; height: 100%; min-width: 0; }
+body {
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--ui-header-height) minmax(0, 1fr) var(--ui-player-height);
+  height: 100dvh; overflow-y: hidden; background: var(--ui-canvas) !important;
+  color: var(--ui-text) !important; font: 14px/1.5 var(--ui-font);
+}
+button, input, select, textarea { font: inherit; accent-color: var(--ui-accent); }
+button { white-space: nowrap; transition: none; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[tabindex]:focus-visible, .nav-item:focus-visible {
+  outline: 2px solid var(--ui-accent) !important; outline-offset: 2px !important;
+}
+button:disabled, [aria-disabled="true"] { opacity: .48 !important; cursor: not-allowed !important; }
+button:active:not(:disabled) { filter: brightness(.94); }
+button svg, .library-search svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+input::placeholder { color: var(--ui-muted) !important; opacity: 1; }
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]), select, textarea {
+  min-width: 0; border: 1px solid var(--ui-border) !important; border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface) !important; color: var(--ui-text) !important; box-shadow: none;
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select { min-height: 36px; }
+input[type="range"] { accent-color: var(--ui-accent) !important; }
+h1, h2, h3 { color: var(--ui-text) !important; font-style: normal; overflow-wrap: anywhere; min-width: 0; }
+.topbar {
+  grid-row: 1; height: var(--ui-header-height) !important; padding: 0 var(--ui-space-6) !important;
+  background: var(--ui-surface) !important; border-bottom: 1px solid var(--ui-line) !important;
+  box-shadow: none !important; gap: var(--ui-space-6) !important;
+}
+.topbar-library { display: block !important; min-width: 0 !important; }
+.eyebrow { color: var(--ui-accent) !important; font-size: 12px !important; letter-spacing: 0 !important; font-weight: 650 !important; }
+.topbar-library-main { gap: var(--ui-space-4) !important; }
+.topbar-library-title h1 { margin: 0 !important; font-size: 24px !important; line-height: 1.3 !important; font-weight: 650; }
+.topbar-library-title p { margin: 0 !important; color: var(--ui-muted) !important; font-size: 12px !important; }
+.topbar-library-note { display: none !important; }
+.mobile-pagebar { display: none; }
+.shell { grid-row: 2; display: grid; grid-template-columns: var(--ui-sidebar-width) minmax(0, 1fr) !important; height: 100% !important; min-height: 0; background: var(--ui-canvas) !important; }
+.sidebar {
+  position: static; width: auto; height: 100% !important; min-height: 0;
+  display: flex !important; flex-direction: column !important; padding: var(--ui-space-4) var(--ui-space-3) !important;
+  background: var(--ui-sidebar) !important; border-right: 1px solid var(--ui-line) !important; transform: none; box-shadow: none; transition: none !important;
+}
+.library-search { margin: 0 0 var(--ui-space-6) !important; }
+#searchInput, #mobileSearchInput { border: 0 !important; border-radius: 0 !important; background: transparent !important; }
+.nav-title { padding: 0 var(--ui-space-3) var(--ui-space-2) !important; font-size: 12px; letter-spacing: 0 !important; color: var(--ui-muted) !important; }
+.nav-title.secondary { margin-top: var(--ui-space-6) !important; }
+.nav-item {
+  flex: 0 0 auto !important; display: flex; align-items: center; gap: var(--ui-space-3);
+  width: 100% !important; min-height: 40px !important; margin: 2px 0 !important; padding: var(--ui-space-2) var(--ui-space-3) !important;
+  border: 0; border-radius: var(--ui-radius-sm) !important; background: transparent;
+  color: var(--ui-secondary) !important; font-size: 14px !important; text-align: left;
+}
+.nav-item span { flex: 1 !important; }
+.nav-item.active { background: color-mix(in srgb, var(--ui-accent) 4%, var(--ui-surface)) !important; color: var(--ui-accent) !important; font-weight: 600 !important; }
+.nav-item b { color: var(--ui-muted) !important; font-size: 12px; font-weight: 400; }
+:root[data-theme="dark"] .nav-item.active { background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+:root[data-theme="dark"] .nav-item.active b { color: var(--ui-on-accent) !important; opacity: .86; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .nav-item.active { background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+  :root:not([data-theme="light"]) .nav-item.active b { color: var(--ui-on-accent) !important; opacity: .86; }
+}
+.new-playlist { border: 1px dashed var(--ui-border) !important; margin-top: var(--ui-space-3) !important; }
+.pulse { background: var(--ui-success) !important; box-shadow: none !important; animation: none !important; }
+.content { width: 100%; max-width: none !important; height: 100% !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important; background: var(--ui-surface) !important; overflow: hidden !important; }
+.library-scroll { min-height: 0 !important; flex: 1 1 auto !important; background: var(--ui-surface); }
+.library-scroll .table-head,
+.library-scroll .track-list {
+  width: max-content !important;
+  min-width: 100% !important;
+}
+.track-list, .track-list.group-mode { background: var(--ui-surface); box-shadow: none; }
+.table-head { min-height: 44px; padding: var(--ui-space-1) var(--ui-space-4) !important; background: var(--ui-sidebar) !important; border-bottom: 1px solid var(--ui-line) !important; color: var(--ui-secondary) !important; letter-spacing: 0; }
+.library-scroll .table-head { background: var(--ui-sidebar) !important; color: var(--ui-secondary) !important; }
+.track-header-cell, .track-head-label, .track-head-button, .album-header-cell, .table-head-more { color: var(--ui-secondary) !important; }
+/* Match the number text to the header's column edge, including after sorting. */
+.track-cell-track_no { text-align: left !important; }
+.track-sort-indicator { color: var(--ui-accent) !important; }
+/* The accent only reaches 3.24:1 on the dark header background - past the 3:1
+ * floor for a non-text graphic, but dim for the only cue that says which column
+ * is sorted. Brightening the glyph keeps the brand hue without adding a token. */
+:root[data-theme="dark"] .track-sort-indicator { filter: brightness(1.6); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .track-sort-indicator { filter: brightness(1.6); }
+}
+[data-track-column="track_no"] .track-head-button,
+[data-track-column="track_no"] .track-head-label { padding-inline: 0 !important; }
+.track { min-height: 64px !important; padding-block: var(--ui-space-2) !important; padding-inline: var(--ui-space-4) !important; background: transparent !important; border-color: var(--ui-line) !important; }
+.track-title, .track-cell, .album-group-title strong { color: var(--ui-text) !important; font-size: 14px !important; }
+.track-artist, .track-subtitle, .track-album, .track-size, .album-group-row > span, .group-info span { color: var(--ui-muted) !important; }
+.track-cover, .group-icon, .cover { background: var(--ui-hover) !important; color: var(--ui-accent) !important; border-radius: var(--ui-radius-sm) !important; box-shadow: none; }
+.track-cover span { text-shadow: none; }
+.track.is-selected, .track.is-selected:hover, .album-group-row.is-selected, .group-row.is-selected { background: var(--ui-selected) !important; box-shadow: none !important; }
+.track.is-current:not(.is-selected) .track-title { color: var(--ui-accent) !important; }
+.track.is-current:not(.is-selected) .track-cover { background: var(--ui-selected) !important; }
+.track-playing-indicator {
+  background: var(--ui-selected) !important;
+  color: var(--ui-accent) !important;
+}
+.track-playing-indicator::before {
+  background: currentColor !important;
+  box-shadow: 0 0 0 2px var(--ui-selected) !important;
+}
+.track-cell .format-badge { color: var(--ui-secondary) !important; border-color: var(--ui-border) !important; background: var(--ui-sidebar) !important; }
+.format-badge.dsd { color: var(--ui-warning) !important; border-color: var(--ui-warning) !important; background: var(--ui-warning-bg) !important; }
+.group-row, .track-list.group-mode .group-row, .album-group-row { background: var(--ui-surface) !important; border-color: var(--ui-line) !important; box-shadow: none !important; }
+.group-info strong { color: var(--ui-text) !important; }
+.group-play { color: var(--ui-accent) !important; border-color: var(--ui-border) !important; background: var(--ui-selected) !important; }
+.folder-group-row { cursor: pointer !important; grid-template-columns: 44px minmax(0, 1fr) 18px !important; }
+.folder-group-row:focus-visible { outline: 2px solid var(--ui-accent) !important; outline-offset: -2px !important; }
+.artist-all-songs-entry:focus-visible { outline: 2px solid var(--ui-accent) !important; outline-offset: 2px !important; }
+.folder-group-chevron { color: var(--ui-muted) !important; font-size: 22px !important; line-height: 1 !important; text-align: center !important; }
+.folder-group-row:hover .folder-group-chevron,
+.folder-group-row:focus-visible .folder-group-chevron { color: var(--ui-accent) !important; }
+.folder-group-chevron svg { width: 18px !important; height: 18px !important; fill: none !important; stroke: currentColor !important; stroke-width: 1.8 !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
+.folder-toolbar, .playlist-toolbar, .album-detail-hero, .artist-all-tracks-breadcrumb, .artist-all-songs-entry { background: var(--ui-sidebar) !important; color: var(--ui-secondary) !important; border-color: var(--ui-line) !important; box-shadow: none !important; }
+.album-detail-title, .artist-all-songs-title, .album-detail-meta strong { color: var(--ui-text) !important; }
+.folder-toolbar span, .album-detail-meta span, .artist-all-songs-count { color: var(--ui-muted) !important; }
+.album-detail-layout { background: var(--ui-surface) !important; }
+.album-detail-sidebar { background: var(--ui-sidebar) !important; }
+.album-detail-cover { background: var(--ui-hover) !important; color: var(--ui-accent) !important; box-shadow: none !important; }
+.album-detail-sidebar h2, .album-detail-breadcrumb strong, .artist-all-songs-copy strong, .artist-all-tracks-breadcrumb strong { color: var(--ui-text) !important; }
+.album-detail-sidebar p, .album-detail-sidebar small, .album-detail-breadcrumb, .album-detail-actions,
+.artist-all-songs-copy small, .artist-all-songs-chevron { color: var(--ui-muted) !important; }
+.album-detail-breadcrumb button, .artist-all-tracks-breadcrumb button { color: var(--ui-accent) !important; }
+.album-detail-table-head { padding-inline: var(--ui-space-4) !important; background: var(--ui-sidebar) !important; color: var(--ui-secondary) !important; }
+.album-detail-actions { background: var(--ui-sidebar) !important; border-bottom-color: var(--ui-line) !important; color: var(--ui-muted) !important; }
+.album-detail-table-head .track-head-button, .album-detail-table-head .track-head-label { color: var(--ui-secondary) !important; }
+.table-head-more, .album-detail-table-head .table-head-more { background: var(--ui-sidebar) !important; color: var(--ui-secondary) !important; box-shadow: none !important; }
+.artist-all-songs-icon { background: var(--ui-selected) !important; color: var(--ui-accent) !important; }
+.pager { min-height: 44px !important; flex: 0 0 auto !important; margin: 0 !important; padding: var(--ui-space-1) var(--ui-space-4) !important; background: var(--ui-sidebar) !important; border-top: 1px solid var(--ui-line) !important; }
+.pager-nav, .pager-status, .pager-page-summary, .pager-nav-button, .pager-page-button, .pager-refresh-button { color: var(--ui-secondary) !important; }
+.pager-page-button.is-current { background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+.empty { max-width: 48ch; padding: var(--ui-space-6); color: var(--ui-muted); }
+
+/* Player: every real control stays in the DOM and has a reachable counterpart. */
+.player {
+  grid-row: 3; position: relative; inset: auto; z-index: 50 !important;
+  height: var(--ui-player-height) !important; width: 100%; padding: var(--ui-space-3) var(--ui-space-6) !important;
+  display: grid !important; grid-template-columns: minmax(180px, 1fr) minmax(260px, 480px) minmax(280px, 1fr) !important;
+  grid-template-rows: 48px 24px !important; gap: var(--ui-space-1) var(--ui-space-6) !important;
+  background: var(--ui-surface) !important; border-top: 1px solid var(--ui-line) !important; box-shadow: none !important;
+}
+.now-playing { grid-column: 1 !important; grid-row: 1 / 3 !important; gap: var(--ui-space-3) !important; }
+.cover { width: 60px !important; height: 60px !important; max-width: 60px !important; max-height: 60px !important; flex-basis: 60px !important; }
+.now-meta strong { color: var(--ui-text) !important; font-size: 14px !important; }
+.now-meta span, .now-meta small { color: var(--ui-muted) !important; }
+.now-meta small { display: none !important; }
+.transport { grid-column: 2 !important; grid-row: 1 !important; min-width: 0 !important; justify-content: center !important; gap: var(--ui-space-2) !important; padding: 0 !important; }
+.player-button, .icon-button, .device-button { color: var(--ui-secondary) !important; background: transparent !important; border-radius: var(--ui-radius-sm); box-shadow: none !important; }
+.player-button { width: 40px !important; height: 40px !important; }
+.player-button.play-button { width: 44px !important; height: 44px !important; border-radius: 50% !important; background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+.progress { position: static !important; inset: auto !important; grid-column: 2 !important; grid-row: 2 !important; padding: 0 !important; gap: var(--ui-space-2) !important; background: transparent !important; color: var(--ui-muted) !important; }
+.player-actions { grid-column: 3 !important; grid-row: 1 / 3 !important; display: flex !important; gap: var(--ui-space-1) !important; justify-content: end !important; justify-self: stretch !important; width: 100% !important; align-items: center !important; }
+.player-actions .action-button, .player-actions .device-button { width: 36px !important; height: 36px !important; min-width: 36px !important; padding: var(--ui-space-2) !important; border: 0 !important; }
+.player-actions svg { width: 20px; height: 20px; }
+/* The lyrics control is a glyph, not a line icon.  "词" reads as lyrics without
+ * anyone having to decode a note symbol, which is the operator's call (R346, and
+ * again here).  It keeps the svg wrapper and class the icon guards look for, but
+ * it has to paint with fill: the shared 1.75px stroke would render the strokes of
+ * the character as an outline instead of a solid glyph. */
+.player-actions #lyricsBtn .lyric-symbol {
+  display: block !important; width: 20px !important; height: 20px !important;
+  fill: currentColor !important; stroke: none !important;
+}
+.player-actions #lyricsBtn .lyric-symbol text {
+  font-family: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+  font-size: 21px;
+  font-weight: 500;
+  fill: currentColor !important;
+  stroke: none !important;
+}
+.active-control, .favorite-current.active-control, .player-actions .active-control { color: var(--ui-accent) !important; background: var(--ui-selected) !important; }
+.volume-control { position: relative !important; display: inline-grid !important; place-items: center !important; }
+.volume-panel { position: absolute !important; right: 0 !important; bottom: calc(100% + 8px) !important; transform: none !important; display: grid !important; place-items: center !important; width: 48px !important; height: 144px !important; padding: var(--ui-space-3) 0 !important; z-index: 90 !important; background: var(--ui-raised) !important; border: 1px solid var(--ui-border) !important; box-shadow: var(--ui-shadow) !important; border-radius: var(--ui-radius) !important; }
+.volume-panel::after { display: none !important; }
+/* The popover's rail is a 3px line with a white-core handle, the same language
+ * the progress rail was given in R484.  The UA vertical slider cannot be
+ * restyled at all -- it paints its own track and thumb -- so the element is
+ * rebuilt from `appearance: none`.  The panel stays 48x144 and the input 24x112:
+ * this changes what is painted, not where anything sits (R488). */
+.volume-panel {
+  /* A control rail is not a divider.  --ui-line is a 10% black hairline meant
+   * for separators; painted at 3px on this popover it lands at 1.25:1 and reads
+   * as nothing at all.  Mixing the theme's own text colour keeps the rail inside
+   * the palette instead of adding a literal, and needs no per-theme branch
+   * because --ui-text already flips: measured 1.65:1 in light, 2.04:1 in dark. */
+  --volume-rail: color-mix(in srgb, var(--ui-text) 22%, transparent);
+}
+.volume-slider {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  writing-mode: vertical-rl !important;
+  direction: rtl !important;
+  transform: none !important;
+  width: 24px !important;
+  height: 112px !important;
+  margin: 0 !important;
+  background: transparent !important;
+}
+/* One gradient, one hard stop at the played edge.  `--volume-fill` falls back to
+ * 0%, so a page that never ran the fill update still shows a usable rail rather
+ * than a full one. */
+.volume-slider::-webkit-slider-runnable-track {
+  width: 3px !important;
+  height: 112px !important;
+  border-radius: 1.5px !important;
+  background: linear-gradient(to top,
+    var(--ui-accent) 0 var(--volume-fill, 0%),
+    var(--volume-rail) var(--volume-fill, 0%) 100%) !important;
+}
+/* A white core inside an accent ring: a solid accent dot would vanish where it
+ * crosses the accent-coloured part of the rail.  The handle is centred with a
+ * negative *right* margin -- on a vertical slider Chromium hangs the thumb off
+ * the track's inline-start edge, so a negative left margin moves nothing. */
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none !important;
+  width: 12px !important;
+  height: 12px !important;
+  margin-right: -4.5px !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: var(--ui-surface) !important;
+  box-shadow: 0 0 0 2px var(--ui-accent) !important;
+}
+
+/* Native dialog lifecycle, IDs, pane states and generated actions are retained. */
+dialog {
+  position: fixed; inset: 0; margin: auto;
+  width: min(640px, calc(100% - 32px)) !important; max-width: calc(100% - 32px) !important;
+  max-height: calc(100dvh - 48px); height: fit-content; overflow: auto !important;
+  padding: var(--ui-space-6); border: 1px solid var(--ui-line) !important; border-radius: var(--ui-radius-lg) !important;
+  background: var(--ui-raised) !important; color: var(--ui-text) !important; box-shadow: var(--ui-shadow) !important;
+}
+dialog::backdrop { background: var(--ui-backdrop) !important; backdrop-filter: none !important; }
+/* Settings is one dialog with six groups of very different lengths. The frame is
+ * pinned and only the active pane scrolls, so switching groups never resizes the
+ * window. The rail and the footer are the two stable surfaces: the rail says
+ * which group you are in and what it currently holds, the footer is the only
+ * place a change is ever written. */
+#folderDialog {
+  width: min(880px, calc(100vw - 48px)) !important;
+  max-width: min(880px, calc(100vw - 48px)) !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+#folderDialog[open] {
+  display: block !important;
+  height: min(680px, calc(100dvh - 48px)) !important;
+  max-height: calc(100dvh - 48px) !important;
+}
+.settings-shell {
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  padding: 0 var(--ui-space-5);
+  border-bottom: 1px solid var(--ui-line);
+  background: var(--ui-raised);
+}
+.settings-head h2 { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--ui-text) !important; font-size: 16px; font-weight: 650; }
+.settings-back { display: none !important; }
+.settings-body { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 0; }
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  padding: var(--ui-space-3) var(--ui-space-2);
+  overflow-y: auto;
+  border-right: 1px solid var(--ui-line);
+  background: var(--ui-sidebar);
+}
+.settings-nav button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 0 !important;
+  border-radius: var(--ui-radius-sm);
+  background: transparent !important;
+  color: var(--ui-secondary) !important;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-nav button:hover { background: var(--ui-hover) !important; color: var(--ui-text) !important; }
+.settings-nav button.active { background: var(--ui-selected) !important; color: var(--ui-accent) !important; }
+.settings-nav-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.settings-nav-text { display: grid; gap: 1px; min-width: 0; }
+.settings-nav-label { font-size: 13px; font-weight: 550; line-height: 1.3; }
+.settings-nav-summary { overflow: hidden; color: var(--ui-muted) !important; font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.settings-nav-summary:empty { display: none; }
+.settings-nav button.active .settings-nav-summary { color: var(--ui-accent) !important; }
+.settings-nav button.has-dirty .settings-nav-summary { color: var(--ui-warning) !important; }
+/* A pending write needs a mark that survives an empty summary line, so the dot
+ * rides on the label instead of recolouring the second line. */
+.settings-nav button.has-dirty .settings-nav-label::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--ui-warning);
+  vertical-align: 1px;
+}
+.settings-nav-chevron { display: none; }
+.settings-panes { min-height: 0; overflow: hidden; }
+.settings-pane {
+  height: 100%;
+  min-height: 0;
+  padding: var(--ui-space-5);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.settings-pane[hidden] { display: none !important; }
+.settings-pane > .settings-group { max-width: 560px; }
+.settings-group { display: grid; gap: var(--ui-space-2); }
+.settings-group + .settings-group { margin-top: var(--ui-space-5); padding-top: var(--ui-space-4); border-top: 1px solid var(--ui-line); }
+.settings-group-head { display: flex; align-items: center; gap: var(--ui-space-2); }
+.settings-group-head h3 { margin: 0; color: var(--ui-text) !important; font-size: 13px; font-weight: 650; }
+.settings-badge { flex: none; padding: 0 7px; border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 1.7; }
+.settings-badge.is-save { background: var(--ui-selected); color: var(--ui-accent) !important; }
+.settings-badge.is-live { background: var(--ui-success-bg); color: var(--ui-success) !important; }
+.settings-badge.is-danger { background: var(--ui-danger-bg); color: var(--ui-danger) !important; }
+/* Writing tags back edits the files on disk, so the group reads as a hazard
+ * block instead of one more switch in the list. */
+.settings-danger-zone {
+  padding: var(--ui-space-4);
+  border: 1px solid var(--ui-danger) !important;
+  border-radius: var(--ui-radius);
+  background: var(--ui-danger-bg);
+}
+.settings-inline-actions { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); }
+.settings-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-height: 56px;
+  padding: var(--ui-space-2) var(--ui-space-5);
+  border-top: 1px solid var(--ui-line);
+  background: var(--ui-raised);
+}
+.settings-dirty { flex: 1 1 auto; min-width: 0; color: var(--ui-warning) !important; font-size: 12px; }
+.settings-save-status { min-width: 0; font-size: 12px; color: var(--ui-secondary) !important; }
+.settings-save-status.is-success { color: var(--ui-success) !important; }
+.settings-save-status.is-error { color: var(--ui-danger) !important; }
+.settings-foot-actions { display: flex; flex: none; align-items: center; gap: var(--ui-space-2); }
+.settings-foot-actions .settings-save { min-width: 120px; }
+/* The seven per-pane save buttons still exist so their handlers keep working,
+ * but the footer is the only visible write path. */
+.settings-legacy-actions { display: none !important; }
+/* An empty save bar is 56px of dead space, so it only exists while it has
+ * something to say: pending groups, or the result of the last write. */
+.settings-shell:not(.has-foot) .settings-foot { display: none; }
+.dialog-close-button { display: inline-grid; place-items: center; flex: 0 0 36px !important; width: 36px !important; height: 36px !important; padding: 0; color: var(--ui-secondary) !important; }
+.dialog-close-button svg, .library-path-remove svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.library-path-remove { display: inline-grid !important; place-items: center !important; }
+.dialog-head { gap: var(--ui-space-4); padding: 0 0 var(--ui-space-4) !important; background: transparent; border-color: var(--ui-line) !important; }
+.dialog-head > div { min-width: 0; }
+.dialog-head h2 { margin: 0; font-size: 20px; font-weight: 650; }
+:is(#folderDialog, #deviceDialog, #metadataCandidateDialog, #externalShareDialog, #playlistDialog, #dlnaDiagnosticsDialog, #trackActionDialog, #columnsDialog) .dialog-head h2 { color: var(--ui-text) !important; }
+#deviceDialog { overflow: hidden !important; padding: 0 !important; }
+#deviceDialog .dialog-head h2 { color: var(--ui-text) !important; }
+#deviceDialog .dialog-head .icon-button, #deviceDialog > .dialog-help { color: var(--ui-secondary) !important; }
+#externalShareDialog { padding: var(--ui-space-6) !important; background: var(--ui-raised) !important; color: var(--ui-text) !important; }
+#externalShareDialog .dialog-head { margin: 0; }
+.external-share-file strong { color: var(--ui-text); }
+.external-share-file-icon { color: var(--ui-on-accent) !important; background: var(--ui-accent); }
+.external-share-file-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dialog-head .icon-button { width: 36px !important; height: 36px !important; flex: none; }
+.dialog-help, .dialog-current-target, .settings-help, .settings-inline-feedback, .settings-description, .settings-section-heading p { color: var(--ui-muted) !important; font-size: 12px !important; line-height: 1.6 !important; }
+.settings-pane-status { color: var(--ui-secondary) !important; }
+.settings-pane-status.is-success { color: var(--ui-success) !important; }
+.settings-pane-status.is-error { color: var(--ui-danger) !important; }
+.primary-button, .secondary-button, .track-action-choice, .native-delete-cancel, .native-delete-outline { min-height: 36px; padding: var(--ui-space-2) var(--ui-space-3) !important; border: 1px solid var(--ui-border) !important; border-radius: var(--ui-radius-sm) !important; background: var(--ui-surface) !important; color: var(--ui-text) !important; box-shadow: none; line-height: 1.4 !important; }
+.danger-button { border-color: var(--ui-danger) !important; background: var(--ui-danger-bg) !important; color: var(--ui-danger) !important; }
+.danger-button:hover:not(:disabled) { border-color: var(--ui-danger) !important; background: var(--ui-danger-bg) !important; color: var(--ui-danger) !important; }
+.primary-button, .settings-save, #saveMetadataProvidersBtn, #savePlaylistBtn, #saveColumnsBtn { border-color: var(--ui-accent) !important; background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+.settings-pane { min-height: 0 !important; padding-top: var(--ui-space-4) !important; }
+.settings-section-heading { margin-block: var(--ui-space-4) var(--ui-space-3); }
+.settings-section-heading strong, .settings-section-heading h3 { color: var(--ui-text) !important; }
+.metadata-settings-section .settings-section-heading { margin: 0 0 var(--ui-space-2) !important; }
+.metadata-settings-overview { gap: var(--ui-space-2); margin-bottom: var(--ui-space-2); background: var(--ui-sidebar); border: 1px solid var(--ui-line); border-radius: var(--ui-radius); padding: var(--ui-space-3); }
+.metadata-settings-overview > div { min-width: 0; min-height: 60px; padding: var(--ui-space-2); }
+.metadata-settings-overview strong { font-size: 16px; overflow-wrap: anywhere; }
+.metadata-settings-overview strong, .metadata-toggle strong { color: var(--ui-text); }
+.metadata-settings-overview span, .metadata-toggle small, .metadata-provider-capabilities { color: var(--ui-muted) !important; }
+.metadata-core-controls .metadata-toggle { border-radius: var(--ui-radius-sm); }
+.metadata-settings-grid label { color: var(--ui-secondary); }
+.metadata-provider-list { gap: var(--ui-space-2); }
+.metadata-provider-row, .metadata-provider-row.is-fixed-last { border-color: var(--ui-line) !important; border-radius: var(--ui-radius); box-shadow: none; }
+.metadata-toggle input { accent-color: var(--ui-accent); }
+.metadata-provider-result strong { color: var(--ui-text) !important; }
+.metadata-provider-result[data-state="error"], .metadata-provider-result.is-failed { color: var(--ui-danger) !important; background: var(--ui-danger-bg) !important; }
+.metadata-provider-save-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--ui-space-3); position: sticky; bottom: calc(-1 * var(--ui-space-6)); z-index: 2; margin: var(--ui-space-3) calc(-1 * var(--ui-space-3)) calc(-1 * var(--ui-space-2)); padding: var(--ui-space-3) var(--ui-space-3) var(--ui-space-2); border-top: 1px solid var(--ui-line); background: var(--ui-raised); }
+.metadata-provider-save-actions button { min-width: 132px; }
+.metadata-settings-status, .metadata-tag-jobs, .metadata-tag-job { background: var(--ui-sidebar); color: var(--ui-secondary); border-color: var(--ui-line); }
+.metadata-tag-job.is-done { background: var(--ui-success-bg) !important; color: var(--ui-success) !important; border-left-color: var(--ui-success) !important; }
+.metadata-tag-job.is-running { background: var(--ui-selected) !important; color: var(--ui-accent) !important; border-left-color: var(--ui-accent) !important; }
+.metadata-tag-job.is-retry, .metadata-tag-job.is-no_match { background: var(--ui-warning-bg) !important; color: var(--ui-warning) !important; border-left-color: var(--ui-warning) !important; }
+.metadata-tag-job.is-failed { background: var(--ui-danger-bg) !important; color: var(--ui-danger) !important; border-left-color: var(--ui-danger) !important; }
+/* The candidate dialog is a two-column workbench: results on the left, the
+ * change preview on the right.  The theme only supplies surfaces and states so
+ * the geometry stays with app.css (R494). */
+.metadata-candidate-dialog { width: min(880px, calc(100% - 32px)) !important; padding: 0 !important; }
+.metadata-candidate-results { background: var(--ui-canvas); }
+.metadata-candidate-choice { border-radius: var(--ui-radius) !important; }
+.metadata-candidate-choice:has(input:checked), .metadata-candidate-choice.is-selected { background: var(--ui-selected) !important; border-color: var(--ui-accent) !important; }
+.metadata-candidate-preview { background: var(--ui-surface) !important; }
+.metadata-candidate-footer { background: var(--ui-surface) !important; border-top-color: var(--ui-line) !important; }
+.library-health, .library-health-grid > div, .diagnostics-list, .diagnostics-row { background: var(--ui-sidebar); border-color: var(--ui-line); color: var(--ui-secondary); box-shadow: none; }
+.library-health strong, .library-health-grid strong { color: var(--ui-text); }
+.library-health-heading p, .library-health-detail, .library-health-grid span { color: var(--ui-muted); }
+.library-health.is-error { border-color: var(--ui-danger) !important; background: var(--ui-danger-bg) !important; }
+.library-health.is-scanning { border-color: var(--ui-accent) !important; background: var(--ui-selected) !important; }
+.library-path-row input, .path-entry input { background: var(--ui-surface) !important; color: var(--ui-text) !important; }
+.device-section { border-color: var(--ui-line) !important; }
+.device-section h3, .device-section-title { color: var(--ui-muted) !important; }
+.device-section h3 { background: var(--ui-surface) !important; }
+/* The picker search is one bare input on the field's own plate — the global
+ * `input:not(…)` rule out-specifies a plain class selector, so the anchor has to
+ * be the dialog itself (R494). */
+.device-search { border-color: var(--ui-line) !important; background: var(--ui-canvas) !important; }
+#deviceDialog .device-search input { min-height: 0 !important; height: 100% !important; border: 0 !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; padding: 0 !important; }
+/* Rows are flat until hovered or current; the theme used to paint every row as a
+ * card, which turned a six-device list into six stacked panels (R494). */
+.device-row { color: var(--ui-text) !important; box-shadow: none !important; }
+.device-row.is-current, .device-row.is-switching { background: var(--ui-selected) !important; }
+.device-row strong, .device-row-text strong { color: var(--ui-text) !important; }
+.device-row small, .device-dialog-footer { color: var(--ui-muted); }
+.device-row-status { color: var(--ui-success) !important; }
+.device-row.is-current .device-row-status { color: var(--ui-accent) !important; }
+.device-row.is-offline .device-row-status { color: var(--ui-muted) !important; }
+.device-row-icon { background: var(--ui-canvas) !important; color: var(--ui-secondary) !important; }
+.device-row.is-current .device-row-icon { background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+.device-row-radio{border-color: var(--ui-border) !important;background: transparent !important}
+.device-row-radio svg { width: 11px; height: 11px; fill: none; stroke: var(--ui-on-accent); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.device-row.is-current .device-row-radio { border-color: var(--ui-accent) !important; background: var(--ui-accent) !important; }
+.device-dialog-footer { border-color: var(--ui-line) !important; background: var(--ui-canvas) !important; }
+.device-dialog-footer span { color: var(--ui-muted) !important; }
+.device-dialog-footer .secondary-button { background: var(--ui-surface) !important; color: var(--ui-text) !important; border-color: var(--ui-border) !important; }
+.track-context-actions .track-action-choice, .track-action-choice { color: var(--ui-text) !important; background: var(--ui-surface) !important; }
+.track-action-choice { display: flex !important; align-items: center !important; gap: var(--ui-space-2) !important; }
+.track-action-choice .track-action-icon { width: 18px !important; height: 18px !important; flex: 0 0 18px !important; fill: none !important; stroke: currentColor !important; stroke-width: 1.8 !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
+.track-action-choice > span { min-width: 0 !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+.track-action-choice.danger, .track-action-choice[data-track-action="delete"] { color: var(--ui-danger) !important; }
+.track-action-info, .external-share-description, .external-share-file span, .external-share-option, .native-delete-description { color: var(--ui-secondary) !important; }
+.external-share-file, .external-share-result, .column-choice-row, .column-choice-list label, .playlist-choice { background: var(--ui-sidebar); border-color: var(--ui-line); color: var(--ui-text); }
+#externalShareDialog .external-share-detail input:focus, #externalShareDialog .external-share-result input:focus { border-color: var(--ui-accent) !important; border-top-color: var(--ui-accent) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-accent) 12%, transparent) !important; }
+.external-share-options { background: var(--ui-sidebar); }
+.external-share-option strong { color: var(--ui-text); }
+.external-share-option > div > span, .external-share-result p { color: var(--ui-muted); }
+.external-share-status { color: var(--ui-danger) !important; }
+.switch-control span { background: var(--ui-border); }
+.switch-control span::after { background: var(--ui-surface) !important; }
+.switch-control input:checked + span { background: var(--ui-accent) !important; }
+.column-choice-section-head { color: var(--ui-text) !important; }
+.column-choice-section-head span { color: var(--ui-muted) !important; }
+.column-choice { background: var(--ui-sidebar) !important; color: var(--ui-text) !important; border-color: var(--ui-line) !important; }
+.column-choice.is-selected { background: var(--ui-selected) !important; border-color: var(--ui-accent) !important; }
+.column-choice input { accent-color: var(--ui-accent) !important; }
+.column-move-button { background: transparent !important; color: var(--ui-secondary) !important; }
+.column-move-button svg { width: 16px !important; height: 16px !important; fill: none !important; stroke: currentColor !important; stroke-width: 1.8 !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
+.external-share-detail, .external-share-footer, .native-delete-footer { border-color: var(--ui-line); }
+.native-delete-icon { color: var(--ui-danger) !important; background: var(--ui-danger-bg); }
+
+/* Lyrics shares the workbench surface; cover art remains real library content. */
+.lyrics-view { inset: 0 0 var(--ui-player-height) !important; width: 100% !important; max-width: 100% !important; background: var(--ui-canvas) !important; color: var(--ui-text) !important; }
+.lyrics-bg { opacity: .08 !important; filter: blur(40px); }
+.lyrics-shade { background: var(--ui-canvas) !important; opacity: .88 !important; }
+.lyrics-cover { position: relative; background: var(--ui-hover); color: var(--ui-accent); box-shadow: none !important; }
+.lyrics-cover:not(:has(img)) { display: grid; place-items: center; font-size: 0 !important; }
+.lyrics-meta strong { color: var(--ui-text) !important; }
+.lyrics-meta span { color: var(--ui-muted) !important; }
+.lyrics-lines, .lyrics-lines p, .lyrics-lines button { color: var(--ui-muted) !important; }
+.lyrics-lines .active { color: var(--ui-accent) !important; }
+.lyrics-lines p.active { color: var(--ui-accent) !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (hover: hover) {
+  .nav-item:hover:not(.active), .track:hover:not(.is-selected), .track.is-current:not(.is-selected):hover,
+  .group-row:hover, .track-list.group-mode .group-row:hover, .album-group-row:hover,
+  .artist-all-songs-entry:hover,
+  .player-button:hover:not(.play-button),
+  .player-actions button:hover, .secondary-button:hover:not(:disabled), .track-action-choice:hover,
+  .metadata-candidate-choice:hover, .device-row:hover { background: var(--ui-hover) !important; color: var(--ui-text) !important; }
+  .primary-button:hover:not(:disabled), .settings-save:hover:not(:disabled), .play-button:hover { background: var(--ui-accent-hover) !important; color: var(--ui-on-accent) !important; }
+  .artist-all-songs-entry:hover { border-color: var(--ui-line) !important; }
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  /* The player row is sized by --ui-player-height, so this breakpoint may only
+   * narrow the sidebar.  It used to raise the player to 132px for a two-row
+   * layout that app.css has since replaced with the single desktop row; keeping
+   * the taller token reserved 132px while the bar painted 76px and left 56px of
+   * canvas showing underneath. */
+  :root { --ui-sidebar-width: 208px; }
+  .player { grid-template-columns: minmax(180px,1fr) minmax(280px,1fr) !important; grid-template-rows: 52px 40px !important; gap: var(--ui-space-2) var(--ui-space-4) !important; padding: var(--ui-space-3) var(--ui-space-4) !important; }
+  .now-playing { grid-column: 1 !important; grid-row: 1 !important; }
+  .transport { grid-column: 2 !important; grid-row: 1 !important; }
+  .progress { grid-column: 1 !important; grid-row: 2 !important; }
+  .player-actions { grid-column: 2 !important; grid-row: 2 !important; justify-content: center !important; }
+}
+@media (max-width: 760px) {
+  :root { --ui-header-height: 104px; --ui-player-height: calc(144px + env(safe-area-inset-bottom, 0px)); }
+  .topbar { display: grid !important; grid-template-columns: minmax(0,1fr) !important; grid-template-rows: 44px 44px !important; gap: var(--ui-space-1) !important; padding: var(--ui-space-1) var(--ui-space-3) !important; }
+  .topbar-library { display: none !important; }
+  .mobile-pagebar { display: flex !important; gap: var(--ui-space-2) !important; }
+  .mobile-page-title { min-width: 0 !important; }
+  .mobile-page-title strong { color: var(--ui-text) !important; font-size: 18px !important; }
+  .mobile-page-title span { color: var(--ui-muted) !important; }
+  #mobileNavBtn { color: var(--ui-secondary) !important; width: 44px !important; height: 44px !important; }
+  .player-actions #lyricsBtn .lyric-symbol { width: 20px !important; height: 20px !important; }
+  .shell { display: block !important; }
+  .sidebar {
+    position: fixed !important; inset: 0 auto 0 0 !important; z-index: 70 !important; height: 100dvh !important; visibility: hidden;
+    transform: translateX(-100%) !important; padding: var(--ui-space-4) !important; box-shadow: none !important;
+  }
+  .sidebar.mobile-open { visibility: visible !important; transform: none !important; box-shadow: var(--ui-shadow) !important; }
+  .sidebar-head { display: flex !important; align-items: center; justify-content: space-between; gap: var(--ui-space-2); padding: 0 0 var(--ui-space-2); margin: 0 0 var(--ui-space-1); border-bottom: 1px solid var(--ui-line); }
+  .sidebar-head-title { color: var(--ui-text); font-size: 15px; }
+  .sidebar-close { width: 36px; height: 36px; min-width: 36px; border-radius: var(--ui-radius-sm) !important; }
+  .sidebar-close:hover, .sidebar-close:focus-visible { color: var(--ui-text) !important; background: var(--ui-hover) !important; }
+  .mobile-nav-backdrop:not([hidden]) { display: block !important; background: var(--ui-backdrop) !important; }
+  .sidebar .library-search { display: none !important; }
+  .nav-item { min-height: 44px !important; }
+  /* Every other control on the phone surface is a 44px target; the settings
+   * buttons were still 38px, which is below the minimum tap size. */
+  .settings-pane .secondary-button { min-height: 44px !important; }
+  .mobile-library-search { display: flex !important; flex: 0 0 44px !important; margin: var(--ui-space-2) var(--ui-space-3) !important; padding: 0 var(--ui-space-3) !important; border: 1px solid var(--ui-border) !important; background: var(--ui-surface) !important; color: var(--ui-muted) !important; box-shadow: none !important; }
+  .mobile-library-search:focus-within { border-color: var(--ui-accent) !important; box-shadow: none !important; }
+  .mobile-library-search input { font-size: 14px !important; }
+  .table-head { display: none !important; }
+  .track { grid-template-columns: minmax(0,1fr) !important; padding: var(--ui-space-3) !important; min-height: 72px !important; }
+  .track-main { padding-right: 0; width: 100%; }
+  .track-info { padding-right: 0; }
+  .track-cell { display: none !important; }
+  .track-title { font-size: 14px !important; }
+  .track-list.group-mode { display: block !important; padding: 0 !important; }
+  .track-list.group-mode .group-row { margin: 0 !important; border: 0 !important; border-bottom: 1px solid var(--ui-line) !important; border-radius: 0 !important; padding: var(--ui-space-3) !important; }
+  .album-group-row { grid-template-columns: minmax(0,1fr) !important; }
+  .pager { padding-inline: var(--ui-space-3) !important; }
+  .player, body.mobile-search-active .player {
+    position: relative !important; inset: auto !important; height: var(--ui-player-height) !important;
+    grid-template-columns: minmax(0,1fr) !important; grid-template-rows: 44px 44px 24px !important;
+    padding: var(--ui-space-2) var(--ui-space-3) calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    gap: var(--ui-space-1) !important; contain: none;
+  }
+  .now-playing { grid-column: 1 !important; grid-row: 1 !important; }
+  .cover { width: 40px !important; height: 40px !important; max-width: 40px !important; max-height: 40px !important; flex-basis: 40px !important; }
+  .transport { grid-column: 1 !important; grid-row: 2 !important; gap: var(--ui-space-2) !important; }
+  .transport .mobile-transport-control { display: grid !important; place-items: center !important; min-width: 44px !important; width: 44px !important; height: 44px !important; color: var(--ui-secondary) !important; }
+  .transport .player-button { width: 44px !important; min-width: 44px; height: 44px !important; }
+  .transport .play-button { width: 44px !important; }
+  .transport .mobile-transport-control.active-control { color: var(--ui-accent) !important; }
+  #mobileRepeatBtn[data-repeat="all"]::after, #mobileRepeatBtn[data-repeat="one"]::after { background: var(--ui-accent) !important; color: var(--ui-on-accent) !important; }
+  .progress { grid-column: 1 !important; grid-row: 3 !important; }
+  /* Keep secondary actions available on desktop only; mobile transport stays compact. */
+  .player-actions { display: none !important; }
+  .volume-panel { right: 0 !important; }
+  dialog .dialog-head .dialog-close-button { flex-basis: 44px !important; width: 44px !important; min-width: 44px; height: 44px !important; }
+  /* The 64px trailing pad used to reserve room for the last tab while the strip
+   * scrolled.  The five labels now fit at phone widths, so the pad only added
+   * 46px of phantom scroll that could drag the whole row sideways for nothing. */
+  /* 6px inline padding instead of 8px: with five labels the row needs 302px, which
+   * clears a 360px phone (310px strip) without scrolling and still scrolls at 320px. */
+  .metadata-settings-grid, .metadata-core-controls { grid-template-columns: minmax(0,1fr) !important; }
+  .metadata-settings-overview { grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--ui-space-1) !important; padding: var(--ui-space-2) !important; }
+  .metadata-settings-overview > div { min-height: 54px; padding: var(--ui-space-2) !important; }
+  .metadata-settings-overview span { font-size: 10px; }
+  .metadata-settings-overview strong { font-size: 13px !important; }
+  .settings-diagnostics-heading { flex-wrap: wrap; gap: var(--ui-space-2); }
+  .metadata-provider-actions { grid-column: 1 !important; grid-row: 3 !important; justify-content: flex-end; width: 100%; padding-left: 0; }
+  .metadata-provider-actions button { min-height: 44px !important; flex: 0 0 auto; }
+  .metadata-provider-actions .metadata-provider-move { width: 44px !important; min-width: 44px !important; height: 44px !important; }
+  .metadata-provider-save-actions { justify-content: flex-end !important; margin-inline: calc(-1 * var(--ui-space-3)) !important; }
+  .metadata-candidate-search { display: grid !important; grid-template-columns: minmax(0,1fr) auto !important; }
+  .metadata-candidate-search .secondary-button { min-height: 44px !important; }
+  .metadata-candidate-query { height: 44px; }
+  .metadata-candidate-results { max-height: 30dvh !important; }
+  .settings-pane { padding-bottom: var(--ui-space-4) !important; }
+  .library-path-row { grid-template-columns: minmax(0, 1fr) 44px !important; }
+  .library-path-remove { width: 44px !important; min-width: 44px !important; height: 44px !important; }
+  .library-health-grid { grid-template-columns: minmax(0,1fr); }
+  .native-delete-footer, .native-delete-primary-actions { flex-wrap: wrap; }
+  .native-delete-footer button { min-height: 44px; }
+  .lyrics-view { bottom: var(--ui-player-height) !important; }
+}
+/* Short landscape windows use a side player, preserving a real list viewport. */
+@media (min-width: 560px) and (max-width: 760px) and (max-height: 540px) {
+  :root { --ui-header-height: 60px; }
+  body { grid-template-columns: minmax(0,1fr) 248px; grid-template-rows: 60px minmax(0,1fr); }
+  .topbar { grid-column: 1 / -1; grid-template-columns: minmax(0,1fr) auto !important; grid-template-rows: 44px !important; align-content: center; gap: var(--ui-space-2) !important; }
+  .mobile-page-title strong { font-size: 16px !important; }
+  .shell { grid-column: 1 !important; grid-row: 2 !important; }
+  .player, body.mobile-search-active .player { grid-column: 2 !important; grid-row: 2 !important; height: 100% !important; align-content: center; border-top: 0 !important; border-left: 1px solid var(--ui-line) !important; }
+  .transport { gap: 0 !important; }
+  .transport .player-button, .transport .mobile-transport-control { width: 36px !important; min-width: 36px !important; }
+  .transport .play-button { width: 40px !important; min-width: 40px !important; }
+  .player-actions { display: none !important; }
+  .lyrics-view { top: 60px !important; bottom: 0 !important; right: 248px !important; width: calc(100% - 248px) !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+/* Android keeps transport and progress, without the extra footer action row. */
+html.android-app .player-actions { display: none !important; }
+@media (max-width: 760px) {
+  :root.android-app { --ui-player-height: calc(140px + env(safe-area-inset-bottom, 0px)); }
+  html.android-app .player, html.android-app body.mobile-search-active .player {
+    grid-template-rows: 44px 44px 24px !important;
+  }
+}
+/* Absolute visibility contracts win over all presentation rules above. */
+[hidden] { display: none !important; }
+
+/* Round 1: record-console icon and surface language.
+ * Presentation only: IDs, event hooks and playback semantics remain unchanged. */
+:where(.top-icon-button, .icon-button, .device-button, .player-button,
+  .nav-item, .track-actions button, .column-move-button) {
+  -webkit-tap-highlight-color: transparent;
+}
+:where(.top-icon-button, .icon-button, .device-button, .player-button,
+  .track-actions button, .column-move-button) :is(svg, .transport-icon) {
+  flex: 0 0 auto;
+}
+:where(.top-icon-button, .icon-button, .device-button, .player-button,
+  .track-actions button, .column-move-button):focus-visible,
+.nav-item:focus-visible {
+  outline: 2px solid var(--ui-accent) !important;
+  outline-offset: 2px !important;
+}
+.player-button .transport-icon { display: block; width: 20px; height: 20px; fill: currentColor; stroke: none; }
+.nav-item > svg,
+.library-search > svg,
+.mobile-library-search > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.nav-item > svg { color: currentColor; }
+.nav-item.active > svg { stroke-width: 2; }
+.empty-icon{color: var(--ui-accent);display: grid;place-items: center }
+.empty-icon svg { width: 42px; height: 42px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.track-cover img,
+.cover img,
+.album-detail-cover img {
+  display: block;
+  background: var(--ui-hover);
+}
+.track-cover,
+.cover {
+  position: relative;
+}
+.track-cover:has(.track-cover-fallback:not([hidden])),
+.cover:not(:has(img)) {
+  display: grid;
+  place-items: center;
+  background: var(--ui-selected) !important;
+  color: var(--ui-accent) !important;
+  font-size: 0;
+}
+.track-cover-fallback { display: grid; place-items: center; font-size: 0; }
+.record-placeholder { display: block; width: 58%; height: 58%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.record-placeholder-center { fill: currentColor; stroke: none; }
+.track.is-current .track-cover:has(.track-cover-fallback:not([hidden])),
+.track.is-selected .track-cover:has(.track-cover-fallback:not([hidden])) {
+  background: var(--ui-accent) !important;
+  color: var(--ui-on-accent) !important;
+}
+.track-title{font-weight: 500 !important;letter-spacing: 0 }
+.mobile-track-subtitle { color: var(--ui-muted) !important; }
+.track.is-current .mobile-track-subtitle { color: var(--ui-accent) !important; }
+.group-row.is-opening { background: var(--ui-selected) !important; }
+.track-list.group-mode .group-row { background: var(--ui-surface) !important; border-color: var(--ui-line) !important; box-shadow: none !important; }
+.track-list.group-mode .group-row:hover { background: var(--ui-hover) !important; border-color: var(--ui-border) !important; box-shadow: none !important; }
+.folder-breadcrumb { background: var(--ui-sidebar) !important; border-color: var(--ui-line) !important; color: var(--ui-muted) !important; }
+.folder-crumb { color: var(--ui-accent) !important; }
+.folder-crumb.is-current { color: var(--ui-text) !important; }
+.folder-crumb-separator { color: var(--ui-muted) !important; }
+.folder-pager { background: var(--ui-sidebar) !important; border-color: var(--ui-line) !important; color: var(--ui-muted) !important; }
+.diagnostic-entry { border-bottom-color: var(--ui-line) !important; }
+.diagnostic-entry strong { color: var(--ui-text) !important; }
+.diagnostic-entry span, .diagnostic-entry small { color: var(--ui-muted) !important; }
+.diagnostic-entry p { color: var(--ui-secondary) !important; }
+.format-badge{color: var(--ui-secondary) !important;border-color: var(--ui-border) !important;background: var(--ui-sidebar) !important;font-variant-numeric: tabular-nums }
+:root[data-theme="dark"] .track-cell-format {
+  color: var(--ui-secondary) !important;
+  border-color: var(--ui-border) !important;
+  background: var(--ui-surface) !important;
+}
+:root[data-theme="dark"] .track-cell-format.dsd {
+  color: var(--ui-warning) !important;
+  border-color: var(--ui-warning) !important;
+  background: var(--ui-warning-bg) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .track-cell-format {
+    color: var(--ui-secondary) !important;
+    border-color: var(--ui-border) !important;
+    background: var(--ui-surface) !important;
+  }
+  :root:not([data-theme="light"]) .track-cell-format.dsd {
+    color: var(--ui-warning) !important;
+    border-color: var(--ui-warning) !important;
+    background: var(--ui-warning-bg) !important;
+  }
+}
+
+/* Final authority for playback state colors. These ID-scoped selectors are
+ * intentionally narrow: app.css contains older, more-specific control rules
+ * that would otherwise leak the retired teal accent into active buttons. */
+.player-actions #repeatBtn.active-control,
+.player-actions #shuffleBtn.active-control,
+.player-actions #favoriteCurrentBtn.active-control,
+.player-actions #lyricsBtn.active-control,
+.player-actions #queueBtn.active-control,
+.player-actions #deviceBtn.active-control {
+  color: var(--ui-accent) !important;
+  background: var(--ui-selected) !important;
+  border-color: var(--ui-border) !important;
+}
+.player-actions #deviceBtn:hover:not(:disabled),
+.player-actions #lyricsBtn:hover:not(:disabled),
+.player-actions #repeatBtn:hover:not(:disabled),
+.player-actions #shuffleBtn:hover:not(:disabled),
+.player-actions #queueBtn:hover:not(:disabled),
+.player-actions #favoriteCurrentBtn:hover:not(:disabled),
+.player-actions #volumeBtn:hover:not(:disabled) {
+  color: var(--ui-text) !important;
+  background: var(--ui-hover) !important;
+  border-color: transparent !important;
+}
+
+/* Theme boundary for the metadata/settings workbench. These components were
+ * added after the original FNOS pass and must consume semantic tokens rather
+ * than pinning a light-surface palette that breaks dark mode. */
+.metadata-settings-section{margin-bottom: var(--ui-space-3) !important;padding: var(--ui-space-3) 0 !important;background: transparent;border-color: var(--ui-line);box-shadow: none;border-bottom-color:var(--ui-line)!important}
+.metadata-tag-section{background:var(--ui-warning-bg)!important;border-color:var(--ui-border)!important}
+.metadata-tag-section .settings-section-heading h3{color:var(--ui-warning)!important}
+.metadata-core-controls .metadata-toggle small,.metadata-settings-overview span,
+.metadata-provider-capabilities{color:var(--ui-muted)!important}
+.metadata-core-controls .metadata-toggle strong,.metadata-settings-overview strong,
+.metadata-provider-toggle span,.metadata-candidate-choice strong{color:var(--ui-text)!important}
+.metadata-settings-overview>div,.metadata-core-controls .metadata-toggle,
+.metadata-provider-row,.metadata-candidate-choice{border-color:var(--ui-border)!important;background:var(--ui-surface)!important}
+.metadata-provider-settings{border-top-color:var(--ui-line)!important}
+.metadata-provider-row.is-fixed-last{background:var(--ui-hover)!important}
+.metadata-provider-result{grid-column: 1 / -1;min-width: 0;border-color: var(--ui-line);overflow-wrap: anywhere;border-left-color:var(--ui-warning)!important;background:var(--ui-warning-bg);color:var(--ui-warning)}
+.metadata-provider-result.is-ok{border-left-color:var(--ui-success)!important;background:var(--ui-success-bg)!important;color:var(--ui-success)!important}
+.metadata-provider-result.is-failed{border-left-color:var(--ui-danger)!important;background:var(--ui-danger-bg)!important;color:var(--ui-danger)!important}
+.metadata-provider-result small,.metadata-candidate-choice small{color:var(--ui-muted)!important}
+.metadata-candidate-dialog{background:var(--ui-canvas)!important;color:var(--ui-text)!important}
+.metadata-candidate-dialog .dialog-head,.metadata-candidate-search,.metadata-candidate-hint{background:var(--ui-surface)!important}
+.metadata-candidate-dialog .dialog-head .dialog-help{color:var(--ui-muted)!important}
+/* The footer status is one plain line now: the old success banner shouted every
+ * query result and left the confirm button at the bottom of a scrolling list. */
+.metadata-candidate-dialog #metadataCandidateStatus{margin:0!important;padding:0!important;border:0!important;background:transparent!important;color:var(--ui-muted)!important}
+.metadata-candidate-choice:hover{border-color:var(--ui-accent)!important;background:var(--ui-selected)!important}
+.metadata-candidate-dialog #metadataCandidateSearchStatus{background:var(--ui-surface)!important;color:var(--ui-muted)!important}
+.library-load-error{border-color:var(--ui-danger)!important;background:var(--ui-danger-bg);color:var(--ui-danger)}
+.switch-control input:focus-visible + span{outline:2px solid var(--ui-accent)!important;outline-offset:2px!important}
+
+.track-context-menu{max-width: calc(100% - 16px);border-radius: var(--ui-radius) !important;border-color:var(--ui-border)!important;background:var(--ui-surface)!important;color:var(--ui-text)!important;box-shadow:var(--ui-shadow)!important}
+.track-context-title{color:var(--ui-text)!important}
+.track-context-actions .track-action-choice{color:var(--ui-secondary)!important}
+.track-context-actions .track-action-choice:hover{background:var(--ui-hover)!important;color:var(--ui-text)!important}
+.track-context-actions .track-action-choice.danger{color:var(--ui-danger)!important}
+.track-context-actions .track-action-choice.danger:hover{background:var(--ui-danger-bg)!important;color:var(--ui-danger)!important}
+.track-action-info { background: var(--ui-sidebar) !important; border-color: var(--ui-line) !important; color: var(--ui-secondary) !important; }
+.track-info-detail{border-color:var(--ui-border)!important;background:var(--ui-surface)!important}
+.track-info-detail>div{border-bottom-color:var(--ui-line)!important}
+.track-info-detail span{color:var(--ui-muted)!important}
+.track-info-detail strong{color:var(--ui-text)!important}
+.native-delete-dialog{background:var(--ui-surface)!important;color:var(--ui-text)!important}
+.native-delete-title h2{color:var(--ui-text)!important}
+.native-delete-description{color:var(--ui-secondary)!important}
+.native-delete-status{color:var(--ui-danger)!important}
+.native-delete-outline{border-color:var(--ui-danger)!important;background:var(--ui-danger-bg)!important;color:var(--ui-danger)!important}
+.native-delete-outline:hover:not(:disabled){background:var(--ui-danger-bg)!important}
+.native-delete-cancel{border-color:var(--ui-border)!important;background:var(--ui-surface)!important;color:var(--ui-secondary)!important}
+.native-delete-cancel:hover:not(:disabled){background:var(--ui-hover)!important;color:var(--ui-text)!important}
+.native-delete-confirm{border-color:var(--ui-danger)!important;background:var(--ui-danger)!important;color:var(--ui-on-accent)!important}
+.native-delete-confirm:hover:not(:disabled){border-color:var(--ui-danger)!important;background:var(--ui-danger)!important}
+
+/* Category detail headers are rendered by the library view, but their legacy
+ * white surface bypassed the FNOS theme when entering a group in dark mode. */
+.category-detail {
+  background: var(--ui-sidebar) !important;
+  border-bottom-color: var(--ui-line) !important;
+}
+.category-detail-main strong { color: var(--ui-text) !important; }
+.category-detail-main span { color: var(--ui-muted) !important; }
+
+/* Format cells have a separate runtime class from the compact badge. Keep
+ * both render paths on the same FNOS surface and warning tokens in light and
+ * dark themes instead of inheriting the legacy fixed palette. */
+.track-cell-format {
+  color: var(--ui-secondary) !important;
+  border-color: var(--ui-border) !important;
+  background: var(--ui-sidebar) !important;
+}
+.track-cell-format.dsd {
+  color: var(--ui-warning) !important;
+  border-color: var(--ui-warning) !important;
+  background: var(--ui-warning-bg) !important;
+}
+
+/* The legacy player rules assign a fixed palette to inactive footer controls.
+ * Keep both themes on the FNOS secondary token without changing geometry or
+ * active-state semantics. */
+.player-actions #deviceBtn,
+.player-actions #lyricsBtn,
+.player-actions #favoriteCurrentBtn,
+.player-actions #repeatBtn,
+.player-actions #shuffleBtn,
+.player-actions #queueBtn {
+  color: var(--ui-secondary) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .player-actions #deviceBtn,
+  :root:not([data-theme="light"]) .player-actions #lyricsBtn,
+  :root:not([data-theme="light"]) .player-actions #favoriteCurrentBtn,
+  :root:not([data-theme="light"]) .player-actions #repeatBtn,
+  :root:not([data-theme="light"]) .player-actions #shuffleBtn,
+  :root:not([data-theme="light"]) .player-actions #queueBtn {
+    color: var(--ui-secondary) !important;
+  }
+}
+
+:root[data-theme="dark"] .player-actions #deviceBtn,
+:root[data-theme="dark"] .player-actions #lyricsBtn,
+:root[data-theme="dark"] .player-actions #favoriteCurrentBtn,
+:root[data-theme="dark"] .player-actions #repeatBtn,
+:root[data-theme="dark"] .player-actions #shuffleBtn,
+:root[data-theme="dark"] .player-actions #queueBtn {
+  color: var(--ui-secondary) !important;
+}
+
+/* Mobile geometry contract: the theme sheet is loaded after app.css, so the
+ * final responsive sizing must live here. Keep control groups compact and
+ * centered, and let the seek range share the row with its time labels. */
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1100px) {
+  .topbar,
+  .player {
+    width: 100% !important;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .transport {
+    width: max-content !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    margin-inline: auto !important;
+    justify-self: center !important;
+    display: flex;
+    justify-content: center !important;
+    gap: var(--ui-space-2) !important;
+  }
+
+  .progress {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+  }
+
+  .progress input,
+  .progress #seek {
+    flex: 1 1 0 !important;
+    width: auto !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+}
+
+/* Android WebView can expose a tablet-sized CSS viewport while still being
+ * a touch phone surface. Keep the complete mobile shell in that mode too;
+ * applying only the final control geometry leaves the desktop header/player
+ * grid active and produces the horizontally stretched screenshot. */
+@media (pointer: coarse) and (min-width: 761px) and (max-width: 1100px) {
+  :root { --ui-header-height: 104px; --ui-player-height: 144px; }
+  .topbar {
+    height: 104px !important; display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: 44px 44px !important;
+    gap: var(--ui-space-1) !important; padding: var(--ui-space-1) var(--ui-space-3) !important;
+  }
+  .topbar-library { display: none !important; }
+  .mobile-pagebar { display: flex !important; gap: var(--ui-space-2) !important; }
+  .shell { display: block !important; height: 100% !important; }
+  .sidebar { position: fixed !important; }
+  .content { width: 100% !important; max-width: none !important; height: 100% !important; padding: 0 !important; margin: 0 !important; }
+  .table-head { display: none !important; }
+  .track { grid-template-columns: minmax(0, 1fr) !important; padding: var(--ui-space-3) !important; min-height: 72px !important; }
+  .track-cell { display: none !important; }
+  .player {
+    position: relative !important; inset: auto !important; width: 100% !important; height: 144px !important;
+    grid-template-columns: minmax(0, 1fr) !important; grid-template-rows: 44px 44px 24px !important;
+    padding: var(--ui-space-2) var(--ui-space-3) calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    gap: var(--ui-space-1) !important;
+  }
+  .now-playing { grid-column: 1 !important; grid-row: 1 !important; }
+  .transport { grid-column: 1 !important; grid-row: 2 !important; }
+  .progress { grid-column: 1 !important; grid-row: 3 !important; }
+  .player-actions { display: none !important; }
+}
+
+/* The mobile menu is the single owner of settings and transport setup. */
+@media (max-width: 760px), (pointer: coarse) and (min-width: 761px) and (max-width: 1100px) {
+  /* The compact mobile header replaces the two-row touch layout below. Keep
+   * the body grid row in sync with the visible header or it leaves a blank
+   * strip between the header and library content in Android WebView. */
+    .topbar {
+    height: 56px !important;
+    grid-template-rows: 56px !important;
+    gap: 0 !important;
+  }
+  .mobile-pagebar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start;
+  }
+  .transport {
+    width: max-content !important;
+    max-width: 100% !important;
+    margin-inline: auto !important;
+    justify-self: center !important;
+  }
+  .mobile-settings-nav-item { display: flex !important; }
+  /* Fill the body grid row instead of the whole viewport: row 2 already
+   * excludes the header and the player.  A viewport-minus-header height made
+   * the content 142px taller than its row, so the pagination strip slid under
+   * the player and could not be tapped in the Android client. */
+  .shell, .content { height: 100% !important; }
+}
+
+/* Android WebView owns the same compact header as the fnOS touch page.
+ * Do not rely on the WebView's reported CSS width: some Android hosts expose
+ * a tablet-sized viewport on a phone, which otherwise re-enables the desktop
+ * header and makes the title appear centered or stretched. */
+html.fnaudio-android-client .topbar {
+  height: 56px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  padding: 0 10px !important;
+  box-sizing: border-box !important;
+}
+html.fnaudio-android-client .topbar-library {
+  display: none !important;
+}
+html.fnaudio-android-client .mobile-pagebar {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+  margin: 0 !important;
+}
+html.fnaudio-android-client .mobile-page-title {
+  min-width: 0 !important;
+  text-align: left !important;
+}
+html.fnaudio-android-client .shell,
+html.fnaudio-android-client .content {
+  height: 100% !important;
+}
+
+/* Progress rail: a quiet 4px track with the time labels below it, matching
+ * the compact player reference while retaining the native range hit target. */
+.progress {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  grid-template-rows: 8px 12px !important;
+  align-items: center;
+  column-gap: var(--ui-space-2) !important;
+  row-gap: 2px !important;
+  height: 22px !important;
+  min-width: 0 !important;
+}
+.progress input{
+  margin: 0 !important;
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+  width: 100% !important;
+  height: 8px !important;
+  min-width: 0 !important;
+  padding: 0;
+  -webkit-appearance: none !important;
+  background: transparent !important;
+  border: 0 !important;
+}
+.progress input::-webkit-slider-runnable-track {
+  height: 4px !important;
+  background: linear-gradient(to right, var(--ui-accent) var(--seek-fill, 0%), var(--ui-line) var(--seek-fill, 0%)) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+.progress input::-webkit-slider-thumb {
+  width: 6px !important;
+  height: 6px !important;
+  margin-top: -1px !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: var(--ui-accent) !important;
+  box-shadow: none !important;
+}
+.progress input::-moz-range-track {
+  height: 4px !important;
+  background: var(--ui-line) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+.progress input::-moz-range-progress {
+  height: 4px !important;
+  background: var(--ui-accent) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+.progress input::-moz-range-thumb{
+  box-shadow: none !important;
+  width: 6px !important;
+  height: 6px !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: var(--ui-accent) !important;
+}
+.progress #elapsed,
+.progress #duration {
+  display: block !important;
+  grid-row: 2;
+  font-variant-numeric: tabular-nums !important;
+  font-size: 11px !important;
+  line-height: 12px !important;
+  white-space: nowrap !important;
+}
+.progress #elapsed { grid-column: 1; text-align: left; }
+.progress #duration { grid-column: 2; text-align: right; }
+.progress #transportStateUnknown{
+  position: static;
+  inset: auto;
+  font-size: 11px !important;
+  padding: 0 var(--ui-space-1);
+  background: var(--ui-warning-bg);
+  color: var(--ui-warning) !important;
+  box-shadow: none;
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+  justify-self: center !important;
+  align-self: start !important;
+  z-index: 1;
+}
+
+/* Desktop actions move out of the header; settings stay below the scrollable library nav. */
+.sidebar { overflow: hidden !important; }
+.sidebar-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto !important; overflow-x: hidden !important; overscroll-behavior: contain; }
+.sidebar-footer{color: var(--ui-muted) !important;flex: 0 0 auto !important;margin-top: 0 !important;padding: var(--ui-space-3) var(--ui-space-3) 0 !important }
+@media (max-width: 760px) {
+  .sidebar { overflow: hidden !important; }
+  .sidebar-scroll { flex: 1 1 auto !important; overflow-y: auto !important; overflow-x: hidden !important; }
+  .sidebar-footer { margin-top: 0 !important; }
+}
+
+/* Compact library navigation: settings is the only fixed row at the bottom. */
+:root { --ui-sidebar-width: 188px; }
+@media (max-width: 760px) {
+  .sidebar {
+    width: min(72vw, 260px) !important;
+    padding-left: 8px !important;
+    padding-right: 0 !important;
+  }
+}
+
+html.fnaudio-android-client .mobile-settings-nav-item { display: flex !important; }
+html.fnaudio-android-client .sidebar-settings.android-session-actions {
+  height: auto !important;
+  min-height: 0 !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 2px !important;
+  padding-block: 4px !important;
+}
+html.fnaudio-android-client .sidebar-settings.android-session-actions .nav-item {
+  width: 100% !important;
+  min-height: 40px !important;
+  box-sizing: border-box !important;
+}
+.sidebar-settings .mobile-logout-nav-item[hidden] { display: none !important; }
+
+/* Keep the scrollbar and settings action on the outer edge without wasting a
+ * second horizontal gutter inside the sidebar. */
+.sidebar {
+  padding-right: 0 !important;
+  padding-bottom: 0 !important;
+  align-items: stretch;
+}
+.sidebar-scroll {
+  scrollbar-gutter: stable !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: var(--ui-border) transparent;
+  padding-right: 0;
+  width: 100%;
+  min-width: 0;
+}
+.sidebar-scroll::-webkit-scrollbar { width: 8px !important; }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: var(--ui-border) !important; border-radius: 4px !important; }
+.sidebar-scroll::-webkit-scrollbar-track { background: transparent !important; }
+.sidebar-settings{
+  flex: 0 0 auto !important;
+  display: flex;
+  align-items: center;
+  padding: var(--ui-space-2) 0;
+  border-top: 1px solid var(--ui-line);
+  background: var(--ui-sidebar);
+  height: 44px !important;
+  min-height: 44px !important;
+  padding-block: 2px !important;
+  padding-right: 0 !important;
+  box-sizing: border-box !important;
+  width: 100%;
+  min-width: 0;
+}
+.sidebar-settings .nav-item{
+  display: flex !important;
+  margin: 0 !important;
+  min-height: 36px !important;
+  padding-block: 4px !important;
+}
+@media (max-width: 760px) {
+  .sidebar { padding-bottom: 0 !important; }
+  .sidebar-settings { height: 52px !important; min-height: 52px !important; padding-block: 4px !important; }
+  .sidebar-settings .nav-item { min-height: 44px !important; padding-block: 6px !important; }
+}
+
+/* FNOS-style compact search field: the clear action appears only after input. */
+.library-search,
+.mobile-library-search {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  box-sizing: border-box;
+  min-width: 0 !important;
+  min-height: 36px !important;
+  height: 36px;
+  padding: 0 8px !important;
+  border: 1px solid var(--ui-border) !important;
+  border-radius: 6px !important;
+  background: var(--ui-surface) !important;
+  color: var(--ui-muted) !important;
+  box-shadow: none !important;
+}
+.library-search:focus-within,
+.mobile-library-search:focus-within {
+  border-color: var(--ui-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-accent) 14%, transparent) !important;
+}
+.library-search > svg,
+.mobile-library-search > svg {
+  width: 16px !important;
+  height: 16px !important;
+  flex: 0 0 16px !important;
+  color: var(--ui-muted);
+}
+.library-search input,
+.mobile-library-search input{
+  border: 0 !important;
+  background: transparent !important;
+  outline-offset: -2px;
+  flex: 1 1 auto;
+  width: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  height: 34px;
+  padding: 0;
+  font-size: 13px !important;
+}
+.library-search input:focus,
+.library-search input:focus-visible,
+.mobile-library-search input:focus,
+.mobile-library-search input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.search-clear {
+  display: none !important;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ui-muted) 14%, transparent);
+  color: var(--ui-secondary);
+}
+.search-clear:not([hidden]) { display: inline-flex !important; }
+.search-clear[hidden] { display: none !important; }
+.search-clear svg {
+  width: 12px !important;
+  height: 12px !important;
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 2 !important;
+  stroke-linecap: round !important;
+}
+.search-clear:hover,
+.search-clear:focus-visible {
+  background: color-mix(in srgb, var(--ui-muted) 24%, transparent) !important;
+  color: var(--ui-text) !important;
+}
+@media (max-width: 760px) {
+  .mobile-library-search {
+    height: 42px !important;
+    min-height: 42px !important;
+    border-radius: 6px !important;
+  }
+  .mobile-library-search input { height: 40px !important; }
+}
+@media (min-width: 761px) {
+  /* The mobile content search is intentionally absent from the desktop layout. */
+  .mobile-library-search { display: none !important; }
+}
+/* An empty pager must not reserve a footer-height strip beside the fixed sidebar settings. */
+#pager:empty { display: none !important; }
+
+/* Desktop player layout: the seek rail is the top edge of the player, while
+ * transport controls and track information share one vertically centered row.
+ * Mobile keeps its separate centered transport layout below. */
+@media (min-width: 761px) {
+  /* The body grid sizes the player row with --ui-player-height, and this block
+   * sizes the bar with the same token, so the two cannot drift apart.  The bar
+   * used to be pinned to 76px here while the token kept the design system's
+   * 88px: the row reserved 88, the bar painted 76, and the leftover 12px showed
+   * as a strip of canvas under the player on every desktop window.  Filling the
+   * row is the right end of that: 76px left only 8px around a 60px cover. */
+  .player {
+    height: var(--ui-player-height) !important;
+    /* Track information owns the left edge and the transport owns the middle,
+     * so the two outer columns are equal shares of what is left over.  That is
+     * what puts the play cluster on the bar's centre line instead of wherever
+     * the title happens to end (R485). */
+    grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr) !important;
+    grid-template-rows: 1fr !important;
+    align-items: center !important;
+    column-gap: 16px !important;
+    padding: 0 20px !important;
+  }
+  .player .now-playing {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    align-self: center;
+    min-width: 0;
+  }
+  .player .transport {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+    width: max-content;
+    min-width: 0 !important;
+    justify-content: center !important;
+    align-self: center;
+  }
+  .player .player-actions {
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+    align-self: center;
+  }
+  .player .progress {
+    position: fixed !important;
+    z-index: 60 !important;
+    top: auto !important;
+    right: auto !important;
+    /* The rail straddles the player's top edge, so its offset is the bar height
+     * minus half the rail.  Deriving it from the token keeps it on the edge if
+     * the bar ever changes height again. */
+    bottom: calc(var(--ui-player-height) - 12px) !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: min(720px, calc(100vw - 48px)) !important;
+    height: 24px !important;
+    padding: 0 !important;
+    display: grid !important;
+    grid-template-columns: 38px minmax(0, 1fr) 38px !important;
+    align-items: center !important;
+    column-gap: 10px !important;
+    background: var(--ui-surface) !important;
+  }
+  .player .progress span {
+    display: block !important;
+    color: var(--ui-muted);
+    font-size: 10px !important;
+    line-height: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .player .progress #elapsed { grid-column: 1 !important; text-align: left !important; }
+  .player .progress input {
+    grid-column: 2 !important;
+    width: 100% !important;
+    height: 10px !important;
+    margin: 0 !important;
+  }
+  .player .progress #duration { grid-column: 3 !important; text-align: right !important; }
+}
+
+/* Short desktop windows keep the compact bar they were tuned for.  Carrying it
+ * on the token means the row shrinks with the bar instead of leaving a strip of
+ * canvas underneath. */
+@media (min-width: 761px) and (max-height: 620px) {
+  :root { --ui-player-height: 76px; }
+}
+
+/* Keep the mobile seek rail away from rounded screen corners and align the
+ * time labels to the same inset rather than stretching to the viewport edge. */
+@media (max-width: 760px), (pointer: coarse) and (min-width: 761px) and (max-width: 1100px) {
+  .player .progress {
+    min-width: 0 !important;
+    margin-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px)) !important;
+    justify-self: stretch;
+    box-sizing: border-box !important;
+  }
+  .player .progress input {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+}
+
+/* Keep timing with the song identity and align the seek rail to the player edge. */
+.now-meta #nowTime {
+  display: block !important;
+  margin-top: 2px;
+  color: var(--ui-muted) !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+  font-variant-numeric: tabular-nums !important;
+  white-space: nowrap !important;
+}
+.player .progress #elapsed,
+.player .progress #duration {
+  display: none !important;
+}
+.player .progress {
+  position: fixed !important;
+  z-index: 60 !important;
+  grid-column: auto !important;
+  grid-row: auto !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: auto !important;
+  bottom: var(--ui-player-height) !important;
+  transform: none !important;
+  width: auto !important;
+  height: 4px !important;
+  min-width: 0 !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: 4px !important;
+  padding: 0 !important;
+  margin: 0;
+  gap: 0 !important;
+  background: transparent !important;
+}
+.player .progress input {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+  width: 100% !important;
+  height: 4px !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+}
+/* Two readings on one painted band (R484): the played edge, and how far the
+ * element has buffered ahead of it.  Three hard stops in a single gradient keep
+ * the rail one 4px line instead of stacking elements on top of the native range,
+ * which is what the hit target and the thumb are still measured against.
+ *
+ * ``--seek-buffer`` falls back to ``--seek-fill``, so a source with no usable
+ * TimeRanges (the host player, a track that has not started) collapses the
+ * middle stop to zero width and the rail looks exactly as it did before.  The
+ * tint is ``--ui-selected`` (brand at 15%/25% by theme) rather than a new
+ * literal, so both themes derive the band from the same accent. */
+.player .progress input::-webkit-slider-runnable-track {
+  height: 4px !important;
+  border-radius: 0 !important;
+  background: linear-gradient(to right,
+    var(--ui-accent) 0 var(--seek-fill, 0%),
+    var(--ui-selected) var(--seek-fill, 0%) var(--seek-buffer, var(--seek-fill, 0%)),
+    var(--ui-line) var(--seek-buffer, var(--seek-fill, 0%)) 100%) !important;
+}
+/* A white core inside an accent ring, so the handle still reads where the accent
+ * meets the accent-coloured band.  It is 10px on a 4px rail, which is why every
+ * host of this rail has to let it overflow. */
+.player .progress input::-webkit-slider-thumb {
+  width: 10px !important;
+  height: 10px !important;
+  margin-top: -3px !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: var(--ui-surface) !important;
+  box-shadow: 0 0 0 2px var(--ui-accent) !important;
+}
+.player .progress #transportStateUnknown {
+  display: none !important;
+}
+@media (max-width: 760px), (pointer: coarse) and (min-width: 761px) and (max-width: 1100px) {
+  :root{--ui-header-height: 56px;--ui-player-height: 142px }
+  .player {
+    grid-template-rows: 58px 16px 50px !important;
+    height: 142px !important;
+  }
+  .player .progress {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: var(--ui-player-height) !important;
+    width: auto !important;
+    height: 4px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    /* app.css pins the phone rail to overflow:hidden, which would clip the 10px
+     * handle down to the 4px band.  Nothing else overflows here: the rail is
+     * anchored to both viewport edges, so there is no width to scroll. */
+    overflow: visible !important;
+  }
+  .player .progress input {
+    height: 4px !important;
+    width: 100% !important;
+  }
+  .player .transport {
+    grid-column: 1 / -1 !important;
+    grid-row: 3 !important;
+    justify-self: center !important;
+    align-self: center !important;
+    transform: translateY(-14px);
+  }
+}
+
+/* One stroke weight across the footer action row.  app.css pins these six icons
+ * to 2px, so the row rendered as three different weights beside the 1.75px
+ * controls everywhere else in the shell.  These selectors repeat app.css's
+ * specificity on purpose: the sheet loads later, so an equal-specificity
+ * !important wins without raising it.  The lyrics control is a filled glyph now
+ * and is handled above, so it is deliberately not in this list. */
+.player-actions #deviceBtn svg,
+.player-actions #favoriteCurrentBtn svg,
+.player-actions #repeatBtn svg,
+.player-actions #shuffleBtn svg,
+.player-actions #queueBtn svg,
+.player-actions #volumeBtn svg {
+  stroke-width: 1.75 !important;
+}
+
+
+/* Phone: the same DOM becomes two levels. The rail is the list page; picking a
+ * group opens its pane over the whole frame, and the back arrow returns. The
+ * footer only exists in the detail level, where there is something to write. */
+@media (max-width: 760px) {
+  /* [open] keeps the same specificity as the desktop frame rule, so the phone
+   * override wins on source order instead of losing to the pinned 680px frame. */
+  #folderDialog[open] {
+    inset: 0 !important;
+    margin: 0 !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+  }
+  .settings-shell { grid-template-rows: 52px minmax(0, 1fr) auto; }
+  .settings-head { padding: 0 var(--ui-space-4); }
+  .settings-head .dialog-close-button { flex-basis: 44px !important; width: 44px !important; height: 44px !important; }
+  /* The list level has no "up", only "out": the back arrow belongs to the
+   * detail level, where the header close button would be a second exit. */
+  .settings-back { display: none !important; }
+  .settings-shell.is-detail .settings-back { display: inline-grid !important; }
+  .settings-shell.is-detail .settings-head .dialog-close-button { display: none !important; }
+  .settings-body { position: relative; display: block; height: 100%; min-height: 0; }
+  .settings-nav {
+    height: 100%;
+    padding: 0 var(--ui-space-3);
+    overflow-y: auto;
+    border-right: 0;
+    background: var(--ui-raised);
+  }
+  .settings-nav button {
+    grid-template-columns: 20px minmax(0, 1fr) 16px;
+    gap: var(--ui-space-3);
+    min-height: 60px;
+    padding: var(--ui-space-2) 2px;
+    border-bottom: 1px solid var(--ui-line) !important;
+    border-radius: 0;
+  }
+  /* On the list level no group is "current", so none of them may look selected. */
+  .settings-shell:not(.is-detail) .settings-nav button.active { background: transparent !important; color: var(--ui-secondary) !important; }
+  .settings-shell:not(.is-detail) .settings-nav button.active .settings-nav-summary { color: var(--ui-muted) !important; }
+  .settings-nav-icon { width: 20px; height: 20px; }
+  .settings-nav-label { font-size: 14px; }
+  .settings-nav-summary { font-size: 12px; }
+  .settings-nav-chevron { display: block; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; color: var(--ui-muted) !important; }
+  .settings-panes { display: none; height: 100%; }
+  .settings-shell.is-detail .settings-nav { display: none; }
+  .settings-shell.is-detail .settings-panes { display: block; }
+  .settings-pane { padding: var(--ui-space-4); }
+  .settings-pane > .settings-group { max-width: none; }
+  /* On a phone the source list is the primary task and the probe inputs are
+   * optional, so the list comes first even though the DOM puts the probe form
+   * above it for the wider layout. */
+  [data-settings-block="metadata-providers"] > .settings-group-head { order: 0; }
+  [data-settings-block="metadata-providers"] > .metadata-probe-sample { order: 1; }
+  [data-settings-block="metadata-providers"] > #metadataProviderList { order: 2; }
+  [data-settings-block="metadata-providers"] > #metadataProviderStatusText { order: 3; }
+  .settings-shell:not(.is-detail) .settings-foot { display: none; }
+  .settings-foot { flex-wrap: wrap; min-height: 56px; padding: var(--ui-space-2) var(--ui-space-4); }
+  .settings-dirty { flex: 1 1 auto; }
+  .settings-foot-actions { flex: 1 1 100%; }
+  .settings-foot-actions .secondary-button { flex: 1 1 0; min-height: 44px; }
+}

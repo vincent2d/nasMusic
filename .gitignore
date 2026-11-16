@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime data
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+transcode/
+metadata/
+mpd.log
+mpd.pid
+info.log
+app.pid
+
+# Secrets and local configuration
+config.json
+.env
+.env.*
+
+# Build and package outputs
+node_modules/
+test-results/
+playwright-report/
+*.fpk
+*.tgz
+*.tar.gz
+*.apk
+android-client/.gradle/
+/.gradle-cache/
+android-client/.media3-inspect/
+android-client/local.properties
+android-client/**/build/
+.android-avd/
+artifacts/*/*.fpk
+artifacts/*/stage/
+artifacts/inspect-*/
+artifacts/*/_inspect*/
+artifacts/excluded-generated-cache/
+artifacts/*/fast-deploy-*.log
+
+# Local inspection output
+builds/
+$inspect/
+tmp-*/
+/.fnpack-stage*/
+/.pkginspect*/
+/.pkgstage*/
+/.tar-mode-test-*/
+/.trim-cli-*/
+/.trim-delete-test/
+/.verify*/
+/tmp-fnaudio-*
+/remote__api_library_items.json
+/fnaudio.fpk
+/artifacts/_scratch/
+
+# Cached third-party repositories; their fixed revisions are documented in references/.
+references/FNOS-API-upstream/
+references/libmpdclient/
+references/FNAPP/
+references/volumio3-backend/
+references/volumio2-ui/
+references/moode/
+references/moOde/
+
+# Editor and OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Android 正式签名材料：keystore 与环境变量文件。丢失即失去覆盖升级身份，
+# 由 tools/gen_release_keystore.py 生成，必须离线加密另存一份。
+.secrets/
+*.jks
+*.keystore

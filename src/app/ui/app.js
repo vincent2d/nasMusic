@@ -1,0 +1,11541 @@
+const state = { items: [], view: "all", queue: [], index: -1, devices: [], repeat: "off", shuffle: false, folderPath: "", playTarget: "local", playTargetName: "本机播放", libraryDirPath: "", libraryDirParent: "" };
+const $ = (id) => document.getElementById(id);
+const SETTINGS_SAVE_BUTTON_IDS = [
+  "saveLibrarySettingsBtn",
+  "savePlaybackSettingsBtn",
+  "saveRuntimeSettingsBtn",
+  "saveMetadataSettingsBtn",
+  "saveMetadataTagSettingsBtn",
+  "saveMetadataProvidersBtn",
+  "saveDlnaSettingsBtn",
+];
+// Each pane writes a different slice of the configuration, so five buttons that
+// all read "保存" say nothing about what is about to be written.  Keep the label
+// the markup already carries ("保存音乐库设置") and remember it, so the transient
+// "正在保存..." state can be undone without flattening the pane's own wording.
+function captureSettingsSaveLabels() {
+  SETTINGS_SAVE_BUTTON_IDS.forEach(id => {
+    const button = $(id);
+    if (!button) return;
+    const label = (button.textContent || "").trim();
+    if (label) button.dataset.saveLabel = label;
+  });
+}
+captureSettingsSaveLabels();
+state.playTargetName = "当前设备";
+const MUSICBRAINZ_PROVIDER_ID = "musicbrainz";
+const METADATA_PROVIDER_SAFE_ORDER = ["netease", "kuwo", "kugou", "migu", "joox", MUSICBRAINZ_PROVIDER_ID];
+state.metadataProviders = [];
+state.metadataProviderRecommended = [];
+state.metadataProviderResults = Object.create(null);
+state.metadataProvidersLoaded = false;
+state.metadataStatus = {};
+// Session-only event log for the settings page.  The service keeps queue counts,
+// not per-track history, so this log can only promise what actually exists.
+state.metadataLog = [];
+state.metadataLogFilter = "all";
+// Last provider-alert string written to the log, so a status poll that keeps
+// reporting the same cooling-down provider does not fill the log with copies.
+state.metadataProviderAlert = "";
+state.deviceSearchQuery = "";
+state.deviceTargetsRendered = [];
+state.metadataProviderDragId = "";
+state.metadataProviderTestInFlight = "";
+const audio = $("audio");
+const groupViews = { albums: "album", artists: "artist", composers: "composer", genres: "genre" };
+function isCreatorView(view = state.view) {
+  return globalThis.fnAudioCreatorViewPolicy.isCreatorView(view);
+}
+function currentCreatorName() {
+  return globalThis.fnAudioCreatorViewPolicy.currentCreatorName(state);
+}
+function currentCreatorAllTracks() {
+  return globalThis.fnAudioCreatorViewPolicy.currentCreatorAllTracks(state);
+}
+function currentCreatorTrackTotal() {
+  return globalThis.fnAudioCreatorViewPolicy.currentCreatorTrackTotal(state);
+}
+function currentCreatorLabel() {
+  return globalThis.fnAudioCreatorViewPolicy.currentCreatorLabel(state);
+}
+function setCurrentCreator(name, trackTotal = 0) {
+  globalThis.fnAudioCreatorViewPolicy.setCurrentCreator(state, name, trackTotal);
+}
+function setCurrentCreatorAllTracks(enabled) {
+  globalThis.fnAudioCreatorViewPolicy.setCurrentCreatorAllTracks(state, enabled);
+}
+function clearCurrentCreator() {
+  globalThis.fnAudioCreatorViewPolicy.clearCurrentCreator(state);
+}
+function resetCreatorState() {
+  globalThis.fnAudioCreatorViewPolicy.resetCreatorState(state);
+}
+function isCreatorAllTracksView() {
+  return globalThis.fnAudioCreatorViewPolicy.isCreatorAllTracksView(state);
+}
+function isCreatorAlbumView() {
+  return globalThis.fnAudioCreatorViewPolicy.isCreatorAlbumView(state);
+}
+function isAlbumCollectionView() {
+  return globalThis.fnAudioCreatorViewPolicy.isAlbumCollectionView(state);
+}
+function isAlbumDetailView() {
+  return globalThis.fnAudioCreatorViewPolicy.isAlbumDetailView(state);
+}
+function isAlbumSurfaceView() {
+  return globalThis.fnAudioCreatorViewPolicy.isAlbumSurfaceView(state);
+}
+const PLAYLIST_STORE_KEY = "fnaudio.playlists";
+const FAVORITE_STORE_KEY = "fnaudio.favorites";
+const MAX_LOCAL_PLAYLISTS = 1000;
+const MAX_LOCAL_PLAYLIST_TRACK_IDS = 10000;
+const MAX_LOCAL_FAVORITES = 50000;
+// Local storage is mutable outside this app. Bound JSON parsing before the
+// first library render so a damaged entry cannot stall startup.
+const MAX_UI_PREFERENCE_STORAGE_CHARS = 256 * 1024;
+const MAX_USER_MEDIA_STORAGE_CHARS = 4 * 1024 * 1024;
+const TRACK_COLUMNS_STORE_KEY = "fnaudio.trackColumns.v3";
+const TRACK_COLUMN_WIDTHS_STORE_KEY = "fnaudio.trackColumnWidths.v1";
+const LIBRARY_PAGE_SNAPSHOT_KEY = "fnaudio.libraryPageSnapshot.v1";
+const LIBRARY_PAGE_SNAPSHOT_TTL_MS = 15 * 60 * 1000;
+const LIBRARY_PAGE_SNAPSHOT_MAX_BYTES = 384 * 1024;
+const LEGACY_TRACK_COLUMNS_STORE_KEY = "fnaudio.trackColumns.v2";
+const OLDER_TRACK_COLUMNS_STORE_KEY = "fnaudio.trackColumns.v1";
+const TRACK_LONG_PRESS_DURATION_MS = 550;
+const TRACK_LONG_PRESS_MOVE_THRESHOLD_PX = 10;
+// R504: 文件夹 / 专辑 / 歌手 / 作曲者 / 类型 这些分组行也需要「长按出菜单」。
+// 时长与位移阈值刻意复用歌曲行那两个值——同一份列表里两种按住手感会被当成
+// 两种不同的手势，而它们本来就是同一件事。
+const GROUP_LONG_PRESS_DURATION_MS = TRACK_LONG_PRESS_DURATION_MS;
+const GROUP_LONG_PRESS_MOVE_THRESHOLD_PX = TRACK_LONG_PRESS_MOVE_THRESHOLD_PX;
+let activeTrackLongPress = null;
+let suppressedTrackClick = { rowKey: "", until: 0 };
+let activeGroupLongPress = null;
+let suppressedGroupClick = { groupKey: "", until: 0 };
+
+function parseStoredJson(key, fallback, maxChars = MAX_UI_PREFERENCE_STORAGE_CHARS) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (typeof raw !== "string" || raw.length > maxChars) return fallback;
+    return JSON.parse(raw);
+  } catch (_) {
+    return fallback;
+  }
+}
+
+const TRACK_COLUMN_DEFINITIONS = {
+  title: { label: "标题", width: 280, sort: "title" },
+  track_no: { label: "序号", width: 48, sort: "track_no" },
+  artist: { label: "歌手", width: 140, sort: "artist" },
+  album: { label: "专辑", width: 160, sort: "album" },
+  format: { label: "格式", width: 76, sort: "format" },
+  duration: { label: "时长", width: 72 },
+  size: { label: "大小", width: 88 },
+  quality: { label: "音质", width: 120 },
+  added: { label: "加入时间", width: 110, sort: "added" },
+  composer: { label: "作曲者", width: 180 },
+  genre: { label: "类型", width: 130 },
+};
+const DEFAULT_TRACK_COLUMNS = ["title", "track_no", "format", "album"];
+const DEFAULT_LIBRARY_TRACK_COLUMNS = ["title", "artist", "album", "size", "format"];
+const DEFAULT_ALBUM_DETAIL_TRACK_COLUMNS = ["track_no", ...DEFAULT_LIBRARY_TRACK_COLUMNS];
+const PAGED_LIBRARY_VIEWS = new Set(["all", "dsd", "recent", "random100", "folders", "albums", "artists", "composers", "genres"]);
+// R505（负责人要求）: 手机上不提供这三项文件类动作——打开包含的文件夹 / 分享外部链接 /
+// 删除歌曲。三者都要落到飞牛文件管理器，手机上只会弹出另一个 App 的面板或落回
+// showFileDetails；删除还是唯一一枚 danger 项，却紧挨着播放类动作。桌面保持原样。
+const MOBILE_HIDDEN_TRACK_ACTIONS = new Set(["open-folder", "share", "delete-file"]);
+state.libraryStatus = null;
+state.libraryLoadError = "";
+state.libraryStatusPromise = null;
+state.libraryStatusRefreshQueued = false;
+state.libraryStatusRequestToken = 0;
+state.libraryStatusController = null;
+state.accessProfile = "lan";
+state.accessProfileLoader = globalThis.fnAudioAccessProfileLoader?.create({
+  fetchProfile: () => fetchJsonChecked("api/access", {}, "读取访问模式失败"),
+});
+state.mp3Transcode = localStorage.getItem("fnaudio.mp3Transcode") === "1";
+state.sortDir = localStorage.getItem("fnaudio.sortDir.v2") || "asc";
+state.sortKey = localStorage.getItem("fnaudio.sortKey.v1") || "title";
+state.remoteStatus = null;
+state.dacStrategy = null;
+state.lyrics = [];
+state.lyricsTrackId = "";
+state.lyricsStatus = "idle";
+state.lyricsRequestToken = 0;
+state.lyricsLoadingTrackId = "";
+state.lyricsRequestController = null;
+state.lyricsPollTimer = 0;
+state.lyricsPollAttempts = 0;
+// Which lyric line the highlight projection last painted.  The panel is repainted
+// from several polling surfaces while the active line only changes every few
+// seconds, so the projection needs a memory of its own output.  null means "the
+// [data-lyric] nodes were not painted by me", which is what renderLyrics() and
+// showLyricsMessage() declare whenever they rebuild the panel.
+state.lyricsActiveLine = null;
+state.seeking = false;
+state.streamOffset = 0;
+state.pendingSeekTime = null;
+state.transcodeCacheReady = false;
+state.transcodeStatusRequestToken = 0;
+state.transcodeStatusController = null;
+state.playSourceKind = "";
+state.playbackLoadToken = 0;
+state.random100 = [];
+state.playlists = loadStoredPlaylists();
+state.favorites = loadStoredFavorites();
+state.pendingPlaylistTrack = "";
+state.pendingPlaylistTrackIds = [];
+state.pendingPlaylistTracks = [];
+state.actionTrackId = "";
+state.metadataCandidateRequestToken = 0;
+state.metadataCandidateController = null;
+state.metadataCandidateSearchController = null;
+state.metadataCandidateSearchToken = 0;
+state.metadataCandidateProviderId = "";
+// Which candidate the preview describes: the apply button lives in the dialog
+// footer now, so the choice has to survive outside the result list (R494).
+state.metadataCandidateSelection = null;
+// Track-level metadata prefetches are started when playback begins, rather
+// than waiting for the user to open the candidate dialog.  Keep one token per
+// song so rapid next/previous actions cannot apply a stale response to the
+// newly playing row.
+state.metadataPrefetchToken = 0;
+state.metadataPrefetchTrackId = "";
+state.metadataPrefetchTimer = 0;
+state.metadataPrefetchUnavailable = false;
+state.metadataPrefetchAttempts = 0;
+state.metadataPrefetchRecoverySeen = "";
+state.metadataPrefetchStartedAt = 0;
+state.metadataPrefetchRearms = 0;
+const METADATA_PREFETCH_MAX_ATTEMPTS = 12;
+state.metadataPrefetchLyricsTrackId = "";
+state.metadataPrefetchLyricsToken = 0;
+state.metadataPrefetchLyricsAttempts = 0;
+state.metadataPrefetchLyricsTimer = 0;
+state.metadataPrefetchController = null;
+state.metadataRequestLoader = globalThis.fnAudioMetadataRequestLoader?.create?.() || null;
+state.metadataPrefetchLyricsController = null;
+state.metadataRowRenderTimer = 0;
+state.metadataRowRenderUsesFrame = false;
+state.metadataRowRenderTrackIds = new Set();
+state.metadataRowRenderFieldsByTrack = new Map();
+state.metadataRowRenderForceFull = false;
+state.metadataRowRenderExpectedRequestSeq = 0;
+state.metadataRowRenderExpectedView = "";
+state.metadataRowRenderExpectedPage = 1;
+state.metadataRowRenderExpectedPageItems = null;
+// A small, cancellable first-page metadata lane.  It improves the initial
+// cover/album experience without enabling whole-library background crawling.
+state.visibleMetadataPrefetchTimer = 0;
+// `requestIdleCallback` is allowed to run immediately when the browser thinks
+// it has a gap.  Keep an explicit quiet window before opening provider
+// requests so a newly committed first page can paint and decode its local
+// covers without competing with metadata JSON, SQLite and keyed row patches.
+state.visibleMetadataPrefetchUsesIdle = false;
+state.visibleMetadataPrefetchSeq = 0;
+state.visibleMetadataPrefetchKeys = new Set();
+// Keys claimed by the currently running lane are separate from completed
+// dedupe history.  A same-page status refresh may abort the lane; those
+// in-flight claims must be released so the replacement lane can retry them.
+state.visibleMetadataPrefetchActiveKeys = new Map();
+state.visibleMetadataPrefetchController = null;
+state.visibleMetadataPrefetchRequestSeq = 0;
+state.visibleMetadataPrefetchItems = null;
+// A pending provider task can outlive one visible-lane polling window. Keep
+// one page-scoped, finite quiet re-arm so worker recovery does not require a
+// manual page switch, while still avoiding a permanent background poller.
+state.visibleMetadataPrefetchRearmTimer = 0;
+state.visibleMetadataPrefetchRearmKeys = new Map();
+state.visibleMetadataPrefetchRearmSeq = 0;
+// A terminal no_match / failed releases its page dedupe key only after a
+// cooldown. Without this a settling status refresh re-queued the very same
+// visible row about every 780 ms for the rest of the page's life.
+state.visibleMetadataPrefetchCooldownTimer = 0;
+state.visibleMetadataPrefetchCooldownKeys = new Map();
+state.visibleMetadataPrefetchCooldownSeq = 0;
+state.visibleMetadataPrefetchCooldownStreaks = new Map();
+// One armed press-and-activate token per list; consumed by the first click.
+state.libraryNavigationSpeculation = null;
+// One hover dwell timer plus at most one speculative request pair.
+state.libraryNavigationHoverTimer = 0;
+state.libraryNavigationHoverNode = null;
+state.libraryNavigationPrefetch = null;
+// The left-hand folder category has no row to hover. Keep one delayed, cached
+// entry probe so the first category click can adopt the same response pair as
+// a folder-row click instead of paying the gateway round trip after the press.
+state.folderNavigationPrefetchTimer = 0;
+state.folderNavigationPrefetchKey = "";
+state.groupName = "";
+state.artistName = "";
+state.artistAllTracks = false;
+state.artistTrackTotal = 0;
+state.composerName = "";
+state.composerAllTracks = false;
+state.composerTrackTotal = 0;
+state.remoteWasPlaying = false;
+state.remoteAutoAdvanceAt = 0;
+state.remoteSnapshotAt = 0;
+state.remoteBaseSeconds = 0;
+state.remoteStatusRequestInFlight = false;
+state.remoteStatusRequestToken = 0;
+state.remoteStatusController = null;
+state.remoteEventSource = null;
+state.itemHydrationPool = null;
+state.itemHydrationGeneration = 0;
+state.itemHydrationRequest = null;
+// Several referenced-item batches can settle in the same visual frame.
+// Coalesce their DOM work so a favorites/playlist list is not repainted once
+// per batch while the cache fills.
+state.itemHydrationRenderTimer = 0;
+state.itemHydrationInflight = new Map();
+state.itemHydrationInflightLimit = 32;
+state.remoteEventConnected = false;
+state.remoteEventRetryAt = 0;
+state.remoteUiLast = { transport: "", duration: -1, seconds: -1, current: "" };
+state.remoteStateVersion = 0;
+state.remoteLoadPromise = null;
+state.remoteLoadedKey = "";
+state.remoteLoadedAt = 0;
+state.remoteLoadController = null;
+state.remoteCueSegment = false;
+state.libraryLoading = false;
+// Keep the previous list mounted during navigation to avoid a blank flash,
+// but make that stale projection inert until the replacement page commits.
+state.libraryInteractionBlocked = false;
+// Background polling and the click gate share one bounded window. Every request through
+// the fnOS gateway starts a CGI worker, and the browser keeps only six HTTP/1.1
+// connections to it, so a page replacement has to be able to tell the 0.5s~1.5s ticks
+// to wait. The deadline keeps a request that never settles from starving status.
+const LIBRARY_INTERACTION_HOLD_MS = 4000;
+// The metadata projection is background telemetry, not page content. During a
+// scan the status loop polls once per second, and every poll used to add a
+// /api/metadata/status request that the fnOS CGI gateway served in ~0.9 s, so a
+// folder click queued behind requests nobody was waiting for. Three seconds is
+// far shorter than a scan takes and still catches metadata revisions promptly.
+const METADATA_PROJECTION_MIN_INTERVAL_MS = 3000;
+state.libraryInteractionHoldUntil = 0;
+state.libraryLoaded = 0;
+state.libraryTotal = 0;
+state.page = 1;
+const defaultPageSize = globalThis.fnAudioLibraryPageSizePolicy?.defaultPageSize(window) || 120;
+state.pageSize = globalThis.fnAudioLibraryPageSizePolicy?.resolvePageSize(localStorage, window) || defaultPageSize;
+state.pageTotal = 0;
+state.pageItems = [];
+state.groupRows = [];
+state.folderRows = [];
+state.folderRootRows = [];
+state.folderRoot = "";
+state.folderPage = 1;
+state.folderPageSize = 100;
+state.folderTotal = 0;
+state.itemCache = fnAudioItemCache(12000);
+state.itemCacheLimit = 12000;
+state.libraryResponseCache = fnAudioLruCache(48, { maxWeight: 6000, weightOf: libraryResponseWeight });
+// Deduplicate identical requests while a response is still in flight. The
+// completed-response LRU above cannot prevent duplicate fetches during a
+// rapid redraw; refresh requests intentionally bypass this map.
+state.libraryResponseInflight = new Map();
+state.libraryResponseInflightLimit = 32;
+state.libraryResponseActive = { value: 0 };
+state.libraryResponseEpoch = 0;
+state.libraryStatusTimer = 0;
+state.accessProfileTimer = 0;
+// Stable projection marker for metadata-backed fields in library responses.
+// Pending-job churn must not redraw the list; only committed metadata counts
+// (or an observable terminal error) invalidate the response LRU.
+state.metadataProjectionSignature = "";
+state.metadataProjectionLastFetchAt = 0;
+state.metadataProjectionRequestSeq = 0;
+state.libraryRequestSeq = 0;
+state.libraryAbortController = null;
+state.libraryLoadKey = "";
+state.libraryLoadPromise = null;
+// Identity of the last authoritative track page. It is distinct from the
+// in-flight load key so actions such as play-all cannot reuse visible rows
+// after the user has changed a search/filter but before its debounce reload.
+state.libraryPageKey = "";
+// Optional keyset continuation tokens for sequential track pages. Page jumps
+// and older hosts continue to use the existing offset contract.
+state.libraryPageCursors = new Map();
+// Keep the last committed row markup so status/metadata refreshes do not
+// tear down and recreate an unchanged list (which causes a visible flash and
+// resets image decoding in older WebViews).
+state.renderedTrackListHtml = null;
+// Most status refreshes (position, device labels, counters) do not alter the
+// visible song rows.  Retain their already-built markup by page-array identity
+// so the keyed commit guard does not first pay to serialize every row again.
+// Queue rows deliberately remain uncached because their inline playing marker
+// follows the current queue index.
+state.trackRowsMarkupCache = typeof WeakMap === "function" ? new WeakMap() : null;
+// Queue pagination and current-track定位 can ask for the same window during one
+// render. Keep only the latest bounded result; replacing the queue array or
+// changing search naturally invalidates it. 排序键不进缓存键：队列恒按入队
+// 顺序显示，改排序并不影响这份结果（R523）。
+state.queueDisplayCache = { queue: null, search: "", entries: [] };
+state.filteredTracksCache = { signature: null, tracks: [] };
+state.hydratingIds = new Set();
+// Missing items are normally a transient state while the library refreshes.
+// Keep a finite, expiring negative cache so a short response cannot suppress
+// that ID forever or accumulate across large playlist switches.
+state.unresolvedItemIds = globalThis.fnAudioItemNegativeCache?.create?.() || new Set();
+state.deviceLoadInFlight = false;
+state.deviceLoadRequestToken = 0;
+state.deviceLoadController = null;
+state.deviceRefreshTimer = null;
+state.deviceTargetsSignature = "";
+state.deviceSwitchInFlight = false;
+state.deviceTargetRevision = 0;
+state.rendererSession = null;
+state.rendererSnapshotAt = 0;
+// The last render evidence this browser painted into the transport row.
+// The outbound channel has `remoteUiLast` for the same job; the inbound one
+// had none, and that asymmetry is what this memo closes (R156).
+state.rendererUiLast = null;
+// The uri of a cast this browser stopped with a local play intent (TODO.md:72
+// ruling D-2). The status poll would otherwise hand the row straight back to it.
+state.rendererPreemptedUri = "";
+state.rendererRequestInFlight = false;
+state.rendererRequestToken = 0;
+state.rendererRequestController = null;
+state.remoteGeneration = 0;
+state.remoteEngineEpoch = 0;
+state.userStateHydrated = false;
+state.userStateSaveTimer = null;
+state.userStateSaveInFlight = false;
+state.userStateRevision = 0;
+state.userStateRefreshInFlight = false;
+state.userStateBase = { favorites: [], playlists: [] };
+state.userStateDirty = false;
+state.trackColumnPreferences = loadTrackColumnPreferences();
+state.trackColumnWidthPreferences = loadTrackColumnWidthPreferences();
+state.autoTrackColumnWidths = {};
+state.columnDialogColumns = null;
+state.selectedTrackRowKeys = new Set();
+state.selectedGroupKeys = new Set();
+state.actionGroupKey = "";
+state.externalShareLocation = null;
+state.pendingDeleteTrackIds = [];
+state.albumMetadata = globalThis.fnAudioAlbumMetadataCache?.(4096) || {
+  get() { return undefined; },
+  set() { return this; },
+  get size() { return 0; }
+};
+state.settingsTab = "library";
+state.searchTimer = null;
+state.nativePlayback = { available: false, mediaId: "", queueIds: [], position: 0, duration: 0, playing: false, playbackState: 1 };
+state.mediaSession = { supported: false, metadata: false, actions: [], host: "standalone" };
+state.hostPlaybackSession = typeof window.fnAudioCreateHostPlaybackSession === "function"
+  ? window.fnAudioCreateHostPlaybackSession(window)
+  : null;
+state.hostPlaybackSessionActivated = false;
+state.hostPlaybackMediaContextId = "";
+state.coverLoadScheduler = null;
+state.coverLoadStatus = { generation: 0, queued: 0, inFlight: 0, dropped: 0 };
+// Lightweight client-side evidence for first-paint regressions. Counters are
+// session-scoped and bounded; they never participate in rendering decisions.
+state.uiMetrics = {
+  renders: 0,
+  listCommits: 0,
+  // A warm start can retain its already-built snapshot rows when the
+  // authoritative page is visually identical. Keep this separate from the
+  // normal no-op counter so diagnostics can prove the anti-flicker handoff
+  // was actually used instead of merely assuming it from timing.
+  snapshotMarkupReuses: 0,
+  listMarkupNoops: 0,
+  coverHydrations: 0,
+  coverRequests: 0,
+  coverLoads: 0,
+  coverFailures: 0,
+  coverRetries: 0,
+  sessionStartedAt: Date.now(),
+  firstListCommitMs: 0,
+  firstCoverHydrationMs: 0,
+  metadataPrefetchFirstMs: 0,
+  metadataPrefetchRequests: 0,
+  metadataPrefetchSuccesses: 0,
+  metadataPrefetchFailures: 0,
+  metadataPrefetchNoMatches: 0,
+  metadataPrefetchLastMs: 0,
+  metadataPrefetchMaxMs: 0,
+  metadataPrefetchTotalMs: 0,
+};
+window.__fnAudioUiMetrics = state.uiMetrics;
+// Expose a stable, bounded diagnostic projection without exposing the
+// mutable internal counter object to external tooling.
+window.__fnAudioUiMetricsSnapshot = () => {
+  try {
+    return globalThis.fnAudioUiMetricsPolicy?.snapshot(state.uiMetrics) || {};
+  } catch (_) {
+    return {};
+  }
+};
+state.librarySnapshot = { hit: false, stale: false, savedAt: 0 };
+state.librarySnapshotEmptyGuardUsed = false;
+state.librarySnapshotPersistTimer = 0;
+state.librarySnapshotPersistKey = "";
+// Referenced queue/favorite/playlist rows are useful after restoring user
+// state, but must never compete with the first visible library page. Keep the
+// delayed owner explicit so a view switch can cancel the old post-paint task.
+state.referencedItemHydrationTimer = 0;
+state.referencedItemHydrationKey = "";
+
+function librarySnapshotKey(page = 1) {
+  // A bootstrap snapshot is a cached library response. Reuse the complete
+  // request identity so nested artist/album/folder selections cannot restore
+  // another surface's rows before the authoritative response arrives.
+  return libraryLoadRequestKey(page);
+}
+
+function restoreLibraryPageSnapshot(page = 1) {
+  try {
+    const raw = localStorage.getItem(LIBRARY_PAGE_SNAPSHOT_KEY);
+    const snapshot = globalThis.fnAudioLibraryPageSnapshotPolicy?.restore(raw, {
+      key: librarySnapshotKey(page), now: Date.now(), ttlMs: LIBRARY_PAGE_SNAPSHOT_TTL_MS,
+      maxBytes: LIBRARY_PAGE_SNAPSHOT_MAX_BYTES,
+      boundItems: items => globalThis.fnAudioLibraryRenderPolicy?.boundedTrackRows(items, state.pageSize)
+        || items.slice(0, Math.max(1, Math.min(500, Number(state.pageSize) || 120))),
+    });
+    if (!snapshot || snapshot.status !== "hit") {
+      state.librarySnapshot = { hit: false, stale: snapshot?.status === "stale", savedAt: Number(snapshot?.savedAt || 0) };
+      return false;
+    }
+    state.page = globalThis.fnAudioLibraryPageSnapshotPolicy?.boundedPage(page) || 1;
+    state.pageItems = snapshot.items;
+    state.items = state.pageItems;
+    state.pageTotal = snapshot.total;
+    state.libraryLoaded = state.pageItems.length;
+    state.libraryTotal = state.pageTotal;
+    state.libraryLoading = false;
+    cacheLibraryItems(state.pageItems);
+    state.librarySnapshot = { hit: true, stale: false, savedAt: snapshot.savedAt };
+    return true;
+  } catch (error) {
+    state.librarySnapshot = { hit: false, stale: false, savedAt: 0 };
+    return false;
+  }
+}
+
+function persistLibraryPageSnapshot(page = 1) {
+  if (!isPagedTrackListing() || !Array.isArray(state.pageItems) || !state.pageItems.length) return;
+  try {
+    const savedAt = Date.now();
+    const encoded = globalThis.fnAudioLibraryPageSnapshotPolicy?.encode({
+      key: librarySnapshotKey(page), savedAt, total: state.pageTotal,
+      items: state.pageItems, maxBytes: LIBRARY_PAGE_SNAPSHOT_MAX_BYTES,
+    });
+    if (!encoded) return;
+    localStorage.setItem(LIBRARY_PAGE_SNAPSHOT_KEY, encoded);
+    state.librarySnapshot = { hit: state.librarySnapshot.hit, stale: false, savedAt };
+  } catch (error) {
+    // Quota/private-mode failures must never block the library request.
+  }
+}
+
+function scheduleLibraryPageSnapshot(page = 1) {
+  if (state.librarySnapshotPersistTimer) {
+    if (typeof cancelIdleCallback === "function") cancelIdleCallback(state.librarySnapshotPersistTimer);
+    else clearTimeout(state.librarySnapshotPersistTimer);
+  }
+  const key = librarySnapshotKey(page);
+  state.librarySnapshotPersistKey = key;
+  const persist = () => {
+    state.librarySnapshotPersistTimer = 0;
+    if (state.librarySnapshotPersistKey !== key || librarySnapshotKey(page) !== key) return;
+    persistLibraryPageSnapshot(page);
+  };
+  if (typeof requestIdleCallback === "function") {
+    state.librarySnapshotPersistTimer = requestIdleCallback(persist, { timeout: 1200 });
+  } else {
+    state.librarySnapshotPersistTimer = setTimeout(persist, 180);
+  }
+}
+
+function cancelReferencedItemHydrationSchedule() {
+  if (!state.referencedItemHydrationTimer) return;
+  if (typeof cancelIdleCallback === "function") cancelIdleCallback(state.referencedItemHydrationTimer);
+  else clearTimeout(state.referencedItemHydrationTimer);
+  state.referencedItemHydrationTimer = 0;
+  state.referencedItemHydrationKey = "";
+}
+
+function scheduleReferencedItemHydration(requestSeq) {
+  const view = state.view;
+  const key = `${requestSeq}:${view}:${state.page}`;
+  if (state.referencedItemHydrationTimer && state.referencedItemHydrationKey === key) return;
+  cancelReferencedItemHydrationSchedule();
+  state.referencedItemHydrationKey = key;
+  const run = () => {
+    state.referencedItemHydrationTimer = 0;
+    if (
+      state.referencedItemHydrationKey !== key
+      || requestSeq !== state.libraryRequestSeq
+      || state.view !== view
+    ) return;
+    state.referencedItemHydrationKey = "";
+    hydrateReferencedItems();
+  };
+  // Queue and favorite hydration may involve hundreds of IDs after a session
+  // restore. Yield it until after the authoritative first page has painted;
+  // old WebViews use the short timer fallback when requestIdleCallback is not
+  // available.
+  if (typeof requestIdleCallback === "function") {
+    state.referencedItemHydrationTimer = requestIdleCallback(run, { timeout: 600 });
+  } else {
+    state.referencedItemHydrationTimer = setTimeout(run, 80);
+  }
+}
+
+function nativePlaybackAvailable() {
+  if (isRemoteTarget()) return false;
+  return nativeBridgeAvailable();
+}
+function nativeBridgeAvailable() {
+  try {
+    return Boolean(window.FnAudioNative && typeof window.FnAudioNative.isAvailable === "function" && window.FnAudioNative.isAvailable());
+  } catch (error) {
+    return false;
+  }
+}
+function nativePlaybackCall(method, ...args) {
+  if (!nativePlaybackAvailable()) return false;
+  try {
+    const bridge = window.FnAudioNative;
+    if (typeof bridge?.[method] !== "function") return false;
+    bridge[method](...args);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+const browserFetch = window.fetch.bind(window);
+const nativeHttpRequests = new Map();
+const nativeHttpResponseChunks = new Map();
+const MAX_NATIVE_HTTP_REQUESTS = 32;
+const MAX_NATIVE_HTTP_CHUNKS = 256;
+// A chunked transfer only exists while its request is still in flight, so the
+// transfer table is bounded by the same budget the request table uses. The bare
+// literal used here before duplicated that cap without naming it, so it could
+// drift from MAX_NATIVE_HTTP_REQUESTS (and Android MAX_NATIVE_HTTP_CALLS) silently.
+const MAX_NATIVE_HTTP_CHUNK_CHARS = 256 * 1024;
+const MAX_NATIVE_HTTP_RESPONSE_CHARS = 4 * 1024 * 1024;
+let nativeHttpRequestSequence = 0;
+function nativeAbortError() {
+  if (typeof DOMException === "function") {
+    return new DOMException("The operation was aborted.", "AbortError");
+  }
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+function clearNativeHttpTransfer(key, transfer) {
+  if (!transfer) return;
+  clearTimeout(transfer.timer);
+  if (nativeHttpResponseChunks.get(key) === transfer) nativeHttpResponseChunks.delete(key);
+}
+function clearNativeHttpRequest(requestId, pending, error = null) {
+  if (!pending || nativeHttpRequests.get(requestId) !== pending) return false;
+  nativeHttpRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  if (pending.signal && pending.abortHandler) pending.signal.removeEventListener("abort", pending.abortHandler);
+  try { window.FnAudioNative?.cancelRequestJson(requestId); } catch (ignore) {}
+  if (error) pending.reject(error);
+  return true;
+}
+function evictOldestNativeHttpRequest() {
+  const oldest = nativeHttpRequests.entries().next();
+  if (oldest.done) return false;
+  const [requestId, pending] = oldest.value;
+  return clearNativeHttpRequest(requestId, pending, new TypeError("原生认证请求过多，请稍后重试"));
+}
+function nativeHttpAvailable() {
+  try {
+    return Boolean(window.FnAudioNative && typeof window.FnAudioNative.requestJson === "function");
+  } catch (error) {
+    return false;
+  }
+}
+function isFnAudioApiUrl(url) {
+  return url.origin === window.location.origin
+    && /\/cgi\/ThirdParty\/fnaudio\/(?:index\.cgi\/)?api\//.test(url.pathname);
+}
+function nativeHttpResponse(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const body = typeof source.body === "string" ? source.body : "";
+  const rawStatus = source.status;
+  const status = typeof rawStatus === "number" && Number.isFinite(rawStatus)
+    ? Math.max(0, Math.min(599, Math.trunc(rawStatus))) : 0;
+  let headers;
+  try { headers = new Headers(source.headers && typeof source.headers === "object" ? source.headers : {}); }
+  catch (_) { headers = new Headers(); }
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: typeof source.statusText === "string" ? source.statusText.slice(0, 256) : "",
+    url: typeof source.url === "string" ? source.url.slice(0, 4096) : "",
+    headers,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+  };
+}
+window.fnAudioNativeOnHttpResponse = payload => {
+  let result = payload;
+  try { if (typeof payload === "string") result = JSON.parse(payload); }
+  catch (error) { return; }
+  const requestId = String(result?.requestId || "");
+  const pending = nativeHttpRequests.get(requestId);
+  if (!pending) return;
+  clearNativeHttpRequest(requestId, pending);
+  if (typeof result.networkError === "string" && result.networkError) {
+    pending.reject(new TypeError(result.networkError.slice(0, 256)));
+  } else {
+    try { pending.resolve(nativeHttpResponse(result)); }
+    catch (error) { pending.reject(error instanceof Error ? error : new TypeError("原生响应无效")); }
+  }
+};
+window.fnAudioNativeOnHttpChunk = (transferId, index, total, chunk) => {
+  const key = String(transferId || "");
+  const part = Number(index);
+  const count = Number(total);
+  if (!key || !Number.isInteger(part) || !Number.isInteger(count)
+      || part < 0 || count <= 0 || count > MAX_NATIVE_HTTP_CHUNKS) return;
+  const fragment = String(chunk || "");
+  if (fragment.length > MAX_NATIVE_HTTP_CHUNK_CHARS) return;
+  let transfer = nativeHttpResponseChunks.get(key);
+  if (!transfer || transfer.total !== count) {
+    if (nativeHttpResponseChunks.size >= MAX_NATIVE_HTTP_REQUESTS) return;
+    transfer = {
+      total: count,
+      chunks: new Array(count),
+      received: 0,
+      chars: 0,
+      timer: setTimeout(() => clearNativeHttpTransfer(key, transfer), 60000),
+    };
+    nativeHttpResponseChunks.set(key, transfer);
+  }
+  if (part < 0 || part >= transfer.total || transfer.chunks[part] !== undefined) return;
+  if (transfer.chars > MAX_NATIVE_HTTP_RESPONSE_CHARS - fragment.length) {
+    clearNativeHttpTransfer(key, transfer);
+    return;
+  }
+  transfer.chunks[part] = fragment;
+  transfer.received += 1;
+  transfer.chars += fragment.length;
+  if (transfer.received !== transfer.total) return;
+  clearNativeHttpTransfer(key, transfer);
+  window.fnAudioNativeOnHttpResponse(transfer.chunks.join(""));
+};
+function apiFetch(input, init = {}) {
+  const requestMethod = String(init.method || (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET")).toUpperCase();
+  let url;
+  try {
+    url = new URL(typeof Request !== "undefined" && input instanceof Request ? input.url : String(input), window.location.href);
+  } catch (error) {
+    return browserFetch(input, init);
+  }
+  if (!nativeHttpAvailable() || !isFnAudioApiUrl(url)) {
+    return browserFetch(input, init);
+  }
+  if (typeof Request !== "undefined" && input instanceof Request && init.body == null) {
+    return browserFetch(input, init);
+  }
+  const body = init.body == null ? "" : init.body;
+  if (typeof body !== "string") return browserFetch(input, init);
+  const headers = new Headers(typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
+  new Headers(init.headers || {}).forEach((value, name) => headers.set(name, value));
+  const headerObject = {};
+  headers.forEach((value, name) => { headerObject[name] = value; });
+  const requestId = `http-${Date.now()}-${++nativeHttpRequestSequence}`;
+  return new Promise((resolve, reject) => {
+    const signal = init.signal;
+    if (signal?.aborted) {
+      reject(nativeAbortError());
+      return;
+    }
+    const abortHandler = () => {
+      const pending = nativeHttpRequests.get(requestId);
+      if (!pending) return;
+      clearNativeHttpRequest(requestId, pending, nativeAbortError());
+    };
+    const timer = setTimeout(() => {
+      const pending = nativeHttpRequests.get(requestId);
+      if (!pending) return;
+      clearNativeHttpRequest(requestId, pending, new TypeError("原生认证请求超时"));
+    }, 45000);
+    while (nativeHttpRequests.size >= MAX_NATIVE_HTTP_REQUESTS) evictOldestNativeHttpRequest();
+    nativeHttpRequests.set(requestId, { resolve, reject, timer, signal, abortHandler });
+    if (signal) signal.addEventListener("abort", abortHandler, { once: true });
+    try {
+      window.FnAudioNative.requestJson(requestId, requestMethod, url.href, JSON.stringify(headerObject), body);
+    } catch (error) {
+      const pending = nativeHttpRequests.get(requestId);
+      if (pending) clearNativeHttpRequest(requestId, pending, error);
+      else reject(error);
+    }
+  });
+}
+async function fetchJsonChecked(input, init = {}, fallbackMessage = "请求失败", options = {}) {
+  // A strict caller treats "the body could not be read" as a failure instead of
+  // handing the fallback back as if the server had answered with an empty
+  // collection. The library list is the one response that gets cached per URL and
+  // painted as authoritative, so an oversized or half-delivered body used to reach
+  // the screen as a song list that looks legitimately empty.
+  const strictBody = options?.strictBody === true;
+  const externalSignal = init?.signal;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let removeExternalAbort = null;
+  if (controller && externalSignal && typeof externalSignal.addEventListener === "function") {
+    const abortFromOwner = () => { try { controller.abort(); } catch (_) {} };
+    if (externalSignal.aborted) abortFromOwner();
+    else {
+      externalSignal.addEventListener("abort", abortFromOwner, { once: true });
+      removeExternalAbort = () => {
+        try { externalSignal.removeEventListener("abort", abortFromOwner); } catch (_) {}
+      };
+    }
+  }
+  try {
+    const request = fetch(input, {
+      ...init,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 15000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    const data = result.data || {};
+    if (!response.ok) {
+      const authFailure = response.status === 401 || response.status === 403;
+      const error = new Error(authFailure
+        ? `登录已失效或没有访问权限，请重新登录（HTTP ${response.status}）`
+        : (data.message || data.error || `${fallbackMessage}（HTTP ${response.status}）`));
+      error.status = response.status;
+      throw error;
+    }
+    if (strictBody && globalThis.fnAudioResponseJsonLoader.parsedBody(result.bodyStatus) === false) {
+      const error = new Error(`${fallbackMessage}（响应体不完整）`);
+      error.name = "ResponseError";
+      error.bodyStatus = result.bodyStatus;
+      throw error;
+    }
+    return data;
+  } finally {
+    if (removeExternalAbort) removeExternalAbort();
+  }
+}
+async function fetchJsonResponseBounded(input, init = {}, timeoutMs = 15000) {
+  const externalSignal = init?.signal;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let removeExternalAbort = null;
+  if (controller && externalSignal && typeof externalSignal.addEventListener === "function") {
+    const abortFromOwner = () => { try { controller.abort(); } catch (_) {} };
+    if (externalSignal.aborted) abortFromOwner();
+    else {
+      externalSignal.addEventListener("abort", abortFromOwner, { once: true });
+      removeExternalAbort = () => {
+        try { externalSignal.removeEventListener("abort", abortFromOwner); } catch (_) {}
+      };
+    }
+  }
+  try {
+    const request = fetch(input, {
+      ...init,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    return await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: Math.max(1000, Math.min(30000, Number(timeoutMs) || 15000)),
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+  } finally {
+    if (removeExternalAbort) removeExternalAbort();
+  }
+}
+async function readResponseJsonBounded(response, fallback = {}) {
+  try {
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request: Promise.resolve(response),
+      timeoutMs: 15000,
+      fallback,
+    });
+    return result.data || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+// Route every same-origin fnAudio API call through the authenticated native
+// bridge. browserFetch was captured before this assignment, so non-API
+// resources and fallback requests still use WebView's original implementation.
+window.fetch = apiFetch;
+function absoluteAppUrl(value) {
+  try { return new URL(String(value || ""), window.location.href).href; }
+  catch (error) { return String(value || ""); }
+}
+function nativePlaybackUrl(item, isCurrent = false) {
+  const params = new URLSearchParams();
+  if (shouldTranscodeToMp3(item)) {
+    params.set("transcode", "mp3");
+    if (isCurrent && state.transcodeCacheReady) params.set("cache", "1");
+    else if (item.cue_track === true && playbackSeconds(item.cue_start) > 0) params.set("start", String(playbackSeconds(item.cue_start)));
+  } else if (shouldTranscodeDsdToWav(item)) params.set("transcode", "dsd_wav");
+  // Neither the browser media element nor Android ExoPlayer decodes Monkey's
+  // Audio reliably. Explicitly request the server's lossless FLAC resource;
+  // `transcode=original` would override the server-side automatic fallback.
+  else if (item.cue_track === true) params.set("transcode", "cue_flac");
+  else if (isApeTrack(item)) params.set("transcode", "ape_flac");
+  else params.set("transcode", "original");
+  return absoluteAppUrl(`${item.url}?${params.toString()}`);
+}
+
+function isApeTrack(item) {
+  return String(item?.format || "").toUpperCase() === "APE"
+    || /\.ape(?:$|[?#])/i.test(String(item?.url || item?.path || ""));
+}
+function nativeQueueItems() {
+  return state.queue.map((item, index) => ({
+    id: String(item.id || ""),
+    uri: nativePlaybackUrl(item, index === state.index),
+    title: displayTrackTitle(item),
+    artist: displayText(item.artist),
+    album: displayText(item.album),
+    artwork: coverUrl(item, 512) ? absoluteAppUrl(coverUrl(item, 512)) : "",
+    durationMs: Math.max(0, Math.round(playbackSeconds(item.duration) * 1000)),
+  }));
+}
+function nativeRemoteEnter(force = false) {
+  if (!isRemoteTarget() || !nativeBridgeAvailable() || !state.queue.length || !currentItem()) return false;
+  if (!state.remoteGeneration) state.remoteGeneration = Date.now() & 0x7fffffff;
+  if (!state.remoteEngineEpoch) state.remoteEngineEpoch = 1;
+  const position = currentSeconds();
+  const duration = seekDuration();
+  const transport = String(state.remoteStatus?.transport?.state || "").toUpperCase();
+  const signature = JSON.stringify([state.playTarget, nativeQueueSignature(), state.index]);
+  if (!force && state.nativeRemoteSignature === signature) {
+    nativeBridgeCall("updateRemoteState", state.playTarget, state.index, position, duration,
+      transport === "PLAYING" || transport === "TRANSITIONING", state.remoteGeneration, state.remoteEngineEpoch);
+    return true;
+  }
+  state.nativeRemoteSignature = signature;
+  nativeBridgeCall("enterRemoteMode", state.playTarget, state.playTargetName || "远程播放", JSON.stringify(nativeQueueItems()), state.index,
+    position, duration, transport === "PLAYING" || transport === "TRANSITIONING", state.repeat, Boolean(state.shuffle),
+    state.remoteGeneration, state.remoteEngineEpoch);
+  return true;
+}
+function nativeRemoteUpdate() {
+  if (!isRemoteTarget() || !nativeBridgeAvailable() || !currentItem()) return false;
+  const transport = String(state.remoteStatus?.transport?.state || "").toUpperCase();
+  return nativeBridgeCall("updateRemoteState", state.playTarget, state.index, currentSeconds(), seekDuration(),
+    transport === "PLAYING" || transport === "TRANSITIONING", state.remoteGeneration, state.remoteEngineEpoch);
+}
+function nativeRemoteExit() {
+  state.nativeRemoteSignature = "";
+  state.remoteGeneration = 0;
+  state.remoteEngineEpoch = 0;
+  return nativeBridgeCall("exitRemoteMode");
+}
+function nativeBridgeCall(method, ...args) {
+  if (!nativeBridgeAvailable()) return false;
+  try {
+    const bridge = window.FnAudioNative;
+    if (typeof bridge?.[method] !== "function") return false;
+    bridge[method](...args);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+function nativeQueueSignature(rows = nativeQueueItems()) {
+  // Queue IDs and source URLs are opaque. Delimiter-based signatures can
+  // collide when a valid filename/URI contains that delimiter, suppressing a
+  // necessary bridge queue replacement.
+  return JSON.stringify(rows.map(item => [item?.id, item?.uri]));
+}
+function nativeLoadQueue(autoPlay = true, startSeconds = 0, force = false) {
+  const item = currentItem();
+  if (!item || !nativePlaybackAvailable()) return false;
+  const rows = nativeQueueItems();
+  const remoteIds = Array.isArray(state.nativePlayback.queueIds) ? state.nativePlayback.queueIds.map(String) : [];
+  const localIds = rows.map(row => row.id);
+  const sameIds = remoteIds.length === localIds.length && remoteIds.every((id, index) => id === localIds[index]);
+  const sameCurrent = String(state.nativePlayback.mediaId || "") === String(item.id || "");
+  if (!force && sameIds && sameCurrent) {
+    if (autoPlay) nativePlaybackCall("play");
+    return true;
+  }
+  nativePlaybackCall("setQueue", JSON.stringify(rows), state.index, Math.max(0, Number(startSeconds || 0)), Boolean(autoPlay), state.repeat, Boolean(state.shuffle));
+  return true;
+}
+function nativeQueueNeedsRestore() {
+  const item = currentItem();
+  if (!item) return false;
+  const expectedIds = nativeQueueItems().map(row => String(row.id));
+  const nativeIds = Array.isArray(state.nativePlayback.queueIds)
+    ? state.nativePlayback.queueIds.map(String)
+    : [];
+  return !nativeIds.length
+    || nativeIds.length !== expectedIds.length
+    || nativeIds.some((id, index) => id !== expectedIds[index])
+    || String(state.nativePlayback.mediaId || "") !== String(item.id || "");
+}
+window.fnAudioNativeOnState = payload => {
+  let snapshot = payload;
+  try { if (typeof payload === "string") snapshot = JSON.parse(payload); }
+  catch (error) { return; }
+  if (!snapshot || snapshot.available !== true) return;
+  const previousMediaId = String(state.nativePlayback.mediaId || "");
+  state.nativePlayback = { ...state.nativePlayback, ...snapshot, available: true };
+  const mediaId = String(snapshot.mediaId || "");
+  if (mediaId && mediaId !== String(currentItem()?.id || "")) {
+    const next = state.queue.findIndex(item => String(item.id || "") === mediaId);
+    if (next >= 0) {
+      const previousIndex = state.index;
+      state.index = next;
+      state.streamOffset = 0;
+      state.pendingSeekTime = null;
+      state.transcodeCacheReady = false;
+      state.playSourceKind = "native";
+      syncCurrentQueuePresentation(previousIndex);
+      restoreLibraryNowPlaying();
+      syncLyricsForCurrentTrack(currentItem());
+      updateMediaSessionMetadata(currentItem());
+      updateFavoriteControls();
+      scheduleUserStateSave();
+    }
+  }
+  if (mediaId && mediaId !== previousMediaId) updateNowMarquee();
+  setPlayButton(snapshot.playing === true);
+  const duration = playbackSeconds(snapshot.duration, playbackSeconds(currentItem()?.duration));
+  const seconds = playbackSeconds(snapshot.position);
+  setTextContentIfChanged($("elapsed"), clock(seconds));
+  setTextContentIfChanged($("duration"), clock(duration));
+  if (!state.seeking) $("seek").value = duration ? Math.max(0, Math.min(100, seconds / duration * 100)) : 0;
+  syncPlayerProgress();
+  updateLyricHighlight();
+};
+
+function normalizeTrackColumns(columns) {
+  const selected = Array.isArray(columns) ? [...new Set(columns.filter(key => TRACK_COLUMN_DEFINITIONS[key]))] : [];
+  return selected.length ? selected : [...DEFAULT_TRACK_COLUMNS];
+}
+function defaultTrackColumnsForScope(scope = trackColumnScope()) {
+  if (scope.startsWith("albums:tracks:")) return [...DEFAULT_ALBUM_DETAIL_TRACK_COLUMNS];
+  if (scope.startsWith("artists:tracks:")) return [...DEFAULT_LIBRARY_TRACK_COLUMNS];
+  return scope === "all" || scope === "dsd" || scope.startsWith("folders:") ? [...DEFAULT_LIBRARY_TRACK_COLUMNS] : [...DEFAULT_TRACK_COLUMNS];
+}
+function trackColumnsForScope(scope, columns) {
+  const normalized = normalizeTrackColumns(columns);
+  const usesOldLibraryDefault = normalized.length === DEFAULT_TRACK_COLUMNS.length && normalized.every((key, index) => key === DEFAULT_TRACK_COLUMNS[index]);
+  const usesPreviousAlbumDetailDefault = scope.startsWith("albums:tracks:")
+    && normalized.length === DEFAULT_LIBRARY_TRACK_COLUMNS.length
+    && normalized.every((key, index) => key === DEFAULT_LIBRARY_TRACK_COLUMNS[index]);
+  if (usesPreviousAlbumDetailDefault) return defaultTrackColumnsForScope(scope);
+  return (scope === "all" || scope === "dsd" || scope.startsWith("folders:")) && usesOldLibraryDefault ? defaultTrackColumnsForScope(scope) : normalized;
+}
+function loadTrackColumnPreferences() {
+  const saved = parseStoredJson(TRACK_COLUMNS_STORE_KEY, []);
+  if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+    return Object.fromEntries(Object.entries(saved).map(([scope, columns]) => [scope, normalizeTrackColumns(columns)]));
+  }
+  const legacy = parseStoredJson(LEGACY_TRACK_COLUMNS_STORE_KEY, []);
+  if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
+    const migrated = Object.fromEntries(Object.entries(legacy).map(([scope, columns]) => [scope, normalizeTrackColumns(["title", ...(Array.isArray(columns) ? columns : [])])]));
+    try { localStorage.setItem(TRACK_COLUMNS_STORE_KEY, JSON.stringify(migrated)); } catch (_) {}
+    return migrated;
+  }
+  if (Array.isArray(legacy) && legacy.length) {
+    const migrated = { all: normalizeTrackColumns(["title", ...legacy]) };
+    try { localStorage.setItem(TRACK_COLUMNS_STORE_KEY, JSON.stringify(migrated)); } catch (_) {}
+    return migrated;
+  }
+  const older = parseStoredJson(OLDER_TRACK_COLUMNS_STORE_KEY, []);
+  if (Array.isArray(older) && older.length) return { all: normalizeTrackColumns(["title", ...older]) };
+  return {};
+}
+function normalizeTrackColumnWidths(widths) {
+  const source = widths && typeof widths === "object" && !Array.isArray(widths) ? widths : {};
+  return Object.fromEntries(Object.entries(source).flatMap(([key, value]) => {
+    const width = Math.round(Number(value));
+    return TRACK_COLUMN_DEFINITIONS[key] && Number.isFinite(width) && width >= 64 && width <= 900 ? [[key, width]] : [];
+  }));
+}
+function loadTrackColumnWidthPreferences() {
+  const saved = parseStoredJson(TRACK_COLUMN_WIDTHS_STORE_KEY, {});
+  if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+    return Object.fromEntries(Object.entries(saved).map(([scope, widths]) => [scope, normalizeTrackColumnWidths(widths)]));
+  }
+  return {};
+}
+function trackColumnScopePart(value) {
+  return encodeURIComponent(String(value || ""));
+}
+function buildTrackColumnScope(encodeParts) {
+  const part = encodeParts ? trackColumnScopePart : (value => String(value || ""));
+  if (isPlaylistLibraryView()) return "all";
+  if (state.view === "folders") return `folders:${part(state.folderRoot || "root")}:${part(state.folderPath || "")}`;
+  if (isCreatorAllTracksView()) return "all";
+  if (isCreatorView()) {
+    if (currentCreatorName() && state.groupName) return `albums:tracks:${part(state.groupName)}`;
+    if (currentCreatorName()) return `${state.view}:albums:${part(currentCreatorName())}`;
+    return state.view;
+  }
+  if (state.view === "albums") return state.groupName ? `albums:tracks:${part(state.groupName)}` : "albums";
+  if (state.view === "genres") return state.groupName ? "all" : "genres";
+  return String(state.view || "all");
+}
+function trackColumnScope() {
+  return buildTrackColumnScope(true);
+}
+function legacyTrackColumnScope() {
+  return buildTrackColumnScope(false);
+}
+function trackColumnScopeLabel() {
+  const scope = trackColumnScope();
+  if (scope.startsWith("folders:")) return "当前文件夹";
+  if (scope.startsWith("artists:albums:")) return "当前歌手的专辑列表";
+  if (scope.startsWith("composers:albums:")) return "当前作曲者的专辑列表";
+  if (scope.startsWith("albums:tracks:")) return "当前专辑的歌曲列表";
+  if (scope.startsWith("genres:tracks:")) return "当前类型的歌曲列表";
+  return { all: "全部音乐", dsd: "DSD 音乐", albums: "专辑列表", artists: "歌手列表", composers: "作曲者列表", genres: "类型列表", recent: "最近添加", random100: "随机 100 首", favorites: "收藏歌曲", queue: "当前队列" }[scope] || "当前列表";
+}
+function persistTrackColumnPreferences() {
+  try { localStorage.setItem(TRACK_COLUMNS_STORE_KEY, JSON.stringify(state.trackColumnPreferences)); } catch (_) {}
+  try { localStorage.setItem(TRACK_COLUMN_WIDTHS_STORE_KEY, JSON.stringify(state.trackColumnWidthPreferences)); } catch (_) {}
+}
+function currentTrackColumns() {
+  const scope = trackColumnScope();
+  if (Array.isArray(state.trackColumnPreferences[scope])) return trackColumnsForScope(scope, state.trackColumnPreferences[scope]);
+  const legacyScope = legacyTrackColumnScope();
+  if (legacyScope !== scope && Array.isArray(state.trackColumnPreferences[legacyScope])) {
+    const migrated = trackColumnsForScope(scope, state.trackColumnPreferences[legacyScope]);
+    state.trackColumnPreferences[scope] = migrated;
+    persistTrackColumnPreferences();
+    scheduleUserStateSave();
+    return migrated;
+  }
+  return defaultTrackColumnsForScope(scope);
+}
+function saveTrackColumns(columns) {
+  state.trackColumnPreferences[trackColumnScope()] = normalizeTrackColumns(columns);
+  persistTrackColumnPreferences();
+  scheduleUserStateSave();
+}
+function currentTrackColumnWidths() {
+  const scope = trackColumnScope();
+  const merged = { ...normalizeTrackColumnWidths(state.trackColumnWidthPreferences[scope]), ...normalizeTrackColumnWidths(state.autoTrackColumnWidths[scope]) };
+  // Stored and auto-measured widths can predate a column's current resize
+  // band.  Converge them on read so the template never shows a width that
+  // saveTrackColumnWidth() could not have written, and so the first drag grabs
+  // the width the user actually sees instead of a phantom out-of-band value.
+  return Object.fromEntries(Object.entries(merged).map(([key, width]) => [key, clampTrackColumnWidth(key, width)]));
+}
+function saveTrackColumnWidth(key, width) {
+  const value = clampTrackColumnWidth(key, width);
+  const scope = trackColumnScope();
+  state.trackColumnWidthPreferences[scope] = { ...normalizeTrackColumnWidths(state.trackColumnWidthPreferences[scope]), [key]: value };
+  persistTrackColumnPreferences();
+  scheduleUserStateSave();
+}
+
+function formatSize(bytes) {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let n = size, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+function fixMojibake(value) {
+  const text = String(value || "");
+  if (!/[ÃÂ�鈾鎾繧縺]/.test(text)) return text;
+  try {
+    const repaired = decodeURIComponent(escape(text));
+    if (repaired && repaired !== text) return repaired;
+  } catch (error) {
+  }
+  return text;
+}
+function displayText(value) {
+  return fixMojibake(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .replace(/[□■▢▣▤▥▦▧▨▩◻◼◽◾]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function displayTrackTitle(item) {
+  const title = displayText(item?.title);
+  const artist = displayText(item?.artist);
+  if (!title || !artist) return title;
+
+  // Keep the library metadata unchanged. Only hide an exact duplicate artist
+  // prefix or suffix that has been included in the title for display.
+  const escapedArtist = escapeRegExp(artist);
+  const separator = "[\\s\\-–—_:|]+";
+  const wrappedArtist = "[【[(（]\\s*" + escapedArtist + "\\s*[】)）]\\s*";
+  const cleaned = title
+    .replace(new RegExp("^" + wrappedArtist, "i"), "")
+    .replace(new RegExp("^" + escapedArtist + separator, "i"), "")
+    .replace(new RegExp(separator + escapedArtist + "$", "i"), "")
+    .trim();
+  return cleaned || title;
+}
+function clock(value) {
+  if (!Number.isFinite(value)) return "0:00";
+  return `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
+}
+function playbackSeconds(value, fallback = 0) {
+  if (typeof value === "boolean") return fallback;
+  const number = typeof value === "number" || typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+function remoteStateVersion(value) {
+  if (typeof value === "boolean" || (typeof value !== "number" && typeof value !== "string")) return null;
+  if (typeof value === "string" && value.length > 32) return null;
+  let number;
+  try { number = Number(value); } catch (_) { return null; }
+  return Number.isSafeInteger(number) && number >= 0 && number <= 2147483647 ? number : null;
+}
+function seekPercent(value, fallback = 0) {
+  const number = typeof value === "number" || typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : fallback;
+}
+function libraryCount(value, fallback = 0) {
+  const bounded = globalThis.fnAudioLibraryFullListPolicy?.boundedCount?.(value);
+  return Number.isFinite(bounded) ? bounded : fallback;
+}
+function userStateRevision(value, fallback = 0) {
+  if (typeof value === "boolean" || (typeof value !== "number" && typeof value !== "string")) return fallback;
+  if (typeof value === "string" && value.length > 64) return fallback;
+  let numeric;
+  try { numeric = Number(value); } catch (_) { return fallback; }
+  return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 1000000000000
+    ? numeric : fallback;
+}
+function mediaUrl(path) {
+  const value = typeof path === "string" && path.length <= 4096 ? path : "";
+  if (!value) return "";
+  try {
+    const url = new URL(value, window.location.href);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    return url.href;
+  } catch (error) {
+    return "";
+  }
+}
+function coverUrl(item, size = 160) {
+  const thumbnail = Number(size) === 160 ? item?.cover_thumbnail_url : "";
+  const source = thumbnail || item?.cover_url;
+  if (typeof source !== "string" || !source.trim() || source.length > 4096) return "";
+  // ``mediaUrl`` answers a rejected scheme with "", and ``new URL("", base)`` does
+  // not throw: it resolves to the base document. Re-parsing that empty answer
+  // would hand the caller the application's own URL as if it were usable
+  // artwork, so an empty answer has to stop here instead of being resolved.
+  const absolute = mediaUrl(source);
+  if (!absolute) return "";
+  try {
+    const url = new URL(absolute, window.location.href);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    if (Number(size) > 0) url.searchParams.set("size", String(Number(size)));
+    return url.href;
+  } catch (error) {
+    // A malformed historical/provider URL must not abort the whole list
+    // render. Treat only this cover as unavailable so the row keeps its
+    // centered music-symbol fallback and later metadata refresh can recover.
+    return "";
+  }
+}
+function usableCoverSource(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 4096) return "";
+  // Same empty-answer stop as ``coverUrl``: an empty ``mediaUrl`` result is a
+  // rejection, not a relative address to resolve against the document.
+  const absolute = mediaUrl(value.trim());
+  if (!absolute) return "";
+  try {
+    const url = new URL(absolute, window.location.href);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch (_) {
+    return "";
+  }
+}
+function resetPlaybackProgress() {
+  state.transcodeStatusRequestToken += 1;
+  try { state.transcodeStatusController?.abort(); } catch (_) {}
+  state.transcodeStatusController = null;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+}
+function dacCapsText(caps = {}) {
+  return globalThis.fnAudioDeviceCapsPresentation.format(caps);
+}
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, x => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[x]));
+}
+function parseLyrics(text) {
+  return globalThis.fnAudioLyricsParsePolicy.parse(text);
+}
+function itemById(id) {
+  return fnAudioItemLookup.lookupItem(id, state.itemCache, state.pageItems, state.items);
+}
+function currentItem() { return state.queue[state.index]; }
+function isRemoteTarget() { return globalThis.fnAudioPlaybackTargetPolicy.isRemote(state.playTarget); }
+function isDacTarget(target = state.playTarget) { return globalThis.fnAudioPlaybackTargetPolicy.isDac(target); }
+function isMpdTarget(target = state.playTarget) { return globalThis.fnAudioPlaybackTargetPolicy.isMpd(target); }
+function writeStoredUserMedia(key, value) {
+  // The server copy is authoritative, and the 4 MB read bound already tolerates
+  // a missing or truncated shadow, so a quota or private-mode failure must cost
+  // this cache only. Letting it throw cost more than that: every caller keeps
+  // the queued server save and the favorite repaint after the write (R171).
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (_) {
+    // Best-effort by design; the in-memory copy and the server queue still hold it.
+  }
+}
+function writeStoredPreference(key, value) {
+  // Preferences are intent caches, not a truth source: the caller has already
+  // updated the in-memory copy, and the authoritative step queued behind the
+  // write -- the re-render, the header repaint, the track reload -- is what the
+  // user actually clicked for. A quota or private-mode refusal may cost the
+  // persisted intent and nothing else (R172). The read side compares bare
+  // strings, so the value is stored verbatim, never JSON-encoded.
+  try {
+    localStorage.setItem(key, value);
+  } catch (_) {
+    // Best-effort by design; the next launch falls back to the default.
+  }
+}
+
+function loadStoredPlaylists() {
+  const value = parseStoredJson(PLAYLIST_STORE_KEY, [], MAX_USER_MEDIA_STORAGE_CHARS);
+  return normalizeUserMediaState({ playlists: value }).playlists;
+}
+function savePlaylists() {
+  writeStoredUserMedia(PLAYLIST_STORE_KEY, state.playlists);
+  scheduleUserStateSave();
+}
+function loadStoredFavorites() {
+  const value = parseStoredJson(FAVORITE_STORE_KEY, [], MAX_USER_MEDIA_STORAGE_CHARS);
+  return normalizeUserMediaState({ favorites: value }).favorites;
+}
+function saveFavorites() {
+  writeStoredUserMedia(FAVORITE_STORE_KEY, state.favorites);
+  scheduleUserStateSave();
+}
+function normalizeUserMediaState(source = {}) {
+  return globalThis.fnAudioUserMediaStatePolicy.normalize(source);
+}
+function userStateChanges() {
+  return globalThis.fnAudioUserMediaStatePolicy.changes(state.userStateBase, { favorites: state.favorites, playlists: state.playlists });
+}
+function applyUserStateChanges(source, changes) {
+  return globalThis.fnAudioUserMediaStatePolicy.apply(source, changes);
+}
+function persistUserMediaState(value) {
+  state.favorites = value.favorites;
+  state.playlists = value.playlists;
+  writeStoredUserMedia(FAVORITE_STORE_KEY, state.favorites);
+  writeStoredUserMedia(PLAYLIST_STORE_KEY, state.playlists);
+  updateFavoriteControls();
+}
+function userStatePayload() {
+  return {
+    favorites: state.favorites,
+    playlists: state.playlists,
+    changes: userStateChanges(),
+    revision: state.userStateRevision,
+    playback: {
+      queue: state.queue.map(item => String(item.id || "")).filter(Boolean),
+      current_id: state.queue[state.index]?.id || "",
+      repeat: state.repeat,
+      shuffle: state.shuffle,
+      target_id: state.playTarget || "local",
+    },
+    ui: {
+      track_columns: state.trackColumnPreferences,
+      track_column_widths: state.trackColumnWidthPreferences,
+    },
+  };
+}
+function scheduleUserStateSave(delay = 350) {
+  if (!state.userStateHydrated) return;
+  state.userStateDirty = true;
+  if (state.userStateSaveInFlight) return;
+  clearTimeout(state.userStateSaveTimer);
+  state.userStateSaveTimer = setTimeout(saveUserStateNow, delay);
+}
+async function saveUserStateNow() {
+  if (!state.userStateHydrated) return;
+  if (state.userStateSaveInFlight) {
+    state.userStateDirty = true;
+    return;
+  }
+  clearTimeout(state.userStateSaveTimer);
+  state.userStateSaveInFlight = true;
+  state.userStateDirty = false;
+  const payload = userStatePayload();
+  let retryDelay = 350;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const request = apiFetch("api/state/user", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    const data = result.data || {};
+    if (data.state && (response.ok || response.status === 409)) {
+      const latestChanges = userStateChanges();
+      const serverMedia = normalizeUserMediaState(data.state);
+      state.userStateBase = serverMedia;
+      state.userStateRevision = userStateRevision(data.state.revision, state.userStateRevision || 0);
+      persistUserMediaState(applyUserStateChanges(serverMedia, latestChanges));
+      if (response.status === 409) state.userStateDirty = true;
+    } else if (!response.ok || !globalThis.fnAudioResponseJsonLoader.parsedBody(result.bodyStatus)) {
+      // A 200 whose body never made it here is not an acknowledgement: keep the
+      // queued changes dirty so they retry instead of being dropped silently.
+      state.userStateDirty = true;
+      retryDelay = 2000;
+    }
+  } catch (error) {
+    state.userStateDirty = true;
+    retryDelay = 2000;
+  } finally {
+    state.userStateSaveInFlight = false;
+    if (state.userStateDirty) scheduleUserStateSave(retryDelay);
+  }
+}
+async function loadServerUserState() {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const request = fetch("api/state/user", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const data = result.data || {};
+    const serverState = data?.state || {};
+    let visibleListChanged = false;
+    if (serverState.initialized) {
+      visibleListChanged = await applyServerUserState(serverState);
+    } else {
+      state.userStateRevision = userStateRevision(serverState.revision);
+      state.userStateBase = normalizeUserMediaState(serverState);
+    }
+    state.userStateHydrated = true;
+    if (!serverState.initialized) scheduleUserStateSave();
+    renderAfterUserStateHydration({ visibleListChanged });
+  } catch (error) {
+    // A transient startup failure must not leave this lane permanently
+    // disabled: both saving and periodic reconciliation are gated on this
+    // flag. Keep the local copy, mark it for conflict-aware persistence, and
+    // let the normal retry path reconcile once the service returns.
+    state.userStateHydrated = true;
+    state.userStateDirty = true;
+    scheduleUserStateSave(2000);
+    renderAfterUserStateHydration();
+  } finally {}
+}
+async function applyServerUserState(serverState) {
+  // The server state request intentionally runs alongside the first library
+  // page.  Preserve a compact signature of only the state that can alter the
+  // currently mounted song rows before applying it, so an identical remote
+  // state does not cause a second full list render just after first paint.
+  const visibleSignatureBefore = visibleUserStatePresentationSignature();
+  state.userStateRevision = userStateRevision(serverState.revision);
+  state.userStateBase = normalizeUserMediaState(serverState);
+  persistUserMediaState(state.userStateBase);
+  const remoteColumns = serverState?.ui?.track_columns;
+  if (remoteColumns && typeof remoteColumns === "object" && !Array.isArray(remoteColumns) && Object.keys(remoteColumns).length) {
+    state.trackColumnPreferences = Object.fromEntries(Object.entries(remoteColumns).map(([scope, columns]) => [scope, normalizeTrackColumns(columns)]));
+    persistTrackColumnPreferences();
+  }
+  const remoteWidths = serverState?.ui?.track_column_widths;
+  if (remoteWidths && typeof remoteWidths === "object" && !Array.isArray(remoteWidths) && Object.keys(remoteWidths).length) {
+    state.trackColumnWidthPreferences = Object.fromEntries(Object.entries(remoteWidths).map(([scope, widths]) => [scope, normalizeTrackColumnWidths(widths)]));
+    persistTrackColumnPreferences();
+  }
+  await restorePlaybackSession(serverState.playback || {});
+  return visibleSignatureBefore !== visibleUserStatePresentationSignature();
+}
+async function refreshServerUserState() {
+  if (!state.userStateHydrated || state.userStateSaveInFlight || state.userStateRefreshInFlight) return;
+  state.userStateRefreshInFlight = true;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const request = fetch("api/state/user", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const data = result.data || {};
+    const serverState = data?.state || {};
+    const revision = userStateRevision(serverState.revision);
+    if (serverState.initialized && revision > state.userStateRevision) {
+      const pendingChanges = userStateChanges();
+      const visibleSignatureBefore = visibleUserStatePresentationSignature();
+      await applyServerUserState(serverState);
+      // applyServerUserState may await queue hydration or remote status. Any
+      // local edit made during that wait is now represented by latestChanges;
+      // retain both generations instead of letting the older snapshot win.
+      const latestChanges = userStateChanges();
+      const favoriteOperations = new Map();
+      [...(pendingChanges.favorites_add || [])].forEach(id => favoriteOperations.set(id, true));
+      [...(pendingChanges.favorites_remove || [])].forEach(id => favoriteOperations.set(id, false));
+      [...(latestChanges.favorites_add || [])].forEach(id => favoriteOperations.set(id, true));
+      [...(latestChanges.favorites_remove || [])].forEach(id => favoriteOperations.set(id, false));
+      const playlistOperations = new Map();
+      [...(pendingChanges.playlist_upserts || [])].forEach(item => {
+        if (item && typeof item.id === "string" && item.id) playlistOperations.set(item.id, item);
+      });
+      [...(pendingChanges.playlist_delete || [])].forEach(id => playlistOperations.set(id, null));
+      [...(latestChanges.playlist_upserts || [])].forEach(item => {
+        if (item && typeof item.id === "string" && item.id) playlistOperations.set(item.id, item);
+      });
+      [...(latestChanges.playlist_delete || [])].forEach(id => playlistOperations.set(id, null));
+      const mergedChanges = {
+        favorites_add: [...favoriteOperations].filter(([, added]) => added).map(([id]) => id),
+        favorites_remove: [...favoriteOperations].filter(([, added]) => !added).map(([id]) => id),
+        playlist_upserts: [...playlistOperations.values()].filter(item => item),
+        playlist_delete: [...playlistOperations].filter(([, item]) => !item).map(([id]) => id),
+      };
+      const merged = applyUserStateChanges(serverState, mergedChanges);
+      // applyServerUserState replaces the in-memory media state with the
+      // newer server snapshot. Re-apply local edits to memory as well as
+      // localStorage, otherwise a background refresh makes unsaved favorites
+      // or playlist edits disappear until the next reload.
+      persistUserMediaState(merged);
+      const visibleListChanged = visibleSignatureBefore !== visibleUserStatePresentationSignature();
+      if (JSON.stringify(merged) !== JSON.stringify(state.userStateBase)) scheduleUserStateSave();
+      renderAfterUserStateHydration({ visibleListChanged });
+    }
+  } catch (error) {
+  } finally {
+    state.userStateRefreshInFlight = false;
+  }
+}
+function hasVisibleLibraryPresentation() {
+  // User-state hydration runs in parallel with the initial library request.
+  // Rendering before that request resolves briefly commits an empty track list,
+  // then immediately replaces it with page one: a prominent first-open flash
+  // on slower NASes. A valid snapshot also counts as visible presentation.
+  return globalThis.fnAudioLibraryRenderPolicy?.hasVisiblePresentation({
+    librarySnapshotHit: state.librarySnapshot?.hit === true,
+    libraryLoaded: state.libraryLoaded,
+    pageItemsLength: state.pageItems?.length,
+    groupRowsLength: state.groupRows?.length,
+    folderRowsLength: state.folderRows?.length,
+    folderRootRowsLength: state.folderRootRows?.length,
+  }) === true;
+}
+
+function visibleUserStatePresentationSignature() {
+  // Do not include the entire restored playback payload: normal player
+  // controls are updated in-place and should never make a large library list
+  // rebuild.  The fields below are the only user-state fields that affect
+  // the mounted rows, table geometry, or the active client-side collection.
+  const currentPlaylistState = isPlaylistView() ? currentPlaylist() : null;
+  const queueState = state.view === "queue"
+    ? (state.queue || []).map(item => String(item?.id || ""))
+    : [];
+  try {
+    return JSON.stringify({
+      columns: state.trackColumnPreferences || {},
+      widths: state.trackColumnWidthPreferences || {},
+      favorites: state.favorites || [],
+      playlist: currentPlaylistState
+        ? { id: String(currentPlaylistState.id || ""), name: String(currentPlaylistState.name || ""), trackIds: currentPlaylistState.trackIds || [] }
+        : null,
+      queue: queueState,
+      queueIndex: state.view === "queue" ? Number(state.index || 0) : 0,
+    });
+  } catch (error) {
+    // A malformed local cache should choose the conservative path and allow
+    // one render, rather than make user-state restoration fail.
+    return "";
+  }
+}
+
+function refreshUserStateChrome() {
+  renderPlaylistNav();
+  updateFavoriteControls();
+  updateRepeatShuffleButtons();
+  updateDeviceLabel();
+  if (!isIncomingRendererSession()) restoreLibraryNowPlaying();
+}
+
+function renderAfterUserStateHydration({ visibleListChanged = false } = {}) {
+  // A restored page snapshot is already visible while the authoritative
+  // request is in flight. Rendering the whole page again merely because the
+  // user-state request won that race can make older WebViews repaint every
+  // visible row and briefly flash their lazy covers. Keep player/navigation
+  // state truthful now; the in-flight page response performs the one list
+  // commit with the hydrated state.
+  if (state.libraryLoading && state.librarySnapshot?.hit) {
+    refreshUserStateChrome();
+    return;
+  }
+  if (hasVisibleLibraryPresentation()) {
+    // A late but semantically identical state response was the remaining
+    // first-open flash: it rebuilt the first page after covers had begun
+    // decoding. Render only when it actually changes visible rows/columns.
+    if (visibleListChanged) render();
+    else refreshUserStateChrome();
+    return;
+  }
+  // Keep the player and navigation truthful while the first page is still in
+  // flight, without constructing an empty list or scheduling row measurements.
+  refreshUserStateChrome();
+}
+async function restorePlaybackSession(playback) {
+  // On a cold start the first page and a restored large queue both read the
+  // same SQLite index.  Give the visible library page one short head start:
+  // otherwise four queue-hydration batches can contend with page one and
+  // turn a fast cached list into a visibly slow/blank initial paint. This is
+  // only the initial hydration path; subsequent server-state refreshes keep
+  // their existing immediate recovery behavior.
+  if (!state.userStateHydrated && state.libraryLoading && state.libraryLoadPromise) {
+    try { await state.libraryLoadPromise; } catch (error) {}
+  }
+  const queueIds = Array.isArray(playback.queue) ? playback.queue.map(String).filter(Boolean) : [];
+  if (queueIds.length) {
+    const previousQueue = Array.isArray(state.queue) ? state.queue : [];
+    const previousById = new Map(previousQueue.map(item => [String(item?.id || ""), item]));
+    const byId = new Map();
+    let fetchedAny = false;
+    // CGI/App Center proxies and some mobile WebViews reject very long query
+    // strings. Hydrate a large persisted queue in bounded batches instead of
+    // sending hundreds of IDs in one request. A failed batch is ignored so a
+    // transient proxy error cannot erase an already playing queue.
+    const batches = [];
+    for (let offset = 0; offset < queueIds.length; offset += 100) batches.push(queueIds.slice(offset, offset + 100));
+    const pool = fnAudioBatchRequestPool(batches, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY, async batch => {
+      try {
+        const data = await fetchJsonChecked(
+          `api/library/items?ids=${encodeURIComponent(batch.join(","))}`,
+          {},
+          "读取播放队列失败",
+        );
+        return Array.isArray(data.items) ? data.items : [];
+      } catch (error) {
+        // Keep cached rows for this batch and continue hydrating later rows.
+        return [];
+      }
+    });
+    for (let index = 0; index < batches.length; index += 1) {
+      const items = await pool.get(index);
+      items.forEach(item => {
+        if (item && item.id) byId.set(String(item.id), item);
+      });
+      fetchedAny = fetchedAny || items.length > 0;
+    }
+    const hydrated = queueIds.map(id => byId.get(id) || previousById.get(id)).filter(Boolean);
+    if (hydrated.length || fetchedAny || !previousQueue.length) {
+      state.queue = hydrated;
+      cacheLibraryItems(state.queue);
+    }
+  }
+  const currentId = String(playback.current_id || "");
+  state.index = state.queue.findIndex(item => String(item.id) === currentId);
+  if (state.index < 0 && state.queue.length) state.index = 0;
+  state.repeat = ["off", "all", "one"].includes(playback.repeat) ? playback.repeat : "off";
+  state.shuffle = playback.shuffle === true;
+  state.playTarget = String(playback.target_id || "local");
+  state.playTargetName = state.playTarget === "local" ? "当前设备" : "已恢复播放设备";
+  await validateRestoredPlaybackTarget();
+  const nativeCurrentId = String(state.nativePlayback.mediaId || "");
+  if (state.playTarget === "local" && nativeCurrentId) {
+    const nativeIndex = state.queue.findIndex(item => String(item.id || "") === nativeCurrentId);
+    if (nativeIndex >= 0) state.index = nativeIndex;
+  }
+  updateRepeatShuffleButtons();
+  updateDeviceLabel();
+  restoreLibraryNowPlaying();
+  // A restored session does not necessarily re-enter `loadCurrent()` (for
+  // example after a cold WebView start), so explicitly kick the bounded
+  // current-track metadata lane here.  Without this, a song can show its
+  // restored title while lyrics/cover enrichment waits until the next manual
+  // play action.
+  prefetchCurrentTrackMetadata(currentItem());
+  syncLyricsForCurrentTrack(currentItem());
+  if (isRemoteTarget() && state.queue.length) {
+    startRemoteEventStream();
+    await refreshRemoteStatus({ allowAdvance: false });
+    const remoteCore = state.remoteStatus?.core;
+    if (remoteCore) applyCoreSnapshot(remoteCore, false);
+    nativeRemoteEnter(true);
+    updateRemoteUi();
+  } else if (state.playTarget === "local" && state.queue.length && nativePlaybackAvailable()) {
+    // Android may have been killed while the server-side session remains. Keep
+    // the restored queue prepared locally, but preserve the stopped state.
+    nativeLoadQueue(false, 0, true);
+  }
+}
+function isPlaylistView(view = state.view) { return String(view || "").startsWith("playlist:"); }
+function isPlaylistLibraryView(view = state.view) {
+  return view === "random100" || view === "recent" || view === "favorites" || view === "queue" || isPlaylistView(view);
+}
+function playlistIdFromView(view = state.view) { return String(view || "").replace(/^playlist:/, ""); }
+function currentPlaylist() { return state.playlists.find(x => x.id === playlistIdFromView()); }
+function makePlaylistId() { return `pl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`; }
+function shuffleItems(list) {
+  const items = Array.isArray(list) ? list.slice() : [];
+  if (!items.length) return items;
+  // The policy module owns the Fisher-Yates loop and the abnormal-RNG guards.
+  // Its 50,000-item budget caps how much of a queue may be *reordered*, not how
+  // much may be played, so anything beyond the budget keeps its original order
+  // at the tail: a shuffle action must never drop tracks from a large library.
+  const budget = window.fnAudioShufflePolicy?.MAX_ITEMS;
+  const limit = Number.isInteger(budget) && budget > 0 ? Math.min(budget, items.length) : items.length;
+  const head = items.slice(0, limit);
+  const tail = items.slice(limit);
+  let shuffled = null;
+  try {
+    shuffled = window.fnAudioShufflePolicy?.shuffle?.(head);
+  } catch (_) {
+    shuffled = null;
+  }
+  return Array.isArray(shuffled) && shuffled.length === head.length ? shuffled.concat(tail) : items;
+}
+function recentTracks() {
+  if (state.view === "recent" && state.pageItems.length) return state.pageItems;
+  return [];
+}
+function itemAddedTime(item) {
+  return Number(item.added_ns || item.added || item.modified_ns || item.modified || 0);
+}
+function sortDirectionFactor() {
+  return state.sortDir === "asc" ? 1 : -1;
+}
+function refreshSortedView() {
+  if (isPagedLibraryView()) { state.folderPage = 1; requestLibraryLoad(1, false); }
+  else {
+    if (isClientPagedView()) state.page = 1;
+    render();
+  }
+}
+function applyTrackSort(sortKey) {
+  if (!sortOptionsForView().some(([value]) => value === sortKey)) return;
+  if (state.sortKey === sortKey) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+  else {
+    state.sortKey = sortKey;
+    state.sortDir = "asc";
+  }
+  writeStoredPreference("fnaudio.sortKey.v1", state.sortKey);
+  writeStoredPreference("fnaudio.sortDir.v2", state.sortDir);
+  refreshSortedView();
+}
+function columnDragIcon() {
+  return '<svg viewBox="0 0 12 18" aria-hidden="true"><circle cx="3" cy="3" r="1"/><circle cx="9" cy="3" r="1"/><circle cx="3" cy="9" r="1"/><circle cx="9" cy="9" r="1"/><circle cx="3" cy="15" r="1"/><circle cx="9" cy="15" r="1"/></svg>';
+}
+function columnMoveIcon(direction) {
+  return direction === "up"
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 10 6 6 6-6"/></svg>';
+}
+function columnChoiceMarkup(key, selected, index, total) {
+  const definition = TRACK_COLUMN_DEFINITIONS[key];
+  const controls = selected
+    ? `<span class="column-drag-handle" title="拖动排序">${columnDragIcon()}</span><button class="column-move-button" type="button" data-column-move="up" title="上移" aria-label="上移" ${index === 0 ? "disabled" : ""}>${columnMoveIcon("up")}</button><button class="column-move-button" type="button" data-column-move="down" title="下移" aria-label="下移" ${index === total - 1 ? "disabled" : ""}>${columnMoveIcon("down")}</button>`
+    : "";
+  return `<div class="column-choice${selected ? " is-selected" : ""}" ${selected ? `draggable="true" data-column-key="${key}"` : ""}>${controls}<label class="column-choice-label"><input type="checkbox" value="${key}" ${selected ? "checked" : ""}><span>${definition.label}</span></label></div>`;
+}
+function columnSelectionFromDialog() {
+  return [...document.querySelectorAll("#selectedColumnChoiceList input:checked, #availableColumnChoiceList input:checked")].map(input => input.value);
+}
+function moveColumnChoice(key, direction) {
+  const columns = [...(state.columnDialogColumns || currentTrackColumns())];
+  const index = columns.indexOf(key);
+  const next = index + direction;
+  if (index < 0 || next < 0 || next >= columns.length) return;
+  [columns[index], columns[next]] = [columns[next], columns[index]];
+  state.columnDialogColumns = columns;
+  renderColumnChoices();
+}
+function bindColumnDragEvents() {
+  const selectedList = $("selectedColumnChoiceList");
+  if (!selectedList) return;
+  let dragging = null;
+  selectedList.querySelectorAll(".column-choice.is-selected").forEach(choice => {
+    choice.addEventListener("dragstart", event => {
+      dragging = choice;
+      choice.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", choice.dataset.columnKey || "");
+    });
+    choice.addEventListener("dragend", () => {
+      choice.classList.remove("is-dragging");
+      selectedList.querySelectorAll(".is-drag-over").forEach(node => node.classList.remove("is-drag-over"));
+      dragging = null;
+      state.columnDialogColumns = columnSelectionFromDialog();
+    });
+  });
+  selectedList.addEventListener("dragover", event => {
+    if (!dragging) return;
+    event.preventDefault();
+    const target = event.target.closest(".column-choice.is-selected");
+    if (!target || target === dragging) return;
+    const before = event.clientY < target.getBoundingClientRect().top + target.offsetHeight / 2;
+    selectedList.insertBefore(dragging, before ? target : target.nextSibling);
+    selectedList.querySelectorAll(".is-drag-over").forEach(node => node.classList.remove("is-drag-over"));
+    target.classList.add("is-drag-over");
+  });
+}
+function renderColumnChoices(columns = state.columnDialogColumns || currentTrackColumns()) {
+  const container = $("columnChoiceList");
+  if (!container) return;
+  const selectedColumns = normalizeTrackColumns(columns);
+  const selected = new Set(selectedColumns);
+  const available = Object.keys(TRACK_COLUMN_DEFINITIONS).filter(key => !selected.has(key));
+  container.innerHTML = `<section class="column-choice-section"><div class="column-choice-section-head"><strong>已显示列</strong><span>拖动调整顺序</span></div><div class="column-choice-selected" id="selectedColumnChoiceList">${selectedColumns.map((key, index) => columnChoiceMarkup(key, true, index, selectedColumns.length)).join("")}</div></section><section class="column-choice-section"><div class="column-choice-section-head"><strong>可显示列</strong><span>勾选后加入上方</span></div><div class="column-choice-available" id="availableColumnChoiceList">${available.map(key => columnChoiceMarkup(key, false, 0, 0)).join("")}</div></section>`;
+  container.querySelectorAll("input").forEach(input => input.onchange = () => {
+    state.columnDialogColumns = normalizeTrackColumns(columnSelectionFromDialog());
+    renderColumnChoices();
+  });
+  container.querySelectorAll("[data-column-move]").forEach(button => button.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    moveColumnChoice(button.closest("[data-column-key]")?.dataset.columnKey, button.dataset.columnMove === "up" ? -1 : 1);
+  });
+  bindColumnDragEvents();
+}
+function openColumnsDialog() {
+  state.columnDialogColumns = [...currentTrackColumns()];
+  renderColumnChoices();
+  const help = $("columnDialogHelp");
+  if (help) help.textContent = `正在设置：${trackColumnScopeLabel()}。此设置会单独保存。`;
+  $("columnsDialog").showModal();
+}
+function saveColumnChoices() {
+  const selected = state.columnDialogColumns || columnSelectionFromDialog();
+  saveTrackColumns(selected);
+  state.columnDialogColumns = null;
+  $("columnsDialog").close();
+  render();
+}
+function sortOptionsForView(view = state.view) {
+  return globalThis.fnAudioLibrarySortOptionsPolicy.options(view, {
+    creatorAllTracks: isCreatorAllTracksView(), creatorAlbum: isCreatorAlbumView(),
+    creatorView: isCreatorView(view), albumDetail: isAlbumDetailView(),
+    playlistView: isPlaylistLibraryView(view), hasGroupName: Boolean(state.groupName),
+  });
+}
+function updateSortOptions() {
+  const options = sortOptionsForView();
+  const defaultKey = globalThis.fnAudioLibrarySortOptionsPolicy.defaultKey(state.view, {
+    albumDetail: isAlbumDetailView(), folderRoot: state.folderRoot, folderPath: state.folderPath,
+  });
+  const previousKey = state.sortKey;
+  state.sortKey = options.some(([value]) => value === state.sortKey)
+    ? state.sortKey
+    : (options.some(([value]) => value === defaultKey) ? defaultKey : options[0][0]);
+  // Persist only a corrected/changed key. `render()` is also called for
+  // playback progress and must not turn into synchronous storage churn.
+  if (state.sortKey !== previousKey) writeStoredPreference("fnaudio.sortKey.v1", state.sortKey);
+}
+function compareTrackValue(a, b, key) {
+  return globalThis.fnAudioTrackSortPolicy.compare(a, b, key, { displayText, itemAddedTime });
+}
+function sortTracks(list, key = state.sortKey || "title") {
+  return globalThis.fnAudioTrackSortPolicy.sort(list, key, sortDirectionFactor(), { displayText, itemAddedTime });
+}
+function isPagedLibraryView(view = state.view) {
+  return PAGED_LIBRARY_VIEWS.has(String(view || ""));
+}
+function isClientPagedView(view = state.view) {
+  return view === "queue" || view === "favorites" || isPlaylistView(view);
+}
+function isPagedGroupListing() {
+  if (isCreatorAllTracksView()) return false;
+  return Boolean(groupViews[state.view] && !state.groupName);
+}
+function isPagedTrackListing() {
+  if (state.view === "folders") return Boolean(state.folderRoot || state.folderPath);
+  if (state.view === "recent" || state.view === "random100") return true;
+  if (isCreatorView()) return isAlbumDetailView() || isCreatorAllTracksView();
+  if (groupViews[state.view]) return Boolean(state.groupName);
+  return state.view === "all" || state.view === "dsd";
+}
+function currentQueryText() {
+  const value = $("searchInput")?.value;
+  return typeof value === "string" ? value.trim().slice(0, 4096) : "";
+}
+function libraryPageNumber(value, fallback = 1) {
+  try {
+    const number = Number(value);
+    if (!Number.isFinite(number) || !Number.isInteger(number) || number < 1) return fallback;
+    return number;
+  } catch (_) {
+    return fallback;
+  }
+}
+function libraryPageStep(value, fallback = 0) {
+  try {
+    const number = Number(value);
+    return Number.isFinite(number) && Number.isInteger(number) ? number : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+// The track-page query is built from explicit folder coordinates so a request
+// issued before a navigation (hover speculation) and the request that navigation
+// itself issues cannot drift apart. `currentQueryParams()` stays the state-fed
+// projection of the same builder.
+function libraryQueryParamsFor(folderRoot, folderPath, page, view = state.view) {
+  const queryView = String(view || state.view || "all");
+  const folderView = queryView === "folders";
+  return fnAudioLibraryQueryParams.buildLibraryQueryParams({
+    page,
+    pageSize: state.pageSize,
+    view: queryView,
+    sortKey: state.sortKey,
+    sortDir: state.sortDir,
+    search: currentQueryText(),
+    folderRoot,
+    folderPath,
+    creatorView: !folderView && isCreatorView(),
+    creatorName: folderView ? "" : currentCreatorName(),
+    groupView: !folderView && Boolean(groupViews[queryView]),
+    groupName: folderView ? "" : state.groupName,
+    playlistView: !folderView && isPlaylistView(),
+  });
+}
+function currentQueryParams() {
+  return libraryQueryParamsFor(state.folderRoot, state.folderPath, state.page);
+}
+function folderDisplayName(path) {
+  return globalThis.fnAudioFolderLabelPolicy.display(path);
+}
+function currentFolderLabel() {
+  return globalThis.fnAudioFolderLabelPolicy.label(state.folderRoot, state.folderPath);
+}
+function random100Tracks() {
+  if (state.view === "random100") return state.pageItems.length ? state.pageItems : state.random100;
+  return state.random100;
+}
+function playlistTracks(playlist = currentPlaylist()) {
+  if (!playlist) return [];
+  return playlist.trackIds.map(itemById).filter(Boolean);
+}
+function favoriteTracks() {
+  return state.favorites.map(itemById).filter(Boolean);
+}
+function isFavorite(id) {
+  const target = String(id || "");
+  return Boolean(target && state.favorites.some(favoriteId => String(favoriteId) === target));
+}
+function isPrivateHost(host) {
+  return globalThis.fnAudioHostPrivacyPolicy.isPrivateHost(host);
+}
+function shouldTranscodeToMp3(item) {
+  return Boolean(state.mp3Transcode && item && String(item.format || "").toUpperCase() !== "MP3");
+}
+function playbackBadge(item) {
+  if (isDacTarget()) return state.dacStrategy?.label || state.remoteStatus?.strategy?.label || "USB DAC 输出";
+  if (isMpdTarget()) return state.playTargetName || "NAS 本机播放";
+  if (isRemoteTarget()) return "原文件推送";
+  const format = String(item.format || "").toUpperCase();
+  if (shouldTranscodeToMp3(item)) return "转码 MP3";
+  if (shouldTranscodeDsdToWav(item)) return "DSD 转 WAV 96kHz/24bit";
+  return "原文件播放";
+}
+function shouldTranscodeDsdToWav(item) {
+  return item?.is_dsd === true && !isRemoteTarget() && !shouldTranscodeToMp3(item);
+}
+function effectiveProfile() {
+  if (isPrivateHost(window.location.hostname)) return "lan";
+  return state.accessProfile || "lan";
+}
+function updateModeButton() {
+  const title = state.mp3Transcode ? "关闭 MP3 转码" : "开启 MP3 转码";
+  // The header row that used to host the desktop and mobile switches was
+  // retired at every breakpoint, so the "播放输出" section's switch is the only
+  // surface left to repaint.
+  const settingsButton = $("settingsModeBtn");
+  if (settingsButton) {
+    settingsButton.textContent = state.mp3Transcode ? "MP3 转码：开" : "MP3 转码：关";
+    settingsButton.classList.toggle("active-control", state.mp3Transcode);
+    settingsButton.title = title;
+    settingsButton.setAttribute("aria-label", settingsButton.textContent);
+    settingsButton.setAttribute("aria-pressed", String(state.mp3Transcode));
+  }
+}
+function ensurePlaybackSettingsControls() {
+  if ($("settingsDeviceBtn") && $("settingsModeBtn")) return;
+  // The output target and the transcode switch act immediately, so they live in
+  // their own "播放输出" section instead of hanging below the Renderer name,
+  // where they looked like fields the save button would submit.
+  const host = $("playbackDeviceControls");
+  if (!host) return;
+  host.innerHTML = '<button class="secondary-button" id="settingsDeviceBtn" type="button">选择播放设备</button><button class="secondary-button settings-mode-button" id="settingsModeBtn" type="button" aria-pressed="false">MP3 转码：关</button>';
+  $("settingsDeviceBtn").onclick = openDeviceDialog;
+  $("settingsModeBtn").onclick = toggleMp3Transcode;
+  updateModeButton();
+}
+function scanProgressText() {
+  if (state.libraryLoading) return `正在加载音乐库：${state.libraryLoaded}${state.libraryTotal ? ` / ${state.libraryTotal}` : ""} 首`;
+  const status = state.libraryStatus || {};
+  if (!status.scanning) return "";
+  const phase = displayText(status.phase || "");
+  const current = displayText(status.current || "");
+  const found = Number(status.found || status.count || 0);
+  const scanned = Number(status.scanned || 0);
+  const prefix = phase ? `正在${phase}` : "正在扫描音乐库";
+  const suffix = current ? ` · ${current}` : "";
+  if (scanned || found) return `${prefix}：已检查 ${scanned} 个文件，已发现 ${found} 首歌曲${suffix}`;
+  return `${prefix}${suffix}`;
+}
+function renderLibraryHealth() {
+  const status = state.libraryStatus || {};
+  const health = $("libraryHealth");
+  if (!health) return;
+  // A status that never arrived is not an empty library.  The server always sends
+  // library_paths (an array, possibly empty) and a string library_path, so a
+  // payload with neither is a failed or still-pending request.  Counting its
+  // paths as zero used to print "0 configured directories, supports 0 formats"
+  // and raise the danger fill, which told the user their directory had vanished
+  // when in fact nothing had been read yet.
+  const hasPayload = Array.isArray(status.library_paths) || typeof status.library_path === "string";
+  const paths = Array.isArray(status.library_paths)
+    ? status.library_paths.filter(value => typeof value === "string" && value)
+    : [];
+  // Per-root health.  `exists`/`readable` only ever described roots[0], which is
+  // why the card spoke for a single directory: with two configured roots it named
+  // the first one and called the library healthy while the second was gone.  The
+  // server now sends `roots`; older payloads fall back to the singular flags.
+  const roots = Array.isArray(status.roots) && status.roots.length
+    ? status.roots.filter(entry => entry && typeof entry.path === "string" && entry.path)
+    : (status.library_path
+      ? [{
+        path: status.library_path,
+        allowed: status.allowed !== false,
+        exists: status.exists === true,
+        is_dir: status.is_dir !== false,
+        readable: status.readable === true,
+      }]
+      : []);
+  const usable = roots.filter(entry => entry.exists && entry.readable && entry.is_dir !== false);
+  const broken = roots.filter(entry => !entry.exists || !entry.readable || entry.is_dir === false);
+  const exists = roots.length ? roots.some(entry => entry.exists) : status.exists === true;
+  const readable = roots.length ? usable.length > 0 : status.readable === true;
+  const scanning = status.scanning === true;
+  // Treat a missing library_path the same as an empty one as long as the server
+  // did send the list: older payloads omit the singular field.
+  const unconfigured = hasPayload && !status.library_path && paths.length === 0;
+  let stateText;
+  if (!hasPayload) stateText = "音乐库状态未就绪";
+  else if (unconfigured) stateText = "尚未配置音乐目录";
+  else if (scanning) stateText = scanProgressText() || "正在扫描音乐库";
+  else if (roots.length && !usable.length) stateText = exists ? "目录不可读" : "目录不存在";
+  else if (broken.length) stateText = `${broken.length} 个目录不可用`;
+  else if (status.last_error) stateText = "最近一次扫描有错误";
+  else stateText = "目录正常";
+  const rootCount = Math.max(paths.length, roots.length);
+  // The path cell is a single nowrap line with an ellipsis, so a list of roots
+  // would be clipped down to the first one anyway.  The count belongs there and
+  // the roots that actually failed are named in the detail line, which wraps.
+  const pathText = rootCount > 1
+    ? `${rootCount} 个目录`
+    : displayText(status.library_path || paths[0] || "未配置");
+  const count = Math.max(0, Number(status.count || status.found || 0));
+  const lastScan = Number(status.last_scan || 0);
+  const lastScanText = Number.isFinite(lastScan) && lastScan > 0 ? new Date(lastScan * 1000).toLocaleString("zh-CN", { hour12: false }) : "尚未扫描";
+  const brokenText = broken.length
+    ? `不可用：${broken.map(entry => displayText(entry.path)).join("、")}`
+    : "";
+  const baseDetail = !hasPayload ? "还没有读取到音乐库状态，稍候会自动重试。" : (status.last_error || (scanning ? `已检查 ${Number(status.scanned || 0)} 个文件，已发现 ${Number(status.found || 0)} 首歌曲。` : (unconfigured ? "还没有配置音乐目录，选择目录后即可扫描并收录歌曲。" : `${rootCount} 个配置目录，支持 ${Array.isArray(status.supported_formats) ? status.supported_formats.length : 0} 种格式。`)));
+  const detail = hasPayload && !unconfigured && brokenText ? `${baseDetail} ${brokenText}` : baseDetail;
+  setTextContentIfChanged($("libraryHealthStatus"), stateText);
+  setTextContentIfChanged($("libraryHealthPath"), pathText);
+  setTextContentIfChanged($("libraryHealthCount"), `${count} 首`);
+  setTextContentIfChanged($("libraryHealthLastScan"), lastScanText);
+  setTextContentIfChanged($("libraryHealthDetail"), detail);
+  // Two states stay out of the danger fill: "no directory configured yet" is a
+  // first-run state, and "no payload yet" is a request that has not answered.
+  // Painting either one red made a healthy install look broken.
+  health.classList.toggle("is-error", hasPayload && !unconfigured && (broken.length > 0 || Boolean(status.last_error)));
+  health.classList.toggle("is-scanning", scanning);
+  const button = $("libraryScanNowBtn");
+  if (button) {
+    // One dead root must not disable scanning for the ones that still work.
+    const canScan = roots.length ? usable.length > 0 : (exists && readable);
+    button.disabled = !hasPayload || scanning || unconfigured || !canScan;
+    button.textContent = scanning ? "扫描中..." : "立即扫描";
+  }
+}
+function updateDeviceLabel() {
+  // Changing device repaints the row's *owner* without repainting the row: `render()`
+  // touches this label and nothing else, so a handover away from a stalled channel has to
+  // clear the lamp from here too.  The local branch writes nothing, so the extra call on
+  // every render costs zero DOM.
+  updateTransportStateUnknown();
+  const label = isRemoteTarget() ? state.playTargetName : "当前设备";
+  const desktopButton = $("deviceBtn");
+  if (desktopButton && desktopButton.title !== label) desktopButton.title = label;
+}
+function remoteDeviceId() { return isRemoteTarget() ? state.playTarget : ""; }
+function isIncomingRendererSession() {
+  return Boolean(state.rendererSession?.uri);
+}
+function localIsPlayingNow() {
+  // What the local element or the host player is doing, ignoring any render
+  // session that happens to own the visible row: the tail of ``isPlayingNow``,
+  // the same split as ``localPlaybackSeconds`` against ``currentSeconds``.
+  if (nativePlaybackAvailable()) return state.nativePlayback.playing === true;
+  return Boolean(audio.src && !audio.paused && !audio.ended);
+}
+function isPlayingNow() {
+  if (isIncomingRendererSession()) {
+    const transport = String(state.rendererSession.transport || "").toUpperCase();
+    return transport === "PLAYING" || transport === "TRANSITIONING";
+  }
+  if (isRemoteTarget()) return state.remoteStatus?.transport?.state === "PLAYING";
+  return localIsPlayingNow();
+}
+function updateFavoriteControls() {
+  const item = currentItem();
+  const active = Boolean(item && isFavorite(item.id));
+  // Only the player bar carries a favorite action now: the lyrics page is a
+  // read-only surface with no header buttons (R489).
+  const node = $("favoriteCurrentBtn");
+  if (!node) return;
+  node.classList.toggle("active-control", active);
+  node.setAttribute("aria-pressed", String(active));
+  const label = active ? "取消收藏当前歌曲" : "收藏当前歌曲";
+  node.title = label;
+  node.setAttribute("aria-label", label);
+}
+function refreshFavoritePresentation() {
+  const count = $("favoriteCount");
+  if (count && count.textContent !== String(state.favorites.length)) count.textContent = String(state.favorites.length);
+  updateFavoriteControls();
+  // Only the favorites surface derives its rows from this collection. On a
+  // normal library page, rebuilding the list after a favorite click needlessly
+  // competes with cover decoding and can look like a post-load flicker.
+  if (state.view === "favorites") render();
+}
+function updateNowMarquee() {
+  if (document.body.classList.contains("mobile-search-active")) return;
+  requestAnimationFrame(() => {
+    // scrollWidth/clientWidth force layout and each style write invalidates it
+    // again, so both nodes are measured before anything is painted: one forced
+    // layout per poll instead of two. A poll whose distance did not change skips
+    // the write, which keeps the 1.5s renderer poll from touching style.
+    const nodes = ["nowTitle", "nowArtist"].map(id => $(id)).filter(node => node && node.style);
+    const distances = nodes.map(node => Math.max(0, node.scrollWidth - node.clientWidth));
+    distances.forEach((distance, index) => {
+      const node = nodes[index];
+      const value = `${distance}px`;
+      setStyleVarIfChanged(node, "--marquee-distance", value);
+      node.classList.toggle("is-overflowing", distance > 2);
+    });
+  });
+  // Marquee geometry only. Every path that owns the transport row paints it
+  // itself: the 1.5s render poll syncs inside updateIncomingRendererUi, the
+  // load/restore/boot paths sync explicitly beside their own text writes, and
+  // local playback is ticked by audio.ontimeupdate. Syncing on the side here
+  // made that poll write the pair twice per tick and turned every window resize
+  // into a progress repaint (R101, TODO item on the duplicate syncPlayerProgress).
+}
+function syncNowPlayingTime(seconds = currentSeconds(), duration = seekDuration()) {
+  setTextContentIfChanged($("nowTime"), `${clock(seconds)} / ${clock(duration)}`);
+}
+function syncPlayerProgress() {
+  const duration = seekDuration();
+  const seconds = currentSeconds();
+  syncNowPlayingTime(seconds, duration);
+  updateSeekRail();
+  updateTransportStateUnknown();
+}
+function updateSeekRail(value = $("seek")?.value || 0) {
+  const fill = seekPercent(value);
+  // The buffered band never sits behind the played edge.  A seek past the buffer
+  // leaves the element's ranges behind the playhead, and a band that shrank on
+  // seek would read as if the file were being unloaded instead of as "not there
+  // yet", so the fill wins that comparison (R484).
+  const buffered = Math.max(fill, seekBufferedPercent());
+  setStyleVarIfChanged($("seek"), "--seek-fill", `${fill}%`);
+  setStyleVarIfChanged($("seek"), "--seek-buffer", `${buffered}%`);
+}
+function seekBufferedPercent() {
+  // How far the element has buffered, expressed in the rail's own time base.
+  // ``audio.buffered`` is measured in the element's clock, so it moves onto the
+  // rail by the same delta ``localPlaybackSeconds`` applies to
+  // ``audio.currentTime``: a stream adds the offset it was opened at, a plain
+  // cue track subtracts where the track starts.  Deriving the delta from the
+  // played edge instead of re-deriving the cue arithmetic keeps one authority
+  // for that mapping.
+  //
+  // A row that belongs to a caster or to the host player has no element ranges
+  // behind it, and a band drawn there would be a guess rather than a reading.
+  if (isIncomingRendererSession() || isRemoteTarget() || nativePlaybackAvailable()) return 0;
+  const duration = seekDuration();
+  if (!(duration > 0)) return 0;
+  const ranges = audio.buffered;
+  if (!ranges || !ranges.length) return 0;
+  const end = playbackSeconds(ranges.end(ranges.length - 1));
+  const played = playbackSeconds(audio.currentTime);
+  const railEnd = localPlaybackSeconds() + (end - played);
+  // One decimal is the coarsest step that still moves the band by less than a
+  // pixel on a phone rail; without it the var changes in the twelfth decimal on
+  // every buffer tick and the compare-first writer never gets to skip a frame.
+  return seekPercent(Math.round(railEnd / duration * 1000) / 10);
+}
+function updateTransportStateUnknown() {
+  // Say so when the transport row is running on extrapolation instead of on evidence.
+  // The two status channels are asked about separately, in the order `currentSeconds`
+  // resolves them: an incoming render session owns the row even when this app is not
+  // targeting a remote device itself.  Everything else on screen is local playback,
+  // whose authority is `audio.ontimeupdate` - that pump cannot stall while still
+  // reporting fresh numbers, so there is nothing to flag and the lamp is cleared.
+  let unknown = false;
+  if (isIncomingRendererSession()) {
+    unknown = transportStateIsUnknown(state.rendererSnapshotAt,
+      String(state.rendererSession?.transport || "").toUpperCase() === "PLAYING");
+  } else if (isRemoteTarget()) {
+    unknown = transportStateIsUnknown(state.remoteSnapshotAt,
+      String(state.remoteStatus?.transport?.state || "").toUpperCase() === "PLAYING");
+  }
+  setDatasetStateIfChanged($("transportStateUnknown"), unknown);
+}
+function externalArtworkUrl(value) {
+  try {
+    const url = new URL(String(value || ""), window.location.href);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch (error) {
+    return "";
+  }
+}
+function recordPlaceholderMarkup() {
+  return '<svg class="record-placeholder" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7.5"></circle><circle class="record-placeholder-center" cx="12" cy="12" r="2.1"></circle></svg>';
+}
+function setCoverArtwork(node, source) {
+  // The renderer status poll runs every 1.5s and the lyrics retry poll every
+  // 900ms, and both repaint these cover blocks.  Assigning innerHTML
+  // unconditionally throws away a fully decoded <img> and decodes the same
+  // address again, which reads as a visible cover flash on every poll, so a
+  // repeated address has to be a no-op.  A failed address drops to the fallback
+  // glyph and is not retried until the address changes, which keeps a broken
+  // cover from being requested once per poll.
+  if (!node) return false;
+  const next = typeof source === "string" ? source : "";
+  if (node.dataset.coverSource === next) return false;
+  node.dataset.coverSource = next;
+  node.classList.toggle("has-artwork", Boolean(next));
+  node.innerHTML = next
+    ? `<img src="${escapeHtml(next)}" onerror="this.parentNode.classList.remove('has-artwork');this.parentNode.innerHTML=recordPlaceholderMarkup()">`
+    : recordPlaceholderMarkup();
+  return true;
+}
+function normalizeDialogCloseControls() {
+  const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+  ["closeDialog", "closeFolderDialog", "closeDlnaDiagnosticsDialog", "closePlaylistDialog",
+    "closeTrackActionDialog", "closeMetadataCandidateDialog", "closeExternalShareDialog",
+    "closeColumnsDialog"].forEach(id => {
+    const button = $(id);
+    if (!button) return;
+    button.classList.add("dialog-close-button");
+    button.type = "button";
+    button.title = button.title || "关闭";
+    button.setAttribute("aria-label", button.getAttribute("aria-label") || "关闭");
+    button.innerHTML = icon;
+  });
+}
+function normalizeButtonTypes() {
+  document.querySelectorAll("button:not([type])").forEach(button => {
+    const form = button.closest("form");
+    button.type = form?.id === "metadataCandidateSearchForm" ? "submit" : "button";
+  });
+}
+function installDialogFocusManagement() {
+  if (typeof MutationObserver !== "function") return;
+  const owners = new WeakMap();
+  const focusSelector = "[autofocus], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]):not(.dialog-close-button), [href], [tabindex]:not([tabindex=\"-1\"])";
+  const focusDialog = dialog => {
+    const preferred = dialog.getAttribute("data-dialog-initial-focus");
+    const preferredNode = preferred ? document.getElementById(preferred) : null;
+    const target = preferredNode && dialog.contains(preferredNode) ? preferredNode : null;
+    const next = target || dialog.querySelector(focusSelector) || dialog.querySelector(".dialog-close-button");
+    if (next && typeof next.focus === "function") next.focus({ preventScroll: true });
+  };
+  const restoreOwner = dialog => {
+    const owner = owners.get(dialog);
+    owners.delete(dialog);
+    if (owner && typeof owner.focus === "function" && document.contains(owner)) {
+      owner.focus({ preventScroll: true });
+    }
+  };
+  document.querySelectorAll("dialog").forEach(dialog => {
+    dialog.addEventListener("close", () => restoreOwner(dialog));
+  });
+  const observer = new MutationObserver(records => {
+    for (const record of records) {
+      if (record.type !== "attributes" || record.attributeName !== "open") continue;
+      const dialog = record.target;
+      if (!dialog || dialog.tagName !== "DIALOG") continue;
+      if (dialog.open) {
+        const active = document.activeElement;
+        owners.set(dialog, active && active !== document.body && !dialog.contains(active) ? active : null);
+        Promise.resolve().then(() => { if (dialog.open) focusDialog(dialog); });
+      }
+    }
+  });
+  observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["open"] });
+}
+function setNowPlayingCover(source) {
+  return setCoverArtwork($("nowCover"), source);
+}
+function renderIncomingRendererSession(session) {
+  const title = displayText(session.title || "DLNA 输入");
+  const artist = displayText(session.artist || "未知艺术家");
+  const art = externalArtworkUrl(session.art_url);
+  setTextContentIfChanged($("nowTitle"), title);
+  setTextContentIfChanged($("nowArtist"), `${artist} · 来自 DLNA 控制端 · ${state.playTargetName || "本机 USB DAC"}`);
+  setNowPlayingCover(art);
+  // The transport row is only ticked every 500ms while the app itself targets a
+  // remote device, so an incoming cast with a local play target has to be painted
+  // from this 1.5s status poll instead.
+  updateIncomingRendererUi();
+  updateNowMarquee();
+}
+function resetTransportRow() {
+  // The transport row describes whatever the library view is playing. An incoming cast paints it
+  // from the status poll (`updateIncomingRendererUi` above), while restoring the library panel used
+  // to rewrite only the title, the artist and the cover - so after a cast ended with nothing
+  // selected locally, "未选择曲目" stayed on screen next to 1:40 of a track nothing was playing
+  // (TODO.md:58). Same reset the stop path (:2043) and a fresh load (:4375) already use, plus the
+  // rail fill and the icon, which those two sites leave to their own callers.
+  setTextContentIfChanged($("elapsed"), "0:00");
+  setTextContentIfChanged($("duration"), clock(seekDuration()));
+  const rail = $("seek");
+  if (rail) rail.value = 0;
+  updateSeekRail(0);
+  setPlayButton(false);
+  // The memos that keep `updateRemoteUi` and `updateIncomingRendererUi` from
+  // repainting describe the session that just ended, so they have to go with the
+  // row they were guarding.
+  state.remoteUiLast = null;
+  state.rendererUiLast = null;
+}
+function restoreLibraryNowPlaying() {
+  const item = currentItem();
+  if (!item) {
+    setTextContentIfChanged($("nowTitle"), "未选择曲目");
+    setTextContentIfChanged($("nowArtist"), "从音乐库选择一首歌曲");
+    setNowPlayingCover("");
+    resetTransportRow();
+  } else {
+    const cover = coverUrl(item, 512);
+    setTextContentIfChanged($("nowTitle"), displayTrackTitle(item));
+    setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)}`);
+    setNowPlayingCover(cover);
+  }
+  syncPlayerProgress();
+  updateNowMarquee();
+}
+async function refreshRendererSession() {
+  if (state.rendererRequestInFlight) return;
+  const token = ++state.rendererRequestToken;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.rendererRequestInFlight = true;
+  state.rendererRequestController = controller;
+  try {
+    const request = fetch("api/dlna/renderer/status", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    if (token !== state.rendererRequestToken || state.rendererRequestController !== controller) return;
+    if (!response.ok) return;
+    const data = result.data || {};
+    if (token !== state.rendererRequestToken || state.rendererRequestController !== controller) return;
+    const session = data.available === true ? (data.state || {}) : {};
+    const transport = String(session.transport || "").toUpperCase();
+    // "superseded" is the renderer's own verdict that local playback took the
+    // output; such a session keeps its uri only so the caster can press Play
+    // again, and must never reclaim the transport row.
+    let active = typeof session.uri === "string" && session.uri.length > 0
+      && session.superseded !== true
+      && !["STOPPED", "NO_MEDIA_PRESENT"].includes(transport);
+    // A stop issued by a local play intent (TODO.md:72 ruling D-2) can lose the
+    // race: a command that was already on the wire, or one the bridge refused,
+    // leaves the caster active, and this poll would hand the transport row back and
+    // silence what this browser just started. The session this browser preempted is
+    // therefore no session at all for as long as local playback still runs. Another
+    // uri is a new cast, and the moment nothing plays locally the claim lapses, so a
+    // later cast is never ignored.
+    if (active && state.rendererPreemptedUri && session.uri === state.rendererPreemptedUri
+      && localIsPlayingNow()) {
+      active = false;
+    } else {
+      state.rendererPreemptedUri = "";
+    }
+    const previousActive = isIncomingRendererSession();
+    state.rendererSession = active ? session : null;
+    state.rendererSnapshotAt = Date.now();
+    if (active) {
+      // Ruling D-1: a cast takes the audible output, so the local decoder stops with
+      // it. Both used to run at once - two decoders and two bandwidth draws behind a
+      // row that only ever showed the caster - on the element *and* on the host
+      // player, which is what the native stop inside stopLocalAudio covers. Only the
+      // transition stops: this poll repeats every 1.5s and tearing the element down on
+      // every tick would reload the same source over and over.
+      if (!previousActive && localIsPlayingNow()) stopLocalAudio();
+      renderIncomingRendererSession(session);
+    } else if (previousActive) {
+      // Ruling D-3: an ended cast does not resume local playback. The library row
+      // comes back and the transport icon is reset with it, because the render paint
+      // last set that icon from the caster's transport state. No play command is
+      // issued, and coreControl("stop") is deliberately not called either, so the
+      // queue position a local session held is still there for a manual resume.
+      restoreLibraryNowPlaying();
+      setPlayButton(false);
+      updateMediaSessionPlaybackState();
+    }
+  } catch (error) {
+  } finally {
+    if (token === state.rendererRequestToken && state.rendererRequestController === controller) {
+      state.rendererRequestInFlight = false;
+      state.rendererRequestController = null;
+    }
+  }
+}
+function setPlayButton(playing) {
+  // The 500ms transport tick and every playback event repaint this icon, and the
+  // old unconditional innerHTML discarded the icon span twice per second, which is
+  // the same repaint waste as the cover.  The requested flag is remembered on the
+  // node instead of re-reading markup, so the check does not depend on how a
+  // WebView serializes it.
+  const button = $("playBtn");
+  const next = playing === true ? "playing" : "paused";
+  if (!button || button.dataset.playing === next) return;
+  button.dataset.playing = next;
+  const icon = next === "playing"
+    ? '<path d="M5 5h5v14H5zM14 5h5v14h-5z"/>'
+    : '<path d="m5 5 14 7-14 7z"/>';
+  button.innerHTML = `<svg class="transport-icon ${next === "playing" ? "pause-icon" : "play-icon"}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${icon}</svg>`;
+}
+function stopLocalAudio() {
+  state.playbackLoadToken += 1;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  if (nativePlaybackAvailable()) nativePlaybackCall("stop");
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  setPlayButton(false);
+}
+function preemptIncomingRendererForLocalPlayback() {
+  // TODO.md:72 ruling D-2: loading a track locally, or pressing play on the host, is
+  // a local playback intent, and it outranks whoever is casting. The claim on the
+  // transport row is dropped synchronously, before this browser touches its own
+  // element, so no poll and no continuation can repaint the caster in between. The
+  // stop itself is not awaited on purpose: an unreachable bridge must not stall local
+  // playback, and what the stop really achieved is reported by the next status poll,
+  // which finds this uri already marked as preempted.
+  if (!isIncomingRendererSession()) return false;
+  const uri = String(state.rendererSession?.uri || "");
+  state.rendererPreemptedUri = uri;
+  state.rendererSession = null;
+  state.rendererSnapshotAt = 0;
+  controlIncomingRenderer("stop");
+  return true;
+}
+async function stopPlayback() {
+  if (state.deviceSwitchInFlight) return false;
+  if (isIncomingRendererSession()) {
+    await controlIncomingRenderer("stop");
+    restoreLibraryNowPlaying();
+    return;
+  }
+  if (isRemoteTarget()) {
+    // The same rule remoteControl and refreshRemoteStatus already
+    // enforce: a command is bound to the target selected when it was sent.
+    // A device switch clears remoteStatus and lets the newly selected device
+    // declare its own snapshot, so a stop reply that lands afterwards must not
+    // invent a stopped snapshot for a speaker the user has already left.
+    const targetId = remoteDeviceId();
+    await remoteControl("stop");
+    if (targetId !== remoteDeviceId()) return;
+    // The invented zero below is only a claim about the *snapshot*; the row reads
+    // remoteBaseSeconds first (see currentSeconds), so without this line a stop
+    // flips the icon to paused and leaves the rail frozen at the old position. The
+    // load path pairs the same two writes for exactly that reason. It sits after the
+    // target guard on purpose: a stop abandoned by a device switch must not zero the
+    // position the newly selected device has already declared.
+    state.remoteBaseSeconds = 0;
+    state.remoteStatus = { transport: { state: "STOPPED" }, position: { rel_seconds: 0, duration_seconds: playbackSeconds(state.remoteStatus?.position?.duration_seconds) } };
+    updateRemoteUi();
+    return;
+  }
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  stopLocalAudio();
+  // Keep the server snapshot stopped as well; otherwise an old paused
+  // session can be selected again by a later state synchronization.
+  await coreControl("stop");
+  setTextContentIfChanged($("elapsed"), "0:00");
+  $("seek").value = 0;
+  updateMediaSessionPlaybackState();
+  syncState();
+}
+function stopRemoteOnUnload() {
+  // A browser tab/WebView is a controller, not the output owner. Do not stop
+  // a DAC or Renderer merely because the UI was backgrounded or reclaimed.
+  if (state.libraryStatusTimer) {
+    clearTimeout(state.libraryStatusTimer);
+    state.libraryStatusTimer = 0;
+  }
+  if (state.accessProfileTimer) {
+    clearTimeout(state.accessProfileTimer);
+    state.accessProfileTimer = 0;
+  }
+  cancelLyricsPoll();
+  cancelLyricsRequest();
+  stopRemoteEventStream();
+}
+function updateRemoteUi() {
+  // First statement, before either early return.  `currentSeconds` clamps an extrapolated
+  // position at the limit, so once a channel has run out of evidence the memo below keeps
+  // seeing identical numbers and returns there: a lamp written after that gate would only
+  // ever light up on a change that had already stopped moving.
+  updateTransportStateUnknown();
+  if (updateIncomingRendererUi()) return;
+  if (!isRemoteTarget()) return;
+  const transport = state.remoteStatus?.transport?.state || "";
+  const duration = seekDuration();
+  const seconds = duration > 0 && !state.seeking ? currentSeconds() : -1;
+  const current = currentItem()?.id || "";
+  const previous = state.remoteUiLast || {};
+  // Avoid rewriting the same DOM/media-session state on every timer tick.
+  // Progress still advances locally between network snapshots.
+  if (previous.transport === transport && previous.duration === duration &&
+      previous.current === current && (seconds < 0 || Math.abs(previous.seconds - seconds) < 0.45)) return;
+  state.remoteUiLast = { transport, duration, seconds, current };
+  if (duration > 0) {
+    setTextContentIfChanged($("duration"), clock(duration));
+    if (!state.seeking) {
+      setTextContentIfChanged($("elapsed"), clock(seconds));
+      $("seek").value = Math.max(0, Math.min(100, seconds / duration * 100));
+    }
+  }
+  setPlayButton(transport === "PLAYING");
+  syncPlayerProgress();
+  updateLyricHighlight();
+  updateMediaSessionPosition();
+}
+function updateIncomingRendererUi() {
+  if (!isIncomingRendererSession()) {
+    // Self-healing: this memo describes the cast that just ended, so it must not
+    // survive to suppress the first paint of the next one.
+    state.rendererUiLast = null;
+    return false;
+  }
+  const session = state.rendererSession;
+  const transport = String(session.transport || "").toUpperCase();
+  const duration = seekDuration();
+  const seconds = duration > 0 && !state.seeking ? currentSeconds() : -1;
+  const previous = state.rendererUiLast || {};
+  // Exact equality on purpose. `updateRemoteUi` can afford a 0.45s tolerance because it
+  // only ticks while this app owns the target; this channel is repainted every 500ms
+  // (`ui_sync_scheduler.js`) and re-extrapolates its position between polls, so any
+  // tolerance would freeze a rail that is legitimately advancing. Equal values therefore
+  // mean the status poll brought no new evidence -- the one case in which neither the
+  // slider nor the host media session has anything to learn. While the caster is paused
+  // `transportExtrapolation` returns 0, so before this gate a frozen cast was rewritten
+  // about twice a second forever (TODO.md:61 class, R156).
+  const unchanged = previous.uri === session.uri && previous.transport === transport
+    && previous.duration === duration && previous.seconds === seconds;
+  if (!unchanged) state.rendererUiLast = { uri: session.uri, transport, duration, seconds };
+  if (duration > 0) {
+    setTextContentIfChanged($("duration"), clock(duration));
+    if (!state.seeking) {
+      setTextContentIfChanged($("elapsed"), clock(seconds));
+      if (!unchanged) {
+        $("seek").value = Math.max(0, Math.min(100, seconds / duration * 100));
+      }
+    }
+  }
+  // Deliberately not gated: `syncPlayerProgress` owns `updateTransportStateUnknown`,
+  // which flips on wall-clock staleness while every value above stays identical. The
+  // compare-first writers below are already free when nothing changed.
+  setPlayButton(transport === "PLAYING");
+  syncPlayerProgress();
+  if (!unchanged) updateMediaSessionPosition();
+  return true;
+}
+async function controlIncomingRenderer(action, position = null) {
+  try {
+    const response = await apiFetch("api/playback/control", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({target_id: "mpd", action, position}),
+    });
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "DLNA Renderer 控制失败");
+    if (action === "stop") state.rendererSession = null;
+    else if (state.rendererSession) {
+      state.rendererSession.transport = action === "pause" ? "PAUSED_PLAYBACK" : "PLAYING";
+      if (action === "seek" && position != null) state.rendererSession.position = playbackSeconds(position);
+      state.rendererSnapshotAt = Date.now();
+    }
+    updateRemoteUi();
+    setTimeout(refreshRendererSession, 250);
+    return true;
+  } catch (error) {
+    alert(error.message || "DLNA Renderer 控制失败");
+    return false;
+  }
+}
+function updateMediaSessionMetadata(item = currentItem()) {
+  if (!("mediaSession" in navigator)) return;
+  state.mediaSession.supported = true;
+  if (!item) {
+    try { navigator.mediaSession.metadata = null; state.mediaSession.metadata = false; } catch (error) {}
+    return;
+  }
+  const localCover = coverUrl(item, 512);
+  const artwork = localCover
+    ? [{ src: localCover, sizes: "512x512", type: "image/jpeg" }]
+    : [
+        { src: mediaUrl("images/icon_64.png"), sizes: "64x64", type: "image/png" },
+        { src: mediaUrl("images/icon_256.png"), sizes: "256x256", type: "image/png" },
+      ];
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: displayTrackTitle(item) || "fnAudio",
+      artist: displayText(item.artist) || "",
+      album: displayText(item.album) || "",
+      artwork,
+    });
+    state.mediaSession.metadata = true;
+    state.hostPlaybackSession?.synchronize({
+      generation: state.remoteGeneration,
+      engineEpoch: state.remoteEngineEpoch,
+      trackId: item?.id,
+      playing: isPlayingNow(),
+      position: currentSeconds(),
+      duration: seekDuration(),
+      outputTarget: state.playTarget,
+      metadata: { title: displayTrackTitle(item), artist: displayText(item.artist), album: displayText(item.album) },
+    });
+  } catch (error) {
+    state.mediaSession.metadata = false;
+  }
+}
+function updateMediaSessionPosition() {
+  if (!("mediaSession" in navigator) || typeof navigator.mediaSession.setPositionState !== "function") return;
+  const duration = seekDuration();
+  if (!duration || !Number.isFinite(duration)) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration,
+      playbackRate: 1,
+      position: Math.max(0, Math.min(duration, currentSeconds())),
+    });
+  } catch (error) {
+  }
+}
+function updateMediaSessionPlaybackState() {
+  if (!("mediaSession" in navigator)) return;
+  state.mediaSession.supported = true;
+  try {
+    navigator.mediaSession.playbackState = isPlayingNow() ? "playing" : (currentItem() ? "paused" : "none");
+  } catch (error) {
+  }
+  updateMediaSessionPosition();
+  const item = currentItem();
+  if (item && state.hostPlaybackSession?.available === true) {
+    const contextId = `fnaudio:${String(item.id || "current")}`;
+    if (!state.hostPlaybackSessionActivated || state.hostPlaybackMediaContextId !== contextId) {
+      state.hostPlaybackSessionActivated = state.hostPlaybackSession.requestActivation(contextId);
+      state.hostPlaybackMediaContextId = contextId;
+    }
+  } else if (!item && state.hostPlaybackSessionActivated) {
+    state.hostPlaybackSession?.release();
+    state.hostPlaybackSessionActivated = false;
+    state.hostPlaybackMediaContextId = "";
+  }
+  state.hostPlaybackSession?.reportState({
+    generation: state.remoteGeneration,
+    engineEpoch: state.remoteEngineEpoch,
+    trackId: item?.id,
+    playing: isPlayingNow(),
+    position: currentSeconds(),
+    duration: seekDuration(),
+    outputTarget: state.playTarget,
+  });
+}
+function applyCoreSnapshot(core, shouldLoad = true) {
+  const currentId = core?.current || core?.state?.current;
+  if (!currentId) return false;
+  const index = state.queue.findIndex(item => String(item?.id || "") === String(currentId));
+  if (index < 0) return false;
+  const previousIndex = state.index;
+  state.index = index;
+  state.repeat = core.repeat || state.repeat;
+  state.shuffle = typeof core.shuffle === "boolean" ? core.shuffle : state.shuffle;
+  updateRepeatShuffleButtons();
+  if (shouldLoad) {
+    resetPlaybackProgress();
+    loadCurrent();
+  }
+  syncCurrentQueuePresentation(previousIndex);
+  updateFavoriteControls();
+  return true;
+}
+async function coreControl(action, position = null, payload = {}) {
+  if (state.deviceSwitchInFlight) return false;
+  if (nativePlaybackAvailable() && (action === "next" || action === "previous")) {
+    nativePlaybackCall(action === "next" ? "next" : "previous");
+    return { ok: true, native: true };
+  }
+  const item = currentItem();
+  const response = await apiFetch("api/playback/control", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ target_id: remoteDeviceId() || "local", action, position, track_id: item?.id || "", command_id: playbackCommandId(), ...payload }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) return false;
+  const changedTrack = action === "next" || action === "previous";
+  applyCoreSnapshot(data.core, changedTrack && !isRemoteTarget());
+  if (isRemoteTarget()) {
+    const snapshot = remoteSnapshotFromCore(data.core);
+    if (snapshot) applyRemotePlaybackSnapshot(snapshot);
+  }
+  scheduleUserStateSave();
+  return data;
+}
+async function playPreviousTrack() {
+  if (!state.queue.length) return false;
+  return Boolean(await coreControl("previous"));
+}
+async function playNextTrack() {
+  if (!state.queue.length) return false;
+  return Boolean(await coreControl("next"));
+}
+function setupMediaSession() {
+  if (nativePlaybackAvailable()) return;
+  if (!("mediaSession" in navigator) || setupMediaSession.done) return;
+  state.mediaSession.supported = true;
+  state.mediaSession.host = window.parent !== window ? "embedded" : (fnAppVersion() ? "fnapp-webview" : "browser");
+  state.hostPlaybackSession?.initialize({
+    participantId: `fnaudio-web-${state.mediaSession.host}`,
+    generation: state.remoteGeneration,
+    engineEpoch: state.remoteEngineEpoch,
+    capabilities: { mediaSession: true, backgroundResume: true, standardWebMediaSession: true },
+  });
+  setupMediaSession.done = true;
+  const setHandler = (action, handler) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+      state.mediaSession.actions.push(action);
+    } catch (error) {}
+  };
+  setHandler("play", () => {
+    // The host transport keys drive whatever owns the transport row, exactly like the
+    // on-screen play button below. Without this branch the play key would wake the
+    // local element that ruling D-1 stopped the moment the cast started, which is
+    // precisely the second decoder this entry is about.
+    if (isIncomingRendererSession()) { controlIncomingRenderer("play"); return; }
+    if (isRemoteTarget()) remoteControl("play");
+    else if (!audio.src && state.queue.length) loadCurrent();
+    else audio.play().catch(() => {});
+  });
+  setHandler("pause", () => {
+    // Same reason as the play key: pausing a cast is a request to the caster, not a
+    // request to pause a local element that is already stopped.
+    if (isIncomingRendererSession()) { controlIncomingRenderer("pause"); return; }
+    if (isRemoteTarget()) remoteControl("pause");
+    else audio.pause();
+  });
+  setHandler("stop", () => stopPlayback());
+  setHandler("previoustrack", () => playPreviousTrack());
+  setHandler("nexttrack", () => playNextTrack());
+  setHandler("seekbackward", details => {
+    const offset = Number(details?.seekOffset || 10);
+    const duration = seekDuration();
+    if (!duration) return;
+    const target = Math.max(0, currentSeconds() - offset);
+    commitSeek(duration ? target / duration * 100 : 0);
+  });
+  setHandler("seekforward", details => {
+    const offset = Number(details?.seekOffset || 10);
+    const duration = seekDuration();
+    if (!duration) return;
+    const target = Math.min(duration, currentSeconds() + offset);
+    commitSeek(duration ? target / duration * 100 : 0);
+  });
+  setHandler("seekto", details => {
+    const duration = seekDuration();
+    const target = Number(details?.seekTime);
+    if (!duration || !Number.isFinite(target)) return;
+    commitSeek(Math.max(0, Math.min(duration, target)) / duration * 100);
+  });
+}
+window.fnAudioMediaSessionDiagnostics = () => ({
+  supported: Boolean(state.mediaSession?.supported),
+  metadata: Boolean(state.mediaSession?.metadata),
+  actions: [...new Set(state.mediaSession?.actions || [])],
+  host: String(state.mediaSession?.host || "standalone"),
+  mediaSessionState: String(navigator.mediaSession?.playbackState || "none"),
+  hostPlaybackSession: state.hostPlaybackSession?.diagnostics?.() || { detected: false, name: "", methods: [] },
+});
+async function refreshRemoteStatus(options = {}) {
+  if (!isRemoteTarget()) return;
+  if (!state.remoteEventSource && typeof EventSource !== "undefined") startRemoteEventStream();
+  if (state.remoteEventConnected) return;
+  if (state.remoteStatusRequestInFlight) return;
+  const targetId = remoteDeviceId();
+  const token = ++state.remoteStatusRequestToken;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.remoteStatusRequestInFlight = true;
+  state.remoteStatusController = controller;
+  try {
+    const request = fetch(`api/playback/status?target_id=${encodeURIComponent(targetId)}`, {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    if (token !== state.remoteStatusRequestToken || targetId !== remoteDeviceId()) return;
+    // A proxy/renderer error may still carry an empty JSON object. Do not
+    // project that transport failure as a real remote snapshot, otherwise a
+    // temporary disconnect can erase the last known track and transport state.
+    if (!response?.ok) return;
+    const data = globalThis.fnAudioMetadataResponsePolicy?.unwrapTransport(result.data, 4) || {};
+    if (!data || data.error) return;
+    applyRemotePlaybackSnapshot(data, options);
+  } catch (error) {
+  } finally {
+    if (token === state.remoteStatusRequestToken && state.remoteStatusController === controller) {
+      state.remoteStatusRequestInFlight = false;
+      state.remoteStatusController = null;
+    }
+  }
+}
+function cancelRemoteStatusRequest() {
+  state.remoteStatusRequestToken += 1;
+  try { state.remoteStatusController?.abort(); } catch (_) {}
+  state.remoteStatusController = null;
+  state.remoteStatusRequestInFlight = false;
+}
+function stopRemoteEventStream() {
+  cancelRemoteStatusRequest();
+  if (state.remoteEventSource) {
+    try { state.remoteEventSource.close(); } catch (error) {}
+  }
+  state.remoteEventSource = null;
+  state.remoteEventConnected = false;
+}
+function applyRemotePlaybackSnapshot(data, options = {}) {
+  if (!isRemoteTarget() || !data || (data.target_id && !sameDeviceTarget(data.target_id, state.playTarget))) return;
+  const stateVersion = remoteStateVersion(data.state_version);
+  if (state.remoteStateVersion > 0 && (stateVersion == null || stateVersion < state.remoteStateVersion)) return;
+  state.remoteStatus = data;
+  // The server states the unit of the seconds it just reported.  A declared
+  // value wins over anything derived from local queue metadata: the SSE stream,
+  // a poll and a control reply then agree no matter which one arrives first.
+  const declaredCueSegment = data.cue_segment === true || data.cue_segment === false;
+  if (declaredCueSegment) state.remoteCueSegment = data.cue_segment === true;
+  if (stateVersion != null) state.remoteStateVersion = stateVersion;
+  if (Number.isFinite(Number(data.generation)) && Number(data.generation) >= 0) {
+    state.remoteGeneration = Math.min(2147483647, Math.floor(Number(data.generation)));
+  }
+  if (Number.isFinite(Number(data.engine_epoch)) && Number(data.engine_epoch) >= 0) {
+    state.remoteEngineEpoch = Math.min(2147483647, Math.floor(Number(data.engine_epoch)));
+  }
+  state.remoteSnapshotAt = Date.now();
+  state.remoteBaseSeconds = playbackSeconds(data?.position?.rel_seconds);
+  const core = data.core || {};
+  const currentId = String(core.current || "");
+  const nextIndex = currentId ? state.queue.findIndex(item => String(item.id || "") === currentId) : -1;
+  if (nextIndex >= 0 && nextIndex !== state.index) {
+    const previousIndex = state.index;
+    state.index = nextIndex;
+    if (!declaredCueSegment) state.remoteCueSegment = currentItem()?.cue_track === true && !isDacTarget();
+    syncCurrentQueuePresentation(previousIndex);
+  }
+  if (options.allowAdvance !== false) maybeAdvanceRemoteQueue(data);
+  updateRemoteUi();
+  nativeRemoteUpdate();
+}
+function startRemoteEventStream() {
+  if (!isRemoteTarget() || typeof EventSource === "undefined" || state.remoteEventSource) return;
+  const targetId = String(state.playTarget || "");
+  if (!targetId) return;
+  try {
+    const source = new EventSource(`api/playback/events?target_id=${encodeURIComponent(targetId)}`);
+    state.remoteEventSource = source;
+    source.addEventListener("playback", event => {
+      if (source !== state.remoteEventSource) return;
+      try {
+        const data = JSON.parse(event.data || "{}");
+        if (!sameDeviceTarget(data.target_id, targetId)) return;
+        state.remoteEventConnected = true;
+        state.remoteEventRetryAt = 0;
+        applyRemotePlaybackSnapshot(data);
+      } catch (error) {}
+    });
+    source.onerror = () => {
+      if (source !== state.remoteEventSource) return;
+      state.remoteEventConnected = false;
+      state.remoteEventRetryAt = Date.now() + 3000;
+      // EventSource reconnects itself. Keep the HTTP status fallback available
+      // while a proxy, browser sleep mode, or older server interrupts it.
+    };
+  } catch (error) {
+    state.remoteEventRetryAt = Date.now() + 3000;
+  }
+}
+function maybeAdvanceRemoteQueue(data) {
+  // Remote progression is owned by server-side MPD idle / Renderer monitors
+  // so it continues while browsers and WebViews are suspended. Keeping a
+  // second frontend end-of-track detector would race and skip queue items.
+  return;
+  /* Legacy fallback retained below for old servers during rolling upgrades.
+  const transport = (data?.transport?.state || "").toUpperCase();
+  const position = data?.position || {};
+  const item = currentItem();
+  const duration = Number(position.duration_seconds || 0);
+  const rel = Number(position.rel_seconds || 0);
+  const endedByTime = item?.cue_track === true
+    ? (state.remoteCueSegment
+        ? Number(item.duration || 0) > 0 && rel >= Math.max(0, Number(item.duration || 0) - 1.5)
+        : Number(item.cue_end || 0) > 0 && rel >= Math.max(0, Number(item.cue_end || 0) - 1.5))
+    : duration > 0 && rel >= Math.max(0, duration - 2);
+  const stoppedAfterPlaying = state.remoteWasPlaying && ["STOPPED", "NO_MEDIA_PRESENT"].includes(transport);
+  state.remoteWasPlaying = transport === "PLAYING" || transport === "TRANSITIONING";
+  if (!(endedByTime || stoppedAfterPlaying)) return;
+  if (Date.now() - state.remoteAutoAdvanceAt < 3000) return;
+  state.remoteAutoAdvanceAt = Date.now();
+  coreControl("next");
+  */
+}
+function playbackCommandId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+function remoteSnapshotFromCore(core, targetId = state.playTarget) {
+  if (!core) return null;
+  return {
+    target_id: targetId,
+    target_kind: core.target_kind,
+    state_version: core.state_version,
+    core,
+    transport: { state: core.transport || "STOPPED" },
+    position: {
+      rel_seconds: playbackSeconds(core.position),
+      duration_seconds: playbackSeconds(core.duration),
+    },
+  };
+}
+async function remoteControl(action, position = null, quiet = false) {
+  if (state.deviceSwitchInFlight || !isRemoteTarget()) return false;
+  // Bind the command and its optimistic response to the target selected at
+  // invocation time. A device switch can happen while the request is in
+  // flight; a late response from the old renderer must never be projected onto
+  // the newly selected renderer.
+  const targetId = remoteDeviceId();
+  const item = currentItem();
+  const commandId = playbackCommandId();
+  const response = await apiFetch("api/playback/control", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({
+      target_id: targetId, action, position, track_id: item?.id || "", command_id: commandId,
+      generation: Number(state.remoteGeneration || 0),
+      engine_epoch: Number(state.remoteEngineEpoch || 0),
+    }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) {
+    if (data.error === "playback_target_not_found") {
+      return recoverUnavailablePlaybackTarget(!quiet, targetId);
+    }
+    if (!quiet) alert(data.message || data.error || "远端控制失败");
+    return false;
+  }
+  if (targetId !== remoteDeviceId()) return true;
+  const snapshot = remoteSnapshotFromCore(data.core, targetId);
+  if (snapshot) applyRemotePlaybackSnapshot(snapshot);
+  if (!state.remoteEventConnected) setTimeout(refreshRemoteStatus, 300);
+  return true;
+}
+function filteredTracks() {
+  const signature = [
+    state.items, state.pageItems, state.queue, state.random100, state.favorites,
+    state.playlists, state.view, state.groupName, currentQueryText(),
+    state.sortKey, state.sortDir,
+  ];
+  const cache = state.filteredTracksCache;
+  if (cache?.signature && cache.signature.length === signature.length
+      && cache.signature.every((value, index) => value === signature[index])) {
+    return cache.tracks;
+  }
+  const tracks = fnAudioLibraryTrackFilterPolicy.selectTracks({
+    pagedTrackListing: isPagedLibraryView() && isPagedTrackListing(),
+    pageItems: state.pageItems,
+    items: state.items,
+    view: isPlaylistView() ? "playlist" : state.view,
+    groupKey: groupViews[state.view],
+    groupName: state.groupName,
+    queue: state.queue,
+    random100: random100Tracks(),
+    recent: recentTracks(),
+    favorites: favoriteTracks(),
+    playlist: playlistTracks(),
+    search: currentQueryText(),
+    matches: trackMatchesSearch,
+    sort: sortTracks,
+  });
+  if (cache) {
+    cache.signature = signature;
+    cache.tracks = tracks;
+  }
+  return tracks;
+}
+function trackMatchesSearch(item, search = currentQueryText().toLowerCase()) {
+  if (!search) return true;
+  const project = globalThis.fnAudioTrackSearchText?.trackSearchText;
+  if (project) return project(item).includes(search);
+  const values = [];
+  for (const field of ["title", "artist", "album", "album_artist", "composer", "genre", "folder", "library_root", "format"]) {
+    let value;
+    try { value = item?.[field]; } catch (_) { value = ""; }
+    if (typeof value === "string") values.push(value.slice(0, 4096).toLowerCase());
+    else if (typeof value === "number" && Number.isFinite(value)) values.push(String(value).toLowerCase());
+  }
+  return values.join(" ").slice(0, 16384).includes(search);
+}
+function hasMultipleLibraryRoots() {
+  const paths = state.libraryStatus?.library_paths || [];
+  return Array.isArray(paths) && paths.length > 1;
+}
+function hasSingleFolderRoot() {
+  return Array.isArray(state.folderRootRows) && state.folderRootRows.length === 1;
+}
+function libraryRootLabels() {
+  return fnAudioLibraryRootLabelPolicy.rootLabels(state.libraryStatus?.library_paths || []);
+}
+function folderChildren() {
+  const folders = state.folderRoot ? state.folderRows : state.folderRootRows;
+  const tracks = state.folderRoot ? state.pageItems : [];
+  return {
+    folders: Array.isArray(folders) ? folders : [],
+    tracks: sortTracks(Array.isArray(tracks) ? tracks : []),
+  };
+}
+function folderTracks(root = state.folderRoot, path = state.folderPath) {
+  if (String(root || "") !== String(state.folderRoot || "") || String(path || "") !== String(state.folderPath || "")) return [];
+  return Array.isArray(state.pageItems) ? state.pageItems : [];
+}
+function groupedTracks() {
+  return state.groupRows || [];
+}
+function clientPagedResult(view = state.view) {
+  const offset = Math.max(0, ((Number(state.page) || 1) - 1) * state.pageSize);
+  const limit = Math.max(1, state.pageSize);
+  const search = currentQueryText().toLowerCase();
+  if (view === "queue") {
+    // Keep the existing queue display semantics: ordering and visible rows use
+    // queueDisplayEntries(), while the pager count reflects the search scope.
+    // Reuse the same filtered result for the count; the previous second filter
+    // pass was noticeable on large queues and made every render pay twice.
+    const entries = queueDisplayEntries();
+    const tracks = entries.slice(offset, offset + limit).map(({ item, queueIndex }) => ({ ...item, __queueIndex: queueIndex }));
+    return { total: search ? entries.length : state.queue.length, tracks };
+  }
+  const ids = view === "favorites"
+    ? state.favorites
+    : isPlaylistView(view)
+      ? (currentPlaylist()?.trackIds || [])
+      : [];
+  if (ids.length) hydrateReferencedIds(ids);
+  const project = globalThis.fnAudioLibraryReferenceItems?.projectReferencedItems;
+  const source = project ? project(ids, itemById) : ids.map(itemById).filter(Boolean);
+  const filtered = search ? source.filter(item => trackMatchesSearch(item, search)) : source;
+  return {
+    total: search ? filtered.length : ids.length,
+    tracks: sortTracks(filtered).slice(offset, offset + limit),
+  };
+}
+function clientPagedTotal(view = state.view) {
+  return clientPagedResult(view).total;
+}
+function clientPagedTracks() {
+  return clientPagedResult().tracks;
+}
+function queueDisplayEntries() {
+  // R523: 队列是「所见即所播」。列表视图的排序键管列表，但不再重排队列——
+  // 显示顺序恒等于入队顺序，也就是真正的播放顺序。搜索只做过滤，过滤后的
+  // 位置仍是队列原序，分页与「正在播放」定位都直接基于它。
+  const search = currentQueryText().toLowerCase();
+  const cache = state.queueDisplayCache;
+  if (cache && cache.queue === state.queue && cache.search === search) {
+    return cache.entries;
+  }
+  const entries = state.queue
+    .map((item, queueIndex) => ({ item, queueIndex }))
+    .filter(({ item }) => !search || trackMatchesSearch(item, search));
+  if (cache) {
+    cache.queue = state.queue;
+    cache.search = search;
+    cache.entries = entries;
+  }
+  return entries;
+}
+function currentQueuePage() {
+  if (state.index < 0) return 1;
+  const presenter = globalThis.fnAudioQueuePresentation;
+  if (presenter?.pageForQueueIndex) return presenter.pageForQueueIndex(state.index, queueDisplayEntries(), state.pageSize);
+  const position = queueDisplayEntries().findIndex(entry => entry.queueIndex === state.index);
+  return position < 0 ? 1 : Math.floor(position / Math.max(1, state.pageSize)) + 1;
+}
+function scrollCurrentQueueTrackIntoView() {
+  if (state.view !== "queue" || state.index < 0) return;
+  const row = document.querySelector(`#trackList .track[data-queue-index="${state.index}"]`);
+  const viewport = $("libraryScroll");
+  if (!row || !viewport) return;
+  const rowBounds = row.getBoundingClientRect();
+  const viewportBounds = viewport.getBoundingClientRect();
+  const targetTop = viewport.scrollTop + rowBounds.top - viewportBounds.top - Math.max(0, (viewport.clientHeight - row.offsetHeight) / 2);
+  viewport.scrollTo({ top: Math.max(0, targetTop), behavior: "auto" });
+}
+function updateCurrentQueueTrackRow(queueIndex, current) {
+  if (!Number.isInteger(queueIndex) || queueIndex < 0) return false;
+  const row = document.querySelector(`#trackList .track[data-queue-index="${queueIndex}"]`);
+  if (!row) return false;
+  row.classList.toggle("is-current", current);
+  const titleLine = row.querySelector(".track-title-line");
+  if (!titleLine) return true;
+  const indicator = titleLine.querySelector(".track-playing-indicator");
+  if (current && !indicator) {
+    const node = document.createElement("span");
+    node.className = "track-playing-indicator";
+    node.setAttribute("aria-label", "正在播放");
+    node.textContent = "正在播放";
+    titleLine.appendChild(node);
+  } else if (!current && indicator) {
+    indicator.remove();
+  }
+  return true;
+}
+function syncCurrentQueuePresentation(previousIndex) {
+  if (state.view !== "queue" || previousIndex === state.index) return false;
+  const page = currentQueuePage();
+  const plan = globalThis.fnAudioQueuePresentation?.queuePresentationPlan?.({
+    view: state.view,
+    previousIndex,
+    currentIndex: state.index,
+    previousPage: state.page,
+    currentPage: page,
+  }) || { requiresFullRender: state.page !== page, shouldScrollCurrent: true };
+  state.page = page;
+  // A queue position change normally affects only two rows.  Rebuilding the
+  // whole page also restarts its cover loader, which is needlessly expensive
+  // for large queues.  Keep a full render only for a cross-page jump.
+  if (plan.requiresFullRender || !updateCurrentQueueTrackRow(previousIndex, false) || !updateCurrentQueueTrackRow(state.index, true)) {
+    render();
+    if (plan.shouldScrollCurrent) requestAnimationFrame(() => requestAnimationFrame(scrollCurrentQueueTrackIntoView));
+    return true;
+  }
+  if (plan.shouldScrollCurrent) requestAnimationFrame(() => requestAnimationFrame(scrollCurrentQueueTrackIntoView));
+  return false;
+}
+function openCurrentQueue() {
+  if (!$("lyricsView").hidden) closeLyrics();
+  [$('searchInput'), $('mobileSearchInput')].forEach(input => { if (input) input.value = ""; });
+  updateSearchClearButtons();
+  setView("queue");
+  const page = currentQueuePage();
+  if (state.page !== page) {
+    state.page = page;
+    render();
+  }
+  requestAnimationFrame(() => requestAnimationFrame(scrollCurrentQueueTrackIntoView));
+}
+function groupFallbackIcon(view = state.view) {
+  const icons = {
+    folders: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h6.2l2 2H21v8.7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 7.5V6a2 2 0 0 1 2-2h4.4l2 2H19a2 2 0 0 1 2 2v1.5"/></svg>`,
+    albums: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.4"/><path d="M12 4v3"/><path d="M12 17v3"/></svg>`,
+    artists: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>`,
+    composers: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l10-2v13"/><circle cx="7" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>`,
+    genres: `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14"/><path d="M5 12h14"/><path d="M5 18h10"/><circle cx="18" cy="18" r="2"/></svg>`,
+  };
+  return icons[view] || icons.albums;
+}
+function breadcrumbChevronMarkup(className = "breadcrumb-chevron") {
+  return `<span class="${className}" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 5 7 7-7 7"/></svg></span>`;
+}
+function groupIcon(view, items = [], coverTrackId = "", explicitName = "", metadataImage = "") {
+  const cachedItem = items.find(item => item?.cover_url);
+  const localCover = coverUrl(cachedItem) || (coverTrackId ? mediaUrl(`cover/${encodeURIComponent(coverTrackId)}?size=160`) : "");
+  const online = usableCoverSource(metadataImage);
+  const image = localCover || online;
+  const attributes = localCover && online ? `data-artwork-local="1" data-metadata-image="${escapeHtml(online)}"` : "";
+  // Native lazy loading is not consistently honored by older Android WebViews.
+  // Use the shared bounded scheduler so a large album/group page does not begin
+  // every artwork request at the same time.
+  return `<div class="group-icon" ${attributes}>${groupFallbackIcon(view)}${image ? `<img style="visibility:hidden" data-cover-src="${escapeHtml(image)}" alt="">` : ""}</div>`;
+}
+function applyGroupArtwork(node, imageUrl) {
+  if (!node?.isConnected || !imageUrl) return;
+  const normalizedUrl = usableCoverSource(imageUrl);
+  if (!normalizedUrl) return;
+  const existing = node.querySelector("img");
+  const existingSource = existing?.getAttribute("data-cover-src")
+    || existing?.dataset?.coverLoadedSrc || existing?.getAttribute("src") || "";
+  if (existing && existingSource === normalizedUrl) return;
+  if (existing) existing.remove();
+  const image = document.createElement("img");
+  // Keep fallback artwork inside the shared bounded scheduler too. Local
+  // artwork failures are asynchronous, so assigning src here would otherwise
+  // fan out one network request per visible group at once.
+  image.setAttribute("data-cover-src", normalizedUrl);
+  image.alt = "";
+  node.appendChild(image);
+  hydrateVisibleTrackCovers();
+}
+function prepareLocalGroupArtwork(node) {
+  const image = node.querySelector("img");
+  if (!image) return;
+  const loaded = () => {
+    node.classList.add("has-cover");
+    node.removeAttribute("data-metadata-image");
+  };
+  const failed = () => {
+    image.remove();
+    node.classList.remove("has-cover");
+    node.removeAttribute("data-artwork-local");
+    const fallback = node.dataset.metadataImage || "";
+    node.removeAttribute("data-metadata-image");
+    if (fallback) applyGroupArtwork(node, fallback);
+  };
+  // A group/album cover is emitted without `src` and only receives its URL from
+  // the shared scheduler after this listener setup. Per the HTML spec a src-less
+  // <img> already reports complete === true with naturalWidth === 0, so
+  // `complete` alone cannot mean "finished loading" here. Judging a
+  // not-yet-started cover by `complete` deletes it before the scheduler ever
+  // starts it. Gate on the same "has a source" marker the scheduler uses.
+  const hasArtworkSource = () =>
+    image.hasAttribute?.("src") === true || String(image.dataset?.coverLoadedSrc || "") !== "";
+  const verify = () => {
+    if (!image.isConnected || !hasArtworkSource() || !image.complete) return;
+    if (image.naturalWidth > 1) loaded();
+    else failed();
+  };
+  if (hasArtworkSource() && image.complete) return verify();
+  image.addEventListener("load", loaded, { once: true });
+  image.addEventListener("error", failed, { once: true });
+  requestAnimationFrame(verify);
+}
+function loadGroupArtwork() {
+  // Restrict the lookup to the rendered library list.  Scanning the whole
+  // document on every page render needlessly touches persistent chrome and
+  // becomes visible with large libraries or frequent playback updates.
+  const root = $("trackList") || document;
+  const nodes = [...new Set([...root.querySelectorAll(".group-icon img, .album-detail-cover img")].map(image => image.parentElement).filter(Boolean))];
+  if (!nodes.length) return;
+  nodes.forEach(prepareLocalGroupArtwork);
+}
+function activeTrackColumns() {
+  return currentTrackColumns();
+}
+function trackGridTemplate(widthOverrides = null) {
+  const widths = widthOverrides ? { ...currentTrackColumnWidths(), ...widthOverrides } : currentTrackColumnWidths();
+  if (globalThis.fnAudioTrackTablePresentation?.gridTemplate) {
+    return globalThis.fnAudioTrackTablePresentation.gridTemplate(activeTrackColumns(), widths, TRACK_COLUMN_DEFINITIONS);
+  }
+  return [...activeTrackColumns().map(key => `${widths[key] || TRACK_COLUMN_DEFINITIONS[key].width}px`), "minmax(0,1fr)"].join(" ");
+}
+function applyTrackGridTemplate() {
+  const template = trackGridTemplate();
+  $("tableHead")?.style.setProperty("--fnaudio-track-columns", template);
+  document.body.style.setProperty("--fnaudio-track-columns", template);
+}
+function trackColumnWidthLimits(key) {
+  if (globalThis.fnAudioTrackTablePresentation?.widthLimits) return globalThis.fnAudioTrackTablePresentation.widthLimits(key);
+  return {
+    title: [180, 520], track_no: [48, 72], artist: [88, 220], album: [110, 280],
+    format: [76, 110], duration: [72, 96], size: [88, 120], quality: [120, 170],
+    added: [110, 150], composer: [120, 260], genre: [110, 200],
+  }[key] || [80, 260];
+}
+function clampTrackColumnWidth(key, value) {
+  const definition = TRACK_COLUMN_DEFINITIONS[key];
+  const numeric = Math.round(Number(value));
+  const preferred = Number.isFinite(numeric) && numeric > 0 ? numeric : definition?.width || 120;
+  const [minimum, maximum] = trackColumnWidthLimits(key);
+  return Math.min(maximum, Math.max(minimum, preferred));
+}
+function measureTrackContentWidth(node) {
+  if (!node || typeof node.cloneNode !== "function" || !document?.body?.appendChild) {
+    return 0;
+  }
+  const probe = node.cloneNode(true);
+  probe.style.cssText = `${probe.style?.cssText || ""};position:absolute;left:-100000px;top:0;width:max-content;min-width:max-content;max-width:none;overflow:visible;text-overflow:clip;white-space:nowrap;visibility:hidden;`;
+  document.body.appendChild(probe);
+  const width = Number(probe.getBoundingClientRect?.().width || probe.scrollWidth || 0);
+  if (typeof probe.remove === "function") probe.remove();
+  else probe.parentNode?.removeChild?.(probe);
+  return Number.isFinite(width) ? width : 0;
+}
+function measureAutoTrackColumnWidths() {
+  if (window.matchMedia("(max-width: 760px)").matches) return;
+  if ((isCreatorView() && !currentCreatorName()) || (state.view === "genres" && !state.groupName)) {
+    const template = "minmax(280px,1fr)";
+    $("tableHead")?.style.setProperty("--fnaudio-track-columns", template);
+    document.body.style.setProperty("--fnaudio-track-columns", template);
+    return;
+  }
+  if (isAlbumCollectionView()) {
+    const template = "minmax(280px,1fr) minmax(160px,240px) 130px";
+    $("tableHead")?.style.setProperty("--fnaudio-track-columns", template);
+    document.body.style.setProperty("--fnaudio-track-columns", template);
+    return;
+  }
+  const scope = trackColumnScope();
+  const widths = {};
+  activeTrackColumns().forEach(key => {
+    const [minimum, maximum] = trackColumnWidthLimits(key);
+    const header = document.querySelector(`[data-track-column="${key}"] .track-head-button,[data-track-column="${key}"] .track-head-label`);
+    let measured = measureTrackContentWidth(header) + 24;
+    if (key === "title") {
+      document.querySelectorAll(".track-title").forEach(node => { measured = Math.max(measured, measureTrackContentWidth(node) + 72); });
+    } else {
+      document.querySelectorAll(`.track-cell-${key}`).forEach(node => { measured = Math.max(measured, measureTrackContentWidth(node) + 18); });
+    }
+    widths[key] = Math.max(minimum, Math.min(maximum, Math.ceil(measured)));
+  });
+  state.autoTrackColumnWidths[scope] = widths;
+  applyTrackGridTemplate();
+}
+function trackQuality(item) {
+  if (globalThis.fnAudioTrackPresentation?.quality) return globalThis.fnAudioTrackPresentation.quality(item);
+  const rate = Number(item.sample_rate || 0);
+  const depth = Number(item.bit_depth || 0);
+  const bitrate = Number(item.bitrate || 0);
+  return rate ? `${Math.round(rate / 1000)}kHz${depth ? `/${depth}bit` : ""}` : (bitrate ? `${Math.round(bitrate / 1000)}kbps` : "—");
+}
+function trackAddedDate(item) {
+  if (globalThis.fnAudioTrackPresentation?.addedDate) return globalThis.fnAudioTrackPresentation.addedDate(item, itemAddedTime);
+  const seconds = itemAddedTime(item);
+  if (!seconds) return "—";
+  try { return new Date(seconds > 99999999999 ? seconds / 1000000000 : seconds * 1000).toLocaleDateString("zh-CN"); } catch (error) { return "—"; }
+}
+function trackColumnValues(item, keys = []) {
+  if (globalThis.fnAudioTrackPresentation?.columnValues) {
+    return globalThis.fnAudioTrackPresentation.columnValues(item, keys, { displayText, clock, formatSize, escapeHtml, itemAddedTime });
+  }
+  const trackNo = Number(item.track_no || 0) > 0 ? String(Number(item.track_no)).padStart(2, "0") : "—";
+  const values = { track_no: trackNo, artist: displayText(item.artist), album: displayText(item.album), format: item.format || "—", duration: Number(item.duration || 0) > 0 ? clock(item.duration) : "—", size: formatSize(item.size) || "—", quality: trackQuality(item), added: trackAddedDate(item), composer: displayText(item.composer), genre: displayText(item.genre) };
+  return (keys || []).reduce((result, key) => {
+    if (typeof key === "string") result[key] = escapeHtml(values[key] || "—");
+    return result;
+  }, {});
+}
+function canSortTrackColumn(key) {
+  return Boolean(TRACK_COLUMN_DEFINITIONS[key]?.sort) && sortOptionsForView().some(([value]) => value === TRACK_COLUMN_DEFINITIONS[key].sort);
+}
+function renderTableHead(target = $("tableHead")) {
+  const head = target;
+  if (!head) return;
+  const columns = activeTrackColumns();
+  const currentSort = state.sortKey || "title";
+  const groupMode = (isCreatorView() && !currentCreatorName()) || (state.view === "genres" && !state.groupName);
+  const mode = groupMode ? "group" : (isAlbumCollectionView() ? "album-collection" : "tracks");
+  // R523: 队列恒按入队顺序（= 播放顺序）显示，排序键对它无效。表头因此不再
+  // 提供排序控件，否则就是一个点了不会有任何变化的死按钮。
+  const sortableKeys = state.view === "queue" ? [] : sortOptionsForView().map(([key]) => key);
+  const shared = globalThis.fnAudioTrackTablePresentation?.tableHeadPresentation?.({
+    mode,
+    columns,
+    widths: currentTrackColumnWidths(),
+    definitions: TRACK_COLUMN_DEFINITIONS,
+    currentSort,
+    sortDir: state.sortDir,
+    groupSortKey: groupViews[state.view],
+    sortableSortKeys: sortableKeys,
+  });
+  let template = document.body.style.getPropertyValue("--fnaudio-track-columns").trim();
+  if (!template) template = trackGridTemplate();
+  let markup = "";
+  if (shared && template) {
+    markup = shared.markup;
+  } else {
+    const renderHeader = (key, label, sortKey) => {
+      const sortable = sortKey && sortableKeys.includes(sortKey);
+      const indicator = currentSort === sortKey
+        ? `<span class="track-sort-indicator" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${state.sortDir === "asc" ? "m6 14 6-6 6 6" : "m6 10 6 6 6-6"}"/></svg></span>`
+        : "";
+      const control = sortable
+        ? `<button class="track-head-button" type="button" data-track-sort="${sortKey}">${label}${indicator}</button>`
+        : `<span class="track-head-label">${label}</span>`;
+      return `<div class="track-header-cell" data-track-column="${key}">${control}<span class="column-resize-handle" data-column-resize="${key}" title="拖动调整列宽" aria-hidden="true"></span></div>`;
+    };
+    markup = columns.map(key => renderHeader(key, TRACK_COLUMN_DEFINITIONS[key].label, TRACK_COLUMN_DEFINITIONS[key].sort)).join("") + `<button class="table-head-more" type="button" data-open-columns title="列显示" aria-label="列显示"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>`;
+  }
+  // Playback and user-state refreshes call render() frequently. Rebuilding an
+  // unchanged header invalidates its controls and forces unnecessary layout
+  // work above a large library list, even when keyed song rows were retained.
+  // Keep a compact per-header signature so only actual columns/sort/template
+  // changes replace its DOM.
+  // Do not use a NUL separator here: DOMString/dataset implementations may
+  // normalize it to U+FFFD, turning every comparison into a false mismatch.
+  // JSON keeps the three bounded strings unambiguous across old WebViews.
+  const signature = JSON.stringify([mode, template, markup]);
+  const changed = head.dataset.fnaudioTableHeadSignature !== signature;
+  if (changed) {
+    head.style.removeProperty("--fnaudio-track-columns");
+    document.body.style.setProperty("--fnaudio-track-columns", template);
+    head.innerHTML = markup;
+    head.dataset.fnaudioTableHeadSignature = signature;
+  }
+  // Event handlers close over only the control's data attributes, so they do
+  // not need to be rebound during ordinary playback/favorite renders.  Keep a
+  // per-header marker; a signature change recreates the controls and naturally
+  // re-enters the binding path.
+  if (!changed && head.dataset.fnaudioTableHeadBound === "1") return false;
+  head.querySelectorAll("[data-track-sort]").forEach(button => button.onclick = () => applyTrackSort(button.dataset.trackSort));
+  if (mode !== "tracks") {
+    head.dataset.fnaudioTableHeadBound = "1";
+    return changed;
+  }
+  head.querySelectorAll("[data-open-columns]").forEach(button => button.onclick = openColumnsDialog);
+  head.querySelectorAll("[data-column-resize]").forEach(handle => handle.onpointerdown = event => {
+    if (window.matchMedia("(max-width: 760px)").matches) return;
+    event.preventDefault();
+    const key = handle.dataset.columnResize;
+    const startX = event.clientX;
+    const startWidth = currentTrackColumnWidths()[key] || TRACK_COLUMN_DEFINITIONS[key].width;
+    handle.setPointerCapture?.(event.pointerId);
+    const resize = move => {
+      const width = clampTrackColumnWidth(key, startWidth + move.clientX - startX);
+      const template = trackGridTemplate({ [key]: width });
+      head.style.setProperty("--fnaudio-track-columns", template);
+      document.body.style.setProperty("--fnaudio-track-columns", template);
+    };
+    // A drag does not always end with pointerup: pointercancel fires when the
+    // pen/scroll gesture takes over or capture is lost.  The old binding left
+    // pointermove attached in that case, so every later mouse move kept
+    // rewriting the shared grid template from the stale start width.  Each exit
+    // path detaches all three listeners, so neither end event can be handled
+    // twice; a cancelled drag rolls the preview back and persists nothing.
+    const finish = (move, shouldSave) => {
+      resize(move);
+      if (shouldSave) saveTrackColumnWidth(key, startWidth + move.clientX - startX);
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+    };
+    const up = move => finish(move, true);
+    const cancel = () => finish({ clientX: startX }, false);
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", up, { once: true });
+    window.addEventListener("pointercancel", cancel, { once: true });
+  });
+  head.dataset.fnaudioTableHeadBound = "1";
+  return changed;
+}
+function renderAlbumDetail(list) {
+  const album = displayText(state.groupName || "未命名专辑");
+  const first = list.find(item => item?.cover_url) || list[0] || {};
+  const metadata = state.albumMetadata.get(album) || {};
+  const artist = displayText(metadata.artist || list.find(item => item?.artist)?.artist || "未知歌手");
+  const releaseDate = displayText(metadata.release_date || "");
+  const localCover = coverUrl(first, 512);
+  const onlineCover = usableCoverSource(metadata.image_url);
+  const cover = localCover || onlineCover;
+  const coverAttributes = localCover && onlineCover ? `data-artwork-local="1" data-metadata-image="${escapeHtml(onlineCover)}"` : "";
+  const coverMarkup = `${groupFallbackIcon("albums")}${cover ? `<img style="visibility:hidden" data-cover-src="${escapeHtml(cover)}" alt="">` : ""}`;
+  return `<div class="album-detail-layout">
+    <aside class="album-detail-sidebar">
+      <div class="album-detail-cover" ${coverAttributes}>${coverMarkup}</div>
+      <h2>${escapeHtml(album)}</h2>
+      <p data-album-detail-artist>${escapeHtml(artist)}</p>
+      <small data-album-detail-release-date ${releaseDate ? "" : "hidden"}>${escapeHtml(releaseDate)}</small>
+    </aside>
+    <section class="album-detail-tracks">
+      <nav class="album-detail-breadcrumb" aria-label="专辑路径"><button type="button" data-group-back>专辑</button>${breadcrumbChevronMarkup()}<strong>${escapeHtml(album)}</strong></nav>
+      <div class="album-detail-table-head" id="albumDetailTableHead"></div>
+      <div class="album-detail-track-list">${renderTrackRows(list)}</div>
+    </section>
+  </div>`;
+}
+function trackRowSelectionKey(item, index = 0) {
+  return globalThis.fnAudioTrackPresentation?.rowSelectionKey
+    ? globalThis.fnAudioTrackPresentation.rowSelectionKey(item, index)
+    : `${String(item?.id || "")}::${Math.max(0, Number(index) || 0)}`;
+}
+function trackRowMarkupSignature(item, index = 0, columns = activeTrackColumns(), columnValues = {}, localCover = "") {
+  const presentation = {
+    index,
+    title: displayTrackTitle(item),
+    artist: displayText(item?.artist),
+    album: displayText(item?.album),
+    cover: localCover,
+    columns,
+    values: columnValues,
+    isDsd: item?.is_dsd === true,
+  };
+  return globalThis.fnAudioLibraryRowSignaturePolicy?.signature?.(presentation)
+    || JSON.stringify([index, presentation.title, presentation.artist, presentation.album, localCover, columns, columnValues, presentation.isDsd]);
+}
+function renderTrack(item, index = 0, columns = activeTrackColumns()) {
+  // Keep the lazy/async contract explicit for static checks:
+  // data-cover-src=\"...\" loading=\"lazy\" decoding=\"async\".
+  const localCover = coverUrl(item);
+  const queueIndex = Number(item.__queueIndex);
+  const hasQueuePosition = Number.isInteger(queueIndex) && queueIndex >= 0;
+  const isCurrent = state.view === "queue" && hasQueuePosition && queueIndex === state.index;
+  const columnValues = trackColumnValues(item, columns.filter(key => key !== "title"));
+  const artist = displayText(item.artist) || "未知歌手";
+  const album = displayText(item.album);
+  const mobileSubtitle = album && album !== artist ? `${artist} · ${album}` : artist;
+  const rowKey = trackRowSelectionKey(item, index);
+  const isSelected = state.selectedTrackRowKeys.has(rowKey);
+  const playingIndicator = isCurrent ? `<span class="track-playing-indicator" aria-label="正在播放">正在播放</span>` : "";
+  // Keep the fallback visible until the image has decoded. Hiding it for the
+  // eager first rows used to leave a short blank tile between the first list
+  // commit and the browser's image decode on slower WebViews. The glyph is
+  // covered by a decoded image and is removed only by its `onload` handler;
+  // on failure it remains the same stable music-symbol presentation.
+  const coverImage = localCover
+      ? `<img style="visibility:hidden" data-cover-src="${escapeHtml(localCover)}" loading="${index < 8 ? "eager" : "lazy"}" decoding="async" fetchpriority="${index < 8 ? "high" : "low"}" alt="" onload="this.hidden=false;this.style.visibility='visible';this.removeAttribute('data-cover-retry-count');const fallback=this.parentElement?.querySelector('.track-cover-fallback');if(fallback)fallback.hidden=true" onerror="this.hidden=true;this.style.visibility='hidden';const fallback=this.parentElement?.querySelector('.track-cover-fallback');if(fallback)fallback.hidden=false;const retry=Number(this.dataset.coverRetryCount||0);const source=this.dataset.coverSrc||this.src;if(!this.dataset.coverSchedulerOwned&&source&&retry<1){this.dataset.coverRetryCount=String(retry+1);setTimeout(()=>{if(this.isConnected){this.hidden=false;this.style.visibility='hidden';this.src=source}},450)}">`
+    : "";
+  // Lazy rows have not started decoding yet; keep the glyph visible until the
+  // scheduler attaches/loads the image. Hiding it for every row created a
+  // blank tile between the list commit and IntersectionObserver hydration.
+  const coverFallback = `<span class="track-cover-fallback">${recordPlaceholderMarkup()}</span>`;
+  const titleCell = `<div class="track-main" data-play="${escapeHtml(item.id)}"><div class="track-cover">${coverImage}${coverFallback}</div><div class="track-info"><div class="track-title-line"><strong class="track-title">${escapeHtml(displayTrackTitle(item))}</strong>${playingIndicator}</div><span class="mobile-track-subtitle">${escapeHtml(mobileSubtitle)}</span></div></div>`;
+  const rowSignature = trackRowMarkupSignature(item, index, columns, columnValues, localCover);
+  return `<div class="track${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}" data-track-row-key="${escapeHtml(rowKey)}" data-track-row-signature="${escapeHtml(rowSignature)}" data-track-id="${escapeHtml(item.id)}"${hasQueuePosition ? ` data-queue-index="${queueIndex}"` : ""}>
+    ${columns.map(key => key === "title" ? titleCell : `<span class="track-cell track-cell-${key}${key === "format" && item.is_dsd === true ? " dsd" : ""}">${columnValues[key] || "—"}</span>`).join("")}
+  </div>`;
+}
+function renderTrackRows(items = []) {
+  // Column selection is scoped to the view, not to an individual song. Compute
+  // it once per list build: a 120-song first page previously repeated the
+  // scope/preference lookup for every row and could repeat legacy migration
+  // work while the initial DOM was being assembled.
+  const columns = activeTrackColumns();
+  const rows = Array.isArray(items) ? items : [];
+  const cache = state.trackRowsMarkupCache;
+  // Selection classes are reconciled directly after the keyed commit, so they
+  // do not make a static page-row template stale. Do not reuse queue rows:
+  // their current-playing indicator belongs in the generated markup itself.
+  const cacheKey = state.view === "queue" ? "" : `${trackColumnScope()}|${columns.join("|")}`;
+  const cached = cacheKey && cache ? cache.get(rows) : null;
+  if (cached?.key === cacheKey) return cached.html;
+  const html = rows.map((item, index) => renderTrack(item, index, columns)).join("");
+  if (cacheKey && cache) cache.set(rows, { key: cacheKey, html });
+  return html;
+}
+function invalidateTrackRowsMarkup(items = state.pageItems) {
+  if (Array.isArray(items)) state.trackRowsMarkupCache?.delete(items);
+  // Metadata backfill mutates row objects in place. Invalidate the filtered
+  // view memo as well, otherwise a search/sort render can keep using the
+  // pre-backfill title, artist or album fields until the page array changes.
+  if (state.filteredTracksCache) state.filteredTracksCache = { signature: null, tracks: [] };
+}
+function cancelMetadataRowRender() {
+  if (state.metadataRowRenderTimer) {
+    if (state.metadataRowRenderUsesFrame && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(state.metadataRowRenderTimer);
+    } else {
+      clearTimeout(state.metadataRowRenderTimer);
+    }
+  }
+  state.metadataRowRenderTimer = 0;
+  state.metadataRowRenderUsesFrame = false;
+  state.metadataRowRenderTrackIds.clear();
+  state.metadataRowRenderFieldsByTrack.clear();
+  state.metadataRowRenderForceFull = false;
+  state.metadataRowRenderExpectedRequestSeq = 0;
+  state.metadataRowRenderExpectedView = "";
+  state.metadataRowRenderExpectedPage = 1;
+  state.metadataRowRenderExpectedPageItems = null;
+}
+function metadataRowRenderBatchMatchesCurrent() {
+  const expected = {
+    requestSeq: state.metadataRowRenderExpectedRequestSeq,
+    view: state.metadataRowRenderExpectedView,
+    page: state.metadataRowRenderExpectedPage,
+    pageItems: state.metadataRowRenderExpectedPageItems,
+  };
+  const current = {
+    requestSeq: state.libraryRequestSeq,
+    view: state.view,
+    page: state.page,
+    pageItems: state.pageItems,
+  };
+  const policy = globalThis.fnAudioMetadataRowPatchPolicy;
+  if (typeof policy?.sameListIdentity === "function") return policy.sameListIdentity(expected, current);
+  return expected.requestSeq === current.requestSeq
+    && expected.view === current.view
+    && expected.page === current.page
+    && expected.pageItems === current.pageItems;
+}
+function metadataRowPatchOnly(trackId = "", item = null, index = -1, options = {}) {
+  const id = String(trackId || "");
+  if (!id || !isPagedTrackListing() || !Array.isArray(state.pageItems)) return false;
+  const row = options.rowsById?.get(id) || (() => {
+    const escape = globalThis.CSS?.escape;
+    const selectorId = escape ? escape(id) : id.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+    return document.querySelector(`[data-track-id="${selectorId}"]`);
+  })();
+  const currentItem = item || state.pageItems.find(entry => String(entry?.id || "") === id);
+  if (!row || !currentItem) return false;
+  const currentIndex = index >= 0 ? index : state.pageItems.indexOf(currentItem);
+  const template = document.createElement("template");
+  template.innerHTML = renderTrack(currentItem, currentIndex, options.columns || activeTrackColumns());
+  const next = template.content.firstElementChild;
+  if (!next) return false;
+  patchTrackRowNode(row, next);
+  // A batch re-establishes the page's declarative markup once all keyed row
+  // patches have settled. Until then, do not let a later render treat the
+  // pre-patch HTML as current.
+  state.renderedTrackListHtml = "";
+  if (!options.deferSelection) setTrackSelection([...state.selectedTrackRowKeys], false);
+  return true;
+}
+function scheduleMetadataRowRender(trackId = "", changedFields = []) {
+  const expectedTrackId = String(trackId || "");
+  // Metadata may settle after a user has already switched page/view. Bind one
+  // deferred batch to the current list identity so an obsolete frame cannot
+  // repaint a newly requested page and look like a list flash. Track ids are
+  // collected rather than replacing the timer, allowing visible rows to be
+  // patched together after a provider burst.
+  const batchIsStale = state.metadataRowRenderTimer && !metadataRowRenderBatchMatchesCurrent();
+  // Do not merge a new page's update into a timer captured for the old page.
+  // Otherwise its identity guard discards both payloads when the old batch
+  // flushes, delaying visible metadata until another provider response arrives.
+  if (batchIsStale) cancelMetadataRowRender();
+  if (!state.metadataRowRenderTimer) {
+    state.metadataRowRenderExpectedRequestSeq = state.libraryRequestSeq;
+    state.metadataRowRenderExpectedView = state.view;
+    state.metadataRowRenderExpectedPage = state.page;
+    state.metadataRowRenderExpectedPageItems = state.pageItems;
+  }
+  if (expectedTrackId) state.metadataRowRenderTrackIds.add(expectedTrackId);
+  else state.metadataRowRenderForceFull = true;
+  if (expectedTrackId) {
+    const fields = state.metadataRowRenderFieldsByTrack.get(expectedTrackId) || new Set();
+    if (Array.isArray(changedFields)) changedFields.forEach(field => {
+      const value = String(field || "").trim();
+      if (value) fields.add(value);
+    });
+    state.metadataRowRenderFieldsByTrack.set(expectedTrackId, fields);
+  }
+  if (state.metadataRowRenderTimer) {
+    // A current-song update is frame-priority. Promote an existing quiet
+    // visible-row batch to the next frame without dropping its pending ids.
+    if (expectedTrackId && String(currentItem()?.id || "") === expectedTrackId
+      && !state.metadataRowRenderUsesFrame
+      && typeof requestAnimationFrame === "function") {
+      clearTimeout(state.metadataRowRenderTimer);
+      state.metadataRowRenderUsesFrame = true;
+      state.metadataRowRenderTimer = requestAnimationFrame(flushMetadataRows);
+    }
+    return;
+  }
+  function flushMetadataRows() {
+    state.metadataRowRenderTimer = 0;
+    state.metadataRowRenderUsesFrame = false;
+    const pendingTrackIds = [...state.metadataRowRenderTrackIds];
+    const fieldsByTrack = new Map([...state.metadataRowRenderFieldsByTrack].map(([id, fields]) => [id, [...fields]]));
+    const forceFull = state.metadataRowRenderForceFull;
+    state.metadataRowRenderTrackIds.clear();
+    state.metadataRowRenderFieldsByTrack.clear();
+    state.metadataRowRenderForceFull = false;
+    if (!metadataRowRenderBatchMatchesCurrent()) return;
+    if (state.pageItems?.length && !state.libraryLoading) {
+      const policy = globalThis.fnAudioMetadataRowPatchPolicy;
+      // A metadata burst can touch most of a page. Build the page lookup once
+      // so row patching avoids repeated linear `find` and `indexOf` scans.
+      const visibleItemsById = new Map(state.pageItems.map((item, index) => [String(item?.id || ""), { item, index }]));
+      const visiblePendingIds = pendingTrackIds.filter(id => visibleItemsById.has(id));
+      // A request may settle after its song has left the visible page. Do not
+      // let that off-page result turn a local visible-row patch into a full
+      // list commit and reintroduce a first-screen flash.
+      if (!forceFull && !visiblePendingIds.length) return;
+      const patchable = !forceFull && visiblePendingIds.length > 0
+        && visiblePendingIds.every(id => policy?.canPatchRow?.({
+          pagedTrackListing: isPagedTrackListing(),
+          queueView: state.view === "queue",
+          groupRoot: isPagedGroupListing(),
+          folderView: state.view === "folders",
+          albumDetail: isAlbumDetailView(),
+          creatorAllTracks: isCreatorAllTracksView(),
+          search: currentQueryText(),
+          sortKey: state.sortKey,
+          changedFields: fieldsByTrack.get(id) || [],
+        }) === true);
+      if (patchable) {
+        const rowsById = new Map([...($("trackList")?.querySelectorAll?.("[data-track-id]") || [])]
+          .map(row => [String(row.getAttribute("data-track-id") || ""), row])
+          .filter(([id]) => id));
+        const columns = activeTrackColumns();
+        const patched = visiblePendingIds.reduce((count, id) => {
+          const location = visibleItemsById.get(id);
+          return metadataRowPatchOnly(id, location?.item, location?.index, { rowsById, columns, deferSelection: true }) ? count + 1 : count;
+        }, 0);
+        if (patched > 0) {
+          setTrackSelection([...state.selectedTrackRowKeys], false);
+          // The in-place mutations already invalidated the row template cache.
+          // Rebuild its declarative page markup once for the whole burst so a
+          // following playback/status render can take the exact HTML no-op
+          // path instead of re-running keyed reconciliation across every row.
+          state.renderedTrackListHtml = renderTrackRows(state.pageItems);
+        }
+        // Cover discovery is a page-wide DOM walk. Run it once after the
+        // metadata burst, rather than once per patched row.
+        if (patched > 0) hydrateVisibleTrackCovers();
+        // Rows outside the current page need no repaint. Fall back only when a
+        // visible target was expected but its live DOM row is unavailable.
+        if (visiblePendingIds.length && patched !== visiblePendingIds.length) render();
+      } else render();
+      // Persist the enriched visible page during idle time. The scheduler
+      // coalesces bursts and keeps the bounded snapshot size/TTL contract.
+      scheduleLibraryPageSnapshot(state.page);
+    }
+  }
+  // Visible-row enrichment often completes in a small burst shortly after
+  // page one arrives. Coalesce that non-playing work for a short interval so
+  // it produces one keyed patch rather than a sequence of list commits that
+  // looks like a flash. Current-song metadata remains frame-priority.
+  state.metadataRowRenderUsesFrame = Boolean(expectedTrackId && typeof requestAnimationFrame === "function");
+  state.metadataRowRenderTimer = state.metadataRowRenderUsesFrame
+    ? requestAnimationFrame(flushMetadataRows)
+    : setTimeout(flushMetadataRows, 180);
+}
+function invalidateLibraryResponseForTrack(trackId) {
+  const id = String(trackId || "");
+  if (!id || !state.libraryResponseCache?.deleteWhere) return;
+  state.libraryResponseCache.deleteWhere(value => Array.isArray(value?.items)
+    && value.items.some(item => String(item?.id || "") === id));
+}
+function commitTrackListHtml(listHtml) {
+  const list = $("trackList");
+  if (!list) return false;
+  if (state.renderedTrackListHtml === listHtml) {
+    state.uiMetrics.listMarkupNoops = Math.min(1000000, state.uiMetrics.listMarkupNoops + 1);
+    return false;
+  }
+  // When a snapshot is followed by the authoritative response, metadata or
+  // playback decorations may change only a handful of rows. Replacing the
+  // whole list makes old WebViews discard every decoded cover and causes a
+  // visible flash. Patch keyed top-level rows when the structure is stable;
+  // fall back to one replacement for grouped/nested views.
+  let patched = false;
+  let domChanged = false;
+  if (list.children.length) {
+    const template = document.createElement("template");
+    template.innerHTML = listHtml;
+    const next = [...template.content.children];
+    const current = [...list.children];
+    const keyOf = node => node.getAttribute?.("data-track-row-key") || node.getAttribute?.("data-group-key") || "";
+    const currentByKey = new Map(current.map(node => [keyOf(node), node]).filter(([key]) => key));
+    const nextKeys = next.map(keyOf);
+    // Keyed reconciliation also works when filtering/paging changes the row
+    // count or order.  Moving an existing node through a fragment preserves
+    // its decoded cover and in-flight request instead of forcing a full
+    // innerHTML replacement (the main source of cover flashes on old WebViews).
+    const nextKeySet = new Set(nextKeys.filter(Boolean));
+    const keyed = next.length > 0 && nextKeySet.size === next.length
+      && currentByKey.size === current.length;
+    if (keyed) {
+      const orderUnchanged = current.length === next.length
+        && current.every((node, index) => keyOf(node) === nextKeys[index]);
+      // Appending an already-connected node to a DocumentFragment removes it
+      // from the live list immediately.  Do not create/move through a
+      // fragment for a stable-order patch: on older WebViews that briefly
+      // emptied the list even though the final order was unchanged.
+      const fragment = orderUnchanged ? null : document.createDocumentFragment();
+      const desiredNodes = orderUnchanged ? null : [];
+      const usedKeys = new Set();
+      next.forEach((node, index) => {
+        const key = nextKeys[index];
+        const existing = currentByKey.get(key);
+        usedKeys.add(key);
+        const existingSignature = existing?.getAttribute?.("data-track-row-signature");
+        const nextSignature = node.getAttribute?.("data-track-row-signature");
+        // A snapshot and its first authoritative page can carry different
+        // transport-only row signatures (for example an old cached field
+        // representation), while producing identical visible markup. A
+        // signature mismatch is therefore only a cheap hint that a comparison
+        // may be needed; replacing such rows anyway briefly re-paints every
+        // cover on older WebViews. Preserve the live node when the normalized
+        // presentation is still equivalent.
+        const rowChanged = existing && existingSignature && nextSignature
+          ? existingSignature !== nextSignature
+            && trackRowComparableHtml(existing) !== trackRowComparableHtml(node)
+          : existing && trackRowComparableHtml(existing) !== trackRowComparableHtml(node);
+        if (existing && rowChanged) {
+          // A metadata response normally changes only title cells and/or one
+          // cover.  Replacing the row wrapper is cheaper than rebuilding the
+          // entire list, but old WebViews still repaint the row and can show
+          // a short cover glyph flash. Keep the connected row identity and
+          // patch its small direct cells instead. This also preserves focus,
+          // selection and any in-flight cover decode owned by the live row.
+          patchTrackRowNode(existing, node);
+          domChanged = true;
+        }
+        const resolved = existing && existing.isConnected ? existing : node;
+        if (fragment && desiredNodes) {
+          desiredNodes.push(resolved);
+          fragment.appendChild(resolved);
+        }
+      });
+      current.forEach(node => {
+        const key = keyOf(node);
+        if (key && !usedKeys.has(key)) {
+          node.remove();
+          domChanged = true;
+        }
+      });
+      if (!orderUnchanged && desiredNodes && (
+        current.length !== desiredNodes.length || current.some((node, index) => node !== desiredNodes[index])
+      )) domChanged = true;
+      // Avoid moving every unchanged row through a fragment on ordinary
+      // status renders. This keeps layout/paint quiet when the list identity
+      // and order are already stable; the fragment is only needed for an
+      // actual insertion, removal or reorder.
+      if (fragment) list.appendChild(fragment);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    list.innerHTML = listHtml;
+    domChanged = true;
+  }
+  state.renderedTrackListHtml = listHtml;
+  if (domChanged) {
+    state.uiMetrics.listCommits = Math.min(1000000, state.uiMetrics.listCommits + 1);
+    if (!state.uiMetrics.firstListCommitMs) {
+      const elapsed = Date.now() - Number(state.uiMetrics.sessionStartedAt || Date.now());
+      state.uiMetrics.firstListCommitMs = Math.min(3600000, Math.max(0, elapsed));
+    }
+  }
+  // A render signature can change because a live row was already updated by
+  // selection/cover code.  Do not treat that bookkeeping-only delta as a DOM
+  // change: callers would otherwise restart cover observation and schedule a
+  // fresh layout pass after the visible list has already settled.
+  return domChanged;
+}
+function trackRowComparableHtml(node) {
+  if (!node?.cloneNode) return "";
+  const copy = node.cloneNode(true);
+  // The signature is a reconciliation optimization, not user-visible
+  // presentation. Do not let a transport-only signature change make two
+  // otherwise identical rows appear different to the final DOM guard.
+  copy.removeAttribute?.("data-track-row-signature");
+  copy.querySelectorAll?.("img").forEach(image => {
+    // A scheduler-started image has src but no data-cover-src. Restore the
+    // declarative shape used by renderTrack/renderGroups before comparison.
+    const source = image.getAttribute("data-cover-src") || image.dataset?.coverLoadedSrc || image.getAttribute("src") || "";
+    if (source) image.setAttribute("data-cover-src", source);
+    image.removeAttribute("src");
+    image.removeAttribute("data-cover-queued");
+    image.removeAttribute("data-cover-loaded-src");
+    image.removeAttribute("data-cover-observed");
+  });
+  copy.querySelectorAll?.(".group-icon, .album-detail-cover").forEach(cover => cover.classList.remove("has-cover"));
+  copy.querySelectorAll?.(".track-cover-fallback").forEach(fallback => fallback.removeAttribute("hidden"));
+  return copy.outerHTML;
+}
+function preserveTrackCoverNode(current, next) {
+  // Reuse an already decoded cover when metadata/playback patches rebuild the
+  // same row. This avoids a visible glyph/blank flash in older WebViews.
+  const currentImage = current?.querySelector?.(".track-cover img");
+  const nextImage = next?.querySelector?.(".track-cover img");
+  if (!currentImage || !nextImage) return;
+  const currentSource = currentImage.getAttribute("data-cover-src")
+    || currentImage.dataset?.coverLoadedSrc || currentImage.getAttribute("src") || "";
+  const nextSource = nextImage.getAttribute("data-cover-src") || nextImage.getAttribute("src") || "";
+  if (!currentSource || !nextSource || currentSource !== nextSource) return;
+  // Move the actual node instead of copying attributes. The decoded bitmap
+  // and any in-flight request then remain attached to the replacement row.
+  nextImage.replaceWith(currentImage);
+  const currentFallback = current.querySelector?.(".track-cover-fallback");
+  const nextFallback = next.querySelector?.(".track-cover-fallback");
+  if (currentFallback?.hidden && nextFallback) nextFallback.hidden = true;
+}
+function directTrackChild(row, className) {
+  if (!row?.children) return null;
+  for (const child of row.children) {
+    if (child?.classList?.contains(className)) return child;
+  }
+  return null;
+}
+function copyTrackRowAttributes(current, next) {
+  if (!current?.attributes || !next?.attributes) return;
+  const wanted = new Map([...next.attributes].map(attribute => [attribute.name, attribute.value]));
+  [...current.attributes].forEach(attribute => {
+    if (!wanted.has(attribute.name)) current.removeAttribute(attribute.name);
+  });
+  wanted.forEach((value, name) => {
+    if (current.getAttribute(name) !== value) current.setAttribute(name, value);
+  });
+}
+function patchTrackRowNode(current, next) {
+  if (!current?.classList?.contains("track") || !next?.classList?.contains("track")) {
+    preserveTrackCoverNode(current, next);
+    current?.replaceWith?.(next);
+    return;
+  }
+  copyTrackRowAttributes(current, next);
+  const currentMain = directTrackChild(current, "track-main");
+  const nextMain = directTrackChild(next, "track-main");
+  if (currentMain && nextMain) {
+    const currentCover = directTrackChild(currentMain, "track-cover");
+    const nextCover = directTrackChild(nextMain, "track-cover");
+    const currentImage = currentCover?.querySelector?.("img");
+    const nextImage = nextCover?.querySelector?.("img");
+    const currentSource = currentImage?.getAttribute?.("data-cover-src")
+      || currentImage?.dataset?.coverLoadedSrc || currentImage?.getAttribute?.("src") || "";
+    const nextSource = nextImage?.getAttribute?.("data-cover-src") || nextImage?.getAttribute?.("src") || "";
+    // Retain an existing decoded/in-flight image if it represents the same
+    // artwork. Only the cover tile itself changes for a genuinely new image.
+    if (currentCover && nextCover && currentSource !== nextSource) currentCover.innerHTML = nextCover.innerHTML;
+    const currentInfo = directTrackChild(currentMain, "track-info");
+    const nextInfo = directTrackChild(nextMain, "track-info");
+    if (currentInfo && nextInfo && currentInfo.innerHTML !== nextInfo.innerHTML) currentInfo.innerHTML = nextInfo.innerHTML;
+  } else if (currentMain || nextMain) {
+    // Exactly one side carries a title cell, so the column set changed. Neither
+    // direction is expressible with replaceWith(): a null argument is stringified
+    // into a literal "null" text node inside the live row, and the optional chain
+    // on the missing side drops the new cell without a trace. Both leave the row
+    // permanently out of step with the markup it is compared against, because the
+    // commit records renderedTrackListHtml for markup the DOM does not match.
+    if (currentMain) {
+      currentMain.remove();
+    } else {
+      const liveChildren = [...current.children];
+      const mainOrdinal = [...next.children].indexOf(nextMain);
+      if (mainOrdinal >= 0 && mainOrdinal < liveChildren.length) current.insertBefore(nextMain, liveChildren[mainOrdinal]);
+      else current.appendChild(nextMain);
+    }
+  }
+  const currentCells = [...current.children].filter(child => !child.classList?.contains("track-main"));
+  const nextCells = [...next.children].filter(child => !child.classList?.contains("track-main"));
+  if (currentCells.length !== nextCells.length) {
+    current.innerHTML = next.innerHTML;
+    return;
+  }
+  currentCells.forEach((cell, index) => {
+    const replacement = nextCells[index];
+    if (cell?.outerHTML !== replacement?.outerHTML) cell.replaceWith(replacement);
+  });
+}
+function needsVisibleTrackCoverHydration() {
+  const root = $("trackList");
+  const images = root?.querySelectorAll ? root.querySelectorAll("img[data-cover-src]") : [];
+  let hasUnloaded = false;
+  for (const image of images) {
+    if (image?.hasAttribute?.("src")) continue;
+    hasUnloaded = true;
+    // A newly patched row has no generation marker. Existing queued rows are
+    // already owned by the active scheduler and must not restart the whole
+    // observer merely because a playback decoration changed elsewhere.
+    if (!image.dataset.coverQueued && !image.dataset.coverObserved) return true;
+  }
+  if (!hasUnloaded || !state.coverLoadScheduler?.snapshot) return !state.coverLoadScheduler && hasUnloaded;
+  const status = state.coverLoadScheduler.snapshot();
+  // Recover only a genuinely idle scheduler with unstarted nodes (for example
+  // after an older WebView discarded an observer callback), not every render.
+  return Number(status?.queued || 0) === 0 && Number(status?.inFlight || 0) === 0;
+}
+function hydrateVisibleTrackCovers() {
+  const hadScheduler = Boolean(state.coverLoadScheduler);
+  if (!state.coverLoadScheduler && globalThis.fnAudioCoverLoadScheduler?.create) {
+    state.coverLoadScheduler = globalThis.fnAudioCoverLoadScheduler.create({
+      document,
+      window,
+      getImageRoot: () => $("trackList"),
+      getScrollRoot: () => $("libraryScroll"),
+      maxConcurrent: 4,
+      onEvent: event => {
+        const key = event === "request" ? "coverRequests"
+          : event === "load" ? "coverLoads"
+            : event === "retry" ? "coverRetries" : event === "error" ? "coverFailures" : "";
+        if (key) state.uiMetrics[key] = Math.min(1000000, state.uiMetrics[key] + 1);
+      },
+    });
+  }
+  if (state.coverLoadScheduler && !needsVisibleTrackCoverHydration()) {
+    const status = state.coverLoadScheduler.snapshot?.();
+    if (status && typeof status === "object") state.coverLoadStatus = status;
+    return;
+  }
+  const status = state.coverLoadScheduler?.hydrate();
+  if (!hadScheduler) state.uiMetrics.coverHydrations = Math.min(1000000, state.uiMetrics.coverHydrations + 1);
+  if (!hadScheduler && !state.uiMetrics.firstCoverHydrationMs) {
+    const elapsed = Date.now() - Number(state.uiMetrics.sessionStartedAt || Date.now());
+    state.uiMetrics.firstCoverHydrationMs = Math.min(3600000, Math.max(0, elapsed));
+  }
+  if (status && typeof status === "object") state.coverLoadStatus = status;
+}
+function prioritizeVisibleTrackCovers() {
+  const root = $("trackList");
+  if (!root?.querySelectorAll) return;
+  const viewport = root.getBoundingClientRect?.();
+  if (!viewport) return;
+  root.querySelectorAll("img[data-cover-src]").forEach(image => {
+    const rect = image.getBoundingClientRect?.();
+    if (!rect || rect.bottom < viewport.top || rect.top > viewport.bottom) return;
+    image.dataset.coverObserved = "";
+  });
+  hydrateVisibleTrackCovers();
+}
+function renderGroups(groups = groupedTracks()) {
+  const groupView = isCreatorAlbumView() ? "albums" : state.view;
+  return groups.map(group => {
+    const name = displayText(group.name || "未分类");
+    const key = `group:${groupView}:${name}`;
+    const trackCount = libraryCount(group.track_count);
+    return `<div class="group-row${state.selectedGroupKeys.has(key) ? " is-selected" : ""}" data-group-row data-group-key="${escapeHtml(key)}" data-group-type="group" data-group-view="${escapeHtml(groupView)}" data-group-name="${encodeURIComponent(name)}" data-group-track-count="${trackCount}">
+    ${groupIcon(groupView, [state.itemCache.get(String(group.cover_track_id || ""))].filter(Boolean), group.cover_track_id, name, group.image_url)}
+    <div class="group-info"><strong>${escapeHtml(name)}</strong><span>${trackCount} 首</span></div>
+  </div>`;
+  }).join("");
+}
+function renderCreatorAllSongsEntry(groups = groupedTracks()) {
+  const creator = displayText(currentCreatorName() || `未知${currentCreatorLabel()}`);
+  const fallbackTotal = groups.reduce((total, group) => total + libraryCount(group.track_count), 0);
+  const trackTotal = libraryCount(currentCreatorTrackTotal() || fallbackTotal);
+  return `<button class="artist-all-songs-entry" type="button" data-open-creator-all-tracks>
+    <span class="artist-all-songs-icon" aria-hidden="true"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg></span>
+    <span class="artist-all-songs-copy"><strong>所有歌曲</strong><small>查看 ${escapeHtml(creator)} 的全部歌曲</small></span>
+    <span class="artist-all-songs-count">${trackTotal ? `${trackTotal} 首` : "查看歌曲"}</span>
+    ${breadcrumbChevronMarkup("artist-all-songs-chevron")}
+  </button>`;
+}
+function renderAlbumGroups(groups = groupedTracks()) {
+  const albums = groups.map(group => {
+    const name = displayText(group.name || "未分类");
+    const key = `group:albums:${name}`;
+    const metadata = state.albumMetadata.get(name) || {};
+    const artist = displayText(metadata.artist || group.artist || "未知歌手");
+    const releaseDate = displayText(metadata.release_date || "-");
+    const trackCount = libraryCount(group.track_count);
+    return `<div class="album-group-row${state.selectedGroupKeys.has(key) ? " is-selected" : ""}" data-group-row data-group-key="${escapeHtml(key)}" data-group-type="group" data-group-view="albums" data-group-name="${encodeURIComponent(name)}" data-group-track-count="${trackCount}" data-album-metadata-name="${escapeHtml(name)}"><div class="album-group-title">${groupIcon("albums", [state.itemCache.get(String(group.cover_track_id || ""))].filter(Boolean), group.cover_track_id, name, group.image_url)}<strong>${escapeHtml(name)}</strong></div><span class="album-group-artist">${escapeHtml(artist)}</span><span class="album-group-release-date">${escapeHtml(releaseDate)}</span></div>`;
+  }).join("");
+  return `${isCreatorAlbumView() ? renderCreatorAllSongsEntry(groups) : ""}${albums}`;
+}
+function renderCreatorAllTracks(list) {
+  const creator = displayText(currentCreatorName() || `未知${currentCreatorLabel()}`);
+  return `<nav class="artist-all-tracks-breadcrumb" aria-label="${currentCreatorLabel()}路径">
+    <button type="button" data-creator-root-back>${currentCreatorLabel()}</button>${breadcrumbChevronMarkup()}
+    <button type="button" data-group-back>${escapeHtml(creator)}</button>${breadcrumbChevronMarkup()}
+    <strong>所有歌曲</strong>
+  </nav>${renderTrackRows(list)}`;
+}
+function renderGenreTracks(list) {
+  const genre = displayText(state.groupName || "未分类");
+  return `<nav class="artist-all-tracks-breadcrumb category-tracks-breadcrumb" aria-label="类型路径">
+    <button type="button" data-group-back>类型</button>${breadcrumbChevronMarkup()}
+    <strong>${escapeHtml(genre)}</strong>
+  </nav>${renderTrackRows(list)}`;
+}
+function renderFolders(data = folderChildren()) {
+  const rootRow = state.folderRootRows.find(row => row.root === state.folderRoot || row.path === state.folderRoot);
+  const rootLabel = folderDisplayName(rootRow?.path || state.folderRoot || "音乐目录");
+  const parts = String(state.folderPath || "").split("/").filter(Boolean);
+  const breadcrumbItems = state.folderRoot
+    ? [`<button type="button" class="folder-crumb" data-folder-crumb-root="${encodeURIComponent(state.folderRoot)}" data-folder-crumb-path="">${escapeHtml(rootLabel)}</button>`, ...parts.map((part, index) => `<button type="button" class="folder-crumb${index === parts.length - 1 ? " is-current" : ""}" data-folder-crumb-root="${encodeURIComponent(state.folderRoot)}" data-folder-crumb-path="${encodeURIComponent(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`)]
+    : ["<span class=\"folder-crumb is-current\">音乐目录</span>"];
+  const breadcrumb = `<nav class="folder-toolbar folder-breadcrumb" aria-label="当前路径">${breadcrumbItems.join('<span class="folder-crumb-separator">/</span>')}</nav>`;
+  const folders = data.folders.map(row => {
+    const path = row.path || row.parent || "";
+    const name = row.name || path.split("/").pop();
+    const encoded = encodeURIComponent(path);
+    const root = state.folderRoot ? "" : (row.root || row.path || "");
+    const encodedRoot = encodeURIComponent(root);
+    const openAttribute = state.folderRoot
+      ? `data-open-folder-path="${encoded}"`
+      : `data-open-folder-root="${encodedRoot}"`;
+    const groupRoot = state.folderRoot || root;
+    const groupPath = state.folderRoot ? path : "";
+    const groupKey = `folder:${groupRoot}:${groupPath}`;
+    return `<div class="group-row folder-group-row${state.selectedGroupKeys.has(groupKey) ? " is-selected" : ""}" data-group-row data-group-key="${escapeHtml(groupKey)}" data-group-type="folder" data-group-label="${escapeHtml(name)}" role="button" tabindex="0" aria-label="打开文件夹 ${escapeHtml(name)}" data-group-root="${encodeURIComponent(groupRoot)}" data-group-path="${encodeURIComponent(groupPath)}" ${openAttribute}>
+      ${groupIcon("folders")}
+      <div class="group-info"><strong>${escapeHtml(name)}</strong><span>${libraryCount(row.track_count)} 首</span></div><span class="folder-group-chevron" aria-hidden="true"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></span>
+    </div>`;
+  }).join("");
+  const folderPages = Math.max(1, Math.ceil(libraryCount(state.folderTotal) / state.folderPageSize));
+  const folderPager = folderPages > 1 ? `<div class="folder-pager"><button type="button" class="secondary-button" data-folder-page-step="-1" ${state.folderPage <= 1 ? "disabled" : ""}>上一组文件夹</button><span>文件夹 ${state.folderPage} / ${folderPages}</span><button type="button" class="secondary-button" data-folder-page-step="1" ${state.folderPage >= folderPages ? "disabled" : ""}>下一组文件夹</button></div>` : "";
+  const tracks = data.tracks;
+  return breadcrumb + folders + folderPager + renderTrackRows(tracks);
+}
+function renderPager(totalOverride = null) {
+  if (!isClientPagedView() && (!isPagedLibraryView() || (!isPagedTrackListing() && !isPagedGroupListing()))) return "";
+  const total = libraryCount(totalOverride == null ? (isClientPagedView() ? clientPagedTotal() : state.pageTotal || 0) : totalOverride);
+  const pages = Math.max(1, Math.ceil(total / state.pageSize));
+  if (pages <= 1) return "";
+  const unit = isPagedGroupListing() ? "项" : "首";
+  return globalThis.fnAudioLibraryPagerPresentation?.renderPager({ total, page: state.page, pages, unit }) || "";
+}
+function updateMobilePagerVisibility() {
+  if (document.body.classList.contains("mobile-search-active")) return;
+  const pager = $("pager");
+  const list = $("trackList");
+  return globalThis.fnAudioLibraryPagerVisibility?.updateMobilePagerVisibility({
+    searchActive: document.body.classList.contains("mobile-search-active"),
+    isMobile: window.matchMedia("(max-width: 760px)").matches,
+    pager,
+    list,
+    requestFrame: (callback) => requestAnimationFrame(callback),
+  });
+}
+function render() {
+  state.uiMetrics.renders = Math.min(1000000, state.uiMetrics.renders + 1);
+  updateLibraryStatusDecorations();
+  updateSortOptions();
+  const isGroup = Boolean(groupViews[state.view]);
+  const isFolder = state.view === "folders";
+  const creatorAllTracks = isCreatorAllTracksView();
+  const isGroupRoot = isGroup && !state.groupName && !creatorAllTracks;
+  const folderState = isFolder ? folderChildren() : null;
+  const pagedTracks = isPagedTrackListing() ? state.pageItems : [];
+  const clientPage = isClientPagedView() ? clientPagedResult() : null;
+  const list = isGroupRoot ? groupedTracks() : (isFolder ? (folderState?.tracks || []) : (clientPage ? clientPage.tracks : (isPagedTrackListing() ? pagedTracks : filteredTracks())));
+  const clientPageTotal = clientPage?.total ?? null;
+  const albumDetail = isAlbumDetailView();
+  const genreDetail = state.view === "genres" && Boolean(state.groupName);
+  // R508（负责人要求「取消掉所有列表里面的『播放全部』按钮」）: 列表顶部不再有
+  // 「播放全部」。播放列表 / 收藏 / 队列原本就有的这条工具条只留计数与它们自己的
+  // 动作（删除播放列表 / 清空队列）。
+  //
+  // R511（负责人「还是有些地方有『播放全部』按钮」）: R508 当时按「列表里面的」
+  // 划界，留下了专辑详情面包屑、类型详情面包屑与分类详情头这三处。负责人看到
+  // 之后要求一并不留：三处渲染、共用选择器、点击回调与专用样式这次全部删除。
+  // 播整张仍可从列表任意一行开始，分组长按 / 右键也仍有「播放」。
+  const countBar = (countText, extraActions = "") => `<div class="playlist-toolbar"><span>${countText}</span>${extraActions ? `<div class="playlist-toolbar-actions">${extraActions}</div>` : ""}</div>`;
+  const playlistToolbar = isPlaylistView() && currentPlaylist()
+    ? countBar(`${clientPageTotal} 首歌曲`, `<button type="button" class="danger-button" data-delete-playlist="${escapeHtml(currentPlaylist().id)}">删除播放列表</button>`)
+    : state.view === "favorites"
+      ? countBar(`${clientPageTotal} 首收藏歌曲`)
+      : state.view === "queue"
+        ? countBar(`${state.queue.length} 首歌曲`, `<button type="button" class="danger-button" data-clear-queue ${state.queue.length ? "" : "disabled"}>清空队列</button>`)
+      : isGroup && state.groupName && !albumDetail && !genreDetail
+      ? `<div class="category-detail"><div class="category-detail-main">${groupIcon(isCreatorView() ? "albums" : state.view, list)}<div><strong>${escapeHtml(state.groupName)}</strong><span>${isCreatorView() ? `${escapeHtml(currentCreatorName())} · ` : ""}${libraryCount(state.pageTotal || list.length)} 首歌曲</span></div></div><div class="category-detail-actions"><button type="button" class="secondary-button" data-group-back>返回分类</button></div></div>`
+      : "";
+  const listHtml = isFolder
+    ? renderFolders(folderState)
+    : isGroupRoot
+      ? (isAlbumCollectionView() ? renderAlbumGroups(list) : renderGroups(list))
+      : creatorAllTracks
+        ? renderCreatorAllTracks(list)
+        : genreDetail
+          ? renderGenreTracks(list)
+        : albumDetail
+          ? renderAlbumDetail(list)
+          : playlistToolbar + renderTrackRows(list);
+  // Measure the current list before rendering either header.  Otherwise the
+  // header can capture fallback widths while rows are already using the
+  // persisted/auto-measured template, producing visible column drift.
+  if (!window.matchMedia("(max-width: 760px)").matches && list.length) {
+    measureAutoTrackColumnWidths();
+  }
+  const tableHeadChanged = renderTableHead();
+  $("tableHead").hidden = albumDetail;
+  $("libraryScroll").classList.toggle("album-detail-scroll", albumDetail);
+  $("trackList").classList.toggle("group-mode", isGroupRoot);
+  $("trackList").classList.toggle("album-detail-mode", albumDetail);
+  $("trackList").classList.toggle("artist-all-tracks-mode", creatorAllTracks);
+  // While the first authoritative request is in flight, keep an already
+  // visible snapshot/list mounted.  Some older WebViews repaint a cleared
+  // container before the response arrives, which produces a one-frame blank
+  // list and makes every cover appear to flash.  The empty-state decision
+  // below still reflects the loading guard, so a genuinely empty library is
+  // shown once the request settles.
+  const deferListCommit = globalThis.fnAudioLibraryRenderPolicy?.shouldDeferListCommit({
+    libraryLoading: state.libraryLoading,
+    hasVisiblePresentation: hasVisibleLibraryPresentation(),
+    hasRenderedMarkup: Boolean(state.renderedTrackListHtml),
+    listLength: list.length,
+  }) === true;
+  const listChanged = deferListCommit ? false : commitTrackListHtml(listHtml);
+  if (listChanged) {
+    // Attach group-specific local/online fallback handlers before the shared
+    // scheduler can assign image sources, including legacy WebViews without IO.
+    loadGroupArtwork();
+    hydrateVisibleTrackCovers();
+    // On the first commit the scroll container may not have its final
+    // geometry yet. IntersectionObserver can therefore miss the visible
+    // rows until a later category switch. Reconcile once after layout so the
+    // first screen is hydrated without requiring user navigation.
+    requestAnimationFrame(() => prioritizeVisibleTrackCovers());
+  }
+  // A normal playback/favorite render must not walk every row merely to
+  // re-apply the same selection.  A changed list still forces one pass so a
+  // keyed DOM commit receives the current selection classes.
+  setTrackSelection([...state.selectedTrackRowKeys], listChanged);
+  const albumHeadChanged = albumDetail ? renderTableHead($("albumDetailTableHead")) : false;
+  if (albumDetail) {
+    const template = document.body.style.getPropertyValue("--fnaudio-track-columns") || trackGridTemplate();
+    $("albumDetailTableHead")?.style.setProperty("--fnaudio-track-columns", template);
+  }
+  const pager = $("pager");
+  const pagerHtml = renderPager(clientPageTotal);
+  const pagerChanged = pager.innerHTML !== pagerHtml;
+  if (pagerChanged) pager.innerHTML = pagerHtml;
+  if (pagerChanged) updateMobilePagerVisibility();
+  bindTrackListInteractions();
+  // These perform layout reads across visible rows.  Rendering playback state
+  // or a favorite must not enqueue another full measurement pass when the list,
+  // its headers and its pager are unchanged.  The library grid width is a CSS
+  // contract, so no inline per-row geometry is written from this path any more.
+  if (listChanged || tableHeadChanged || albumHeadChanged || pagerChanged) {
+    requestAnimationFrame(() => {
+      measureAutoTrackColumnWidths();
+      if (albumDetail) {
+        const albumHead = $("albumDetailTableHead");
+        if (albumHead) {
+          albumHead.dataset.fnaudioTableHeadSignature = "";
+          renderTableHead(albumHead);
+        }
+      }
+      updateMobilePagerVisibility();
+    });
+  }
+  // `list` already contains the grouped rows for group-root views; reusing it
+  // avoids a second grouping pass on large libraries during every render.
+  // While the first authoritative page is still in flight, an empty list is
+  // not an empty library.  Hiding the empty-state panel during that short
+  // window prevents the old WebView flash of “没有音乐” before page one
+  // arrives; once loading finishes, a genuinely empty result is shown as
+  // before.
+  const libraryRequestPending = Boolean(state.libraryLoading && !hasVisibleLibraryPresentation());
+  $("empty").hidden = libraryRequestPending || list.length > 0 || (isFolder && folderState && folderState.folders.length > 0) || (isGroupRoot && list.length > 0);
+  const favoriteCount = String(state.favorites.length);
+  const queueCount = String(state.queue.length);
+  if ($("favoriteCount").textContent !== favoriteCount) $("favoriteCount").textContent = favoriteCount;
+  if ($("queueCount").textContent !== queueCount) $("queueCount").textContent = queueCount;
+  updateFavoriteControls();
+  renderPlaylistNav();
+  const presentation = window.fnAudioViewPresentation({
+    view: state.view,
+    playlistName: isPlaylistView() ? (currentPlaylist()?.name || "播放列表") : "",
+    creatorAllTracks,
+    albumSurface: isAlbumSurfaceView(),
+    scanText: scanProgressText(),
+    creatorName: displayText(currentCreatorName()),
+    folderName: state.view === "folders" && currentFolderLabel ? currentFolderLabel() : "",
+  });
+  if ($("viewTitle").textContent !== presentation.title) $("viewTitle").textContent = presentation.title;
+  if ($("viewSub").textContent !== presentation.subtitle) $("viewSub").textContent = presentation.subtitle;
+  if ($("mobileViewTitle").textContent !== presentation.title) $("mobileViewTitle").textContent = presentation.title;
+  if ($("mobileViewSub").textContent !== presentation.mobileSubtitle) $("mobileViewSub").textContent = presentation.mobileSubtitle;
+  updateNavigationActiveState();
+  // These controls are descendants of the keyed list. Their callbacks read
+  // current state at click time, so re-binding them after an unrelated player
+  // state render only adds a full DOM walk on a large library.
+  if (listChanged) {
+    document.querySelectorAll("[data-delete-playlist]").forEach(b => b.onclick = () => deletePlaylist(b.dataset.deletePlaylist));
+    document.querySelectorAll("[data-clear-queue]").forEach(b => b.onclick = clearQueue);
+    document.querySelectorAll("[data-play-group]").forEach(b => b.onclick = () => playGroup(b.dataset.playGroup));
+    document.querySelectorAll("[data-group-row]").forEach(row => {
+      row.onclick = event => {
+        if (event.target.closest("button")) return;
+        // A finished hold also ends in a click.  Letting it through would open the
+        // album / artist right after the hold opened the menu (R504).
+        if (shouldSuppressGroupClick(row.dataset.groupKey)) {
+          event.preventDefault();
+          return;
+        }
+        if (event.ctrlKey && !window.matchMedia("(max-width: 760px)").matches) {
+          event.preventDefault();
+          toggleGroupSelection(row.dataset.groupKey);
+          return;
+        }
+        if (row.dataset.groupType === "folder") {
+          event.preventDefault();
+          // R513（负责人「移动端文件夹改为单击进入」）: 桌面上文件夹沿用「单击
+          // 选中、双击进入」的桌面语义；手机上没有双击这回事，原先这一分支把
+          // 单击整个吞掉——点一下屏幕什么也不发生，只能长按开菜单再选「打开」，
+          // 或者连点两下碰运气。手机端改为单击直接进入。
+          //
+          // 长按仍然优先：按住超过阈值那一刻 `suppressGroupClick` 已经记下一次
+          // 抑制，抬手产生的这次 click 在上面的分支就返回了，不会再往下钻一层。
+          if (window.matchMedia("(max-width: 760px)").matches) openGroupRow(row);
+          else setGroupSelection([row.dataset.groupKey]);
+          return;
+        }
+        if (!window.matchMedia("(max-width: 760px)").matches && state.selectedGroupKeys.size) {
+          event.preventDefault();
+          setGroupSelection([]);
+          return;
+        }
+        openGroupRow(row);
+      };
+      row.ondblclick = event => {
+        if (event.target.closest("button")) return;
+        if (row.dataset.groupType !== "folder") return;
+        event.preventDefault();
+        openGroupRow(row);
+      };
+      row.onkeydown = event => {
+        if (row.dataset.groupType !== "folder" || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        openGroupRow(row);
+      };
+      row.oncontextmenu = event => {
+        // R504: a phone can deliver a hold as `contextmenu` (some WebViews do) or
+        // through the timer in `startGroupLongPress` (others do not).  Both have to
+        // land on the same menu, so the width check that used to drop the phone's
+        // event is gone; `preventDefault` still keeps the WebView's own menu out.
+        event.preventDefault();
+        const key = String(row.dataset.groupKey || "");
+        if (!key) return;
+        if (!state.selectedGroupKeys.has(key)) setGroupSelection([key]);
+        const mobile = window.matchMedia("(max-width: 760px)").matches;
+        if (mobile) suppressGroupClick(key);
+        // Touch-triggered contextmenu can carry 0,0, which would pin the menu to
+        // the top-left corner; fall back to the row's own box.
+        const bounds = row.getBoundingClientRect();
+        const x = event.clientX || bounds.left + bounds.width / 2;
+        const y = event.clientY || bounds.top + Math.min(bounds.height, 48);
+        openGroupContextMenu(key, x, y);
+      };
+    });
+  }
+  document.querySelectorAll("[data-group-back]").forEach(b => b.onclick = () => {
+    if (isCreatorAllTracksView()) setCurrentCreatorAllTracks(false);
+    else if (isCreatorView() && state.groupName) state.groupName = "";
+    else if (isCreatorView() && currentCreatorName()) clearCurrentCreator();
+    else state.groupName = "";
+    resetLibraryScrollPosition();
+    requestLibraryLoad(1, false).finally(() => requestAnimationFrame(resetLibraryScrollPosition));
+  });
+  document.querySelectorAll("[data-creator-root-back]").forEach(button => button.onclick = () => {
+    clearCurrentCreator();
+    state.page = 1;
+    state.pageItems = [];
+    requestLibraryLoad(1, false);
+  });
+  document.querySelectorAll("[data-open-creator-all-tracks]").forEach(button => button.onclick = () => {
+    setCurrentCreatorAllTracks(true);
+    state.groupName = "";
+    state.page = 1;
+    state.pageItems = [];
+    requestLibraryLoad(1, false);
+  });
+  document.querySelectorAll("[data-folder-crumb-root]").forEach(crumb => crumb.onclick = () => {
+    state.folderRoot = decodeURIComponent(crumb.dataset.folderCrumbRoot || "");
+    state.folderPath = decodeURIComponent(crumb.dataset.folderCrumbPath || "");
+    state.folderPage = 1;
+    state.page = 1;
+    state.pageItems = [];
+    requestLibraryLoad(1, false);
+  });
+  document.querySelectorAll("[data-page-step]").forEach(b => b.onclick = () => {
+    const step = libraryPageStep(b.dataset.pageStep);
+    const nextPage = libraryPageNumber(libraryPageNumber(state.page) + step);
+    if (isClientPagedView()) {
+      state.page = nextPage;
+      // Pagination changes the visible slice, not the playing track.  The
+      // old callback referenced a non-existent local ``trackId`` here,
+      // causing older WebViews to throw before the page could repaint.
+      scheduleMetadataRowRender("");
+    } else {
+      requestLibraryLoad(nextPage, false);
+    }
+  });
+  document.querySelectorAll("[data-page-go]").forEach(button => button.onclick = () => {
+    const nextPage = libraryPageNumber(button.dataset.pageGo, 1);
+    if (nextPage === state.page) return;
+    if (isClientPagedView()) {
+      state.page = nextPage;
+      scheduleMetadataRowRender("");
+    } else {
+      requestLibraryLoad(nextPage, false);
+    }
+  });
+  document.querySelectorAll("[data-refresh-library]").forEach(button => button.onclick = () => requestLibraryLoad(1, true));
+  document.querySelectorAll("[data-folder-page-step]").forEach(b => b.onclick = () => {
+    const step = libraryPageStep(b.dataset.folderPageStep);
+    state.folderPage = libraryPageNumber(libraryPageNumber(state.folderPage) + step);
+    requestLibraryLoad(state.page, false);
+  });
+}
+function renderPlaylistNav() {
+  const nav = $("playlistNav");
+  if (!nav) return;
+  const markup = state.playlists.map(list => `<button type="button" class="nav-item playlist-nav-item ${state.view === `playlist:${list.id}` ? "active" : ""}" data-view="playlist:${list.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg><span>${escapeHtml(list.name)}</span><b>${list.trackIds.length}</b></button>`).join("");
+  if (nav.dataset.fnaudioPlaylistNavMarkup === markup) return;
+  nav.innerHTML = markup;
+  nav.dataset.fnaudioPlaylistNavMarkup = markup;
+  nav.querySelectorAll(".nav-item").forEach(button => {
+    button.onclick = () => {
+      setView(button.dataset.view);
+      setMobileNavigation(false);
+    };
+  });
+}
+function updateNavigationActiveState() {
+  const view = String(state.view || "all");
+  if (state.renderedNavigationView === view) return;
+  document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.view === view));
+  state.renderedNavigationView = view;
+}
+function setView(view) {
+  const nextView = String(view || "all");
+  resetLibraryScrollPosition();
+  const viewChanged = nextView !== state.view;
+  // A paged-to-paged switch used to leave the previous worker's request
+  // sequence alive. If its response won the race before the new microtask
+  // started, it could paint the old category into the new view. Invalidate
+  // before starting folder speculation so the speculative pair belongs to the
+  // new navigation generation too.
+  if (viewChanged) invalidateLibraryLoad();
+  if (nextView === "folders") {
+    cancelFolderNavigationPrefetch();
+    // Start before state.view changes: the existing paged worker is scheduled
+    // on the next microtask, so it adopts these exact URL/cache entries.
+    prefetchFolderNavigationEntry();
+  }
+  if (state.searchTimer) {
+    clearTimeout(state.searchTimer);
+    state.searchTimer = null;
+  }
+  state.view = nextView;
+  state.selectedTrackRowKeys.clear();
+  state.selectedGroupKeys.clear();
+  state.folderRoot = "";
+  state.folderPath = "";
+  state.folderPage = 1;
+  state.groupName = "";
+  resetCreatorState();
+  state.page = 1;
+  state.pageItems = [];
+  state.librarySnapshotEmptyGuardUsed = false;
+  updateNavigationActiveState();
+  if (isPagedLibraryView()) {
+    requestLibraryLoad(1, false).finally(() => requestAnimationFrame(resetLibraryScrollPosition));
+  } else {
+    render();
+    requestAnimationFrame(resetLibraryScrollPosition);
+  }
+}
+function sameTrackSelection(left, right) {
+  if (left.size !== right.size) return false;
+  for (const key of left) if (!right.has(key)) return false;
+  return true;
+}
+function setTrackSelection(rowKeys = [], force = false) {
+  const requested = new Set((rowKeys || []).map(String).filter(Boolean));
+  if (!force && sameTrackSelection(state.selectedTrackRowKeys, requested)) return;
+  const rows = [...document.querySelectorAll("[data-track-row-key]")];
+  const visibleKeys = new Set(rows.map(row => String(row.dataset.trackRowKey || "")).filter(Boolean));
+  state.selectedTrackRowKeys = new Set([...requested].filter(key => visibleKeys.has(key)));
+  rows.forEach(row => row.classList.toggle("is-selected", state.selectedTrackRowKeys.has(String(row.dataset.trackRowKey || ""))));
+}
+function toggleTrackSelection(rowKey) {
+  const key = String(rowKey || "");
+  const row = [...document.querySelectorAll("[data-track-row-key]")].find(node => String(node.dataset.trackRowKey || "") === key);
+  if (!row) return;
+  if (state.selectedTrackRowKeys.has(key)) state.selectedTrackRowKeys.delete(key);
+  else state.selectedTrackRowKeys.add(key);
+  setTrackSelection([...state.selectedTrackRowKeys], true);
+}
+function selectedTrackIds(trackId = "") {
+  const selected = [...document.querySelectorAll("[data-track-row-key]")]
+    .filter(row => state.selectedTrackRowKeys.has(String(row.dataset.trackRowKey || "")))
+    .map(row => String(row.dataset.trackId || ""))
+    .filter(id => itemById(id));
+  return selected.length ? selected : (trackId && itemById(trackId) ? [String(trackId)] : []);
+}
+function setGroupSelection(keys = []) {
+  state.selectedGroupKeys = new Set((keys || []).map(String).filter(Boolean));
+  document.querySelectorAll("[data-group-row]").forEach(row => row.classList.toggle("is-selected", state.selectedGroupKeys.has(String(row.dataset.groupKey || ""))));
+}
+function toggleGroupSelection(groupKey) {
+  const key = String(groupKey || "");
+  if (!key) return;
+  if (state.selectedGroupKeys.has(key)) state.selectedGroupKeys.delete(key);
+  else state.selectedGroupKeys.add(key);
+  setGroupSelection([...state.selectedGroupKeys]);
+}
+function clearTransientListSelection() {
+  setTrackSelection([]);
+  setGroupSelection([]);
+  closeTrackContextMenu();
+}
+function groupDescriptorFromRow(row) {
+  if (!row) return null;
+  const decode = value => { try { return decodeURIComponent(value || ""); } catch (error) { return value || ""; } };
+  // Folder rows carry `data-group-label` instead of `data-group-name`, so the menu
+  // used to title every folder "文件夹" while albums showed their own name (R504).
+  // The label only feeds the title; folder queries use root/path.
+  const name = decode(row.dataset.groupName) || decode(row.dataset.groupLabel);
+  return { key: String(row.dataset.groupKey || ""), type: row.dataset.groupType || "group", view: row.dataset.groupView || state.view, name, root: decode(row.dataset.groupRoot), path: decode(row.dataset.groupPath), trackCount: Number(row.dataset.groupTrackCount || 0) };
+}
+function selectedGroupDescriptors(groupKey = "") {
+  const rows = [...document.querySelectorAll("[data-group-row]")];
+  const selected = rows.filter(row => state.selectedGroupKeys.has(String(row.dataset.groupKey || ""))).map(groupDescriptorFromRow).filter(Boolean);
+  if (selected.length) return selected;
+  return rows.filter(row => String(row.dataset.groupKey || "") === String(groupKey || "")).map(groupDescriptorFromRow).filter(Boolean);
+}
+function resetLibraryScrollPosition() {
+  const viewport = $("libraryScroll");
+  const list = $("trackList");
+  if (viewport) viewport.scrollTop = 0;
+  if (list) list.scrollTop = 0;
+}
+function openGroupRow(row) {
+  const group = groupDescriptorFromRow(row);
+  if (!group) return;
+  const opensAlbumDetail = group.type !== "folder" && (state.view === "albums" || (isCreatorView() && currentCreatorName()));
+  state.selectedGroupKeys.clear();
+  if (group.type === "folder") {
+    state.folderRoot = group.root;
+    state.folderPath = group.path;
+  } else if (isCreatorView() && !currentCreatorName()) {
+    setCurrentCreator(group.name, group.trackCount);
+  } else {
+    state.groupName = group.name;
+    if (isCreatorView()) setCurrentCreatorAllTracks(false);
+    if (opensAlbumDetail) {
+      state.sortKey = "track_no";
+      state.sortDir = "asc";
+    }
+  }
+  state.folderPage = 1;
+  state.page = 1;
+  state.pageItems = [];
+  resetLibraryScrollPosition();
+  // Paint an acknowledgement in the same frame as the press. The list nodes are
+  // only replaced once the page arrives (~116 ms of gateway round trip on the
+  // real device), and until then the row the user just activated gave nothing
+  // back, which is exactly the reported "half a beat late" feeling.
+  row?.classList?.add?.("is-opening");
+  requestLibraryLoad(1, false)
+    .finally(() => row?.classList?.remove?.("is-opening"))
+    .finally(() => requestAnimationFrame(resetLibraryScrollPosition));
+}
+async function resolveSelectedGroupTracks(groupKey = "") {
+  const groups = selectedGroupDescriptors(groupKey);
+  const creatorView = state.view;
+  const creatorName = isCreatorView() ? currentCreatorName() : "";
+  const querySnapshot = { params: currentQueryParams().toString(), pageSize: state.pageSize };
+  // A folder row stands for the whole container, so queueing or playing it
+  // covers everything beneath it even though opening it only lists the files
+  // that sit directly in it.
+  //
+  // An album row is resolved in the album detail's order, not the list's.  The
+  // album list sorts by album name (`library_sort_options_policy`), and every row
+  // of one album compares equal on that key, so the server falls through to
+  // `album, title, id` -- "play this album" would start on whichever track sorts
+  // first by title.  Opening the album sets `track_no` (``openGroupRow``), so the
+  // right-click path has to ask for the same order explicitly (R499).
+  function groupQuery(group) {
+    if (group.type === "folder") return { view: "folders", root: group.root, folder: group.path, subtree: 1 };
+    if (group.view !== "albums") return { view: group.view, group: group.name };
+    return creatorName
+      ? { view: creatorView, group: creatorName, album: group.name, sort: "track_no", dir: "asc" }
+      : { view: "albums", group: group.name, sort: "track_no", dir: "asc" };
+  }
+  const pool = fnAudioBatchRequestPool(groups, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY, group => fetchAllTracksForCurrentView(groupQuery(group), querySnapshot));
+  const resolved = [];
+  try {
+    for (let index = 0; index < groups.length; index += 1) resolved.push(await pool.get(index));
+  } finally {
+    pool.cancel("group resolution finished");
+  }
+  const seen = new Set();
+  return resolved.flat().filter(item => {
+    const id = String(item?.id || "");
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+function applyConfirmedQueue(queue, core) {
+  state.queue = Array.isArray(queue) ? queue : [];
+  const currentId = String(core?.current || "");
+  state.index = state.queue.findIndex(item => String(item.id) === currentId);
+  if (state.index < 0 && state.queue.length) state.index = 0;
+  if (core?.repeat) state.repeat = core.repeat;
+  if (typeof core?.shuffle === "boolean") state.shuffle = core.shuffle;
+  updateRepeatShuffleButtons();
+  updateFavoriteControls();
+}
+async function commitQueue(queue, currentId = "", options = {}) {
+  const response = await apiFetch("api/playback/queue", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-FnAudio-Path": "/api/playback/queue",
+    },
+    body: JSON.stringify({
+      queue: queue.map(item => String(item?.id || "")).filter(Boolean),
+      current_id: currentId,
+      repeat: options.repeat ?? state.repeat,
+      shuffle: options.shuffle ?? state.shuffle,
+    }),
+  });
+  const raw = await response.text().catch(() => "");
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch (error) {}
+  if (!response.ok || data.ok !== true) {
+    const looksLikeHtml = /<\s*html|<!doctype/i.test(raw);
+    throw new Error(data.message || data.error || (looksLikeHtml
+      ? `播放队列请求返回了错误页面（HTTP ${response.status}），请重新打开 fnAudio。`
+      : `播放队列保存失败（HTTP ${response.status}）`));
+  }
+  applyConfirmedQueue(queue, data.core);
+  if (nativePlaybackAvailable() && String(state.nativePlayback.mediaId || "") === String(currentItem()?.id || "")) {
+    // Handing the queue back to the host player has to describe the host player.
+    // ``isPlayingNow``/``currentSeconds`` answer about the audible stream, which
+    // is the caster's while a render session is active, so using them here made
+    // the native player resume from the cast's position and mirror the cast's
+    // transport state.
+    nativeLoadQueue(localIsPlayingNow(), localPlaybackSeconds(), true);
+  }
+  if (userStateRevision(data.revision, -1) >= 0) state.userStateRevision = userStateRevision(data.revision);
+  scheduleUserStateSave();
+  return data.core || {};
+}
+function selectedItems(ids = []) {
+  return (ids || []).map(itemById).filter(Boolean);
+}
+async function addTracksToQueue(tracks = []) {
+  // Takes rows, for the same reason `playTracks` does: a group action already
+  // holds the songs, and going back through `selectedItems(ids)` -> `itemById`
+  // would silently drop everything past the 12,000-entry item cache (R501).
+  const items = (tracks || []).filter(item => item && item.id);
+  if (!items.length) return;
+  const existing = new Set(state.queue.map(item => String(item.id)));
+  const queue = [...state.queue, ...items.filter(item => !existing.has(String(item.id)))];
+  try {
+    await commitQueue(queue, state.queue[state.index]?.id || "");
+    render();
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+  }
+}
+async function addSelectedToQueue(ids = []) {
+  return addTracksToQueue(selectedItems(ids));
+}
+async function playTracks(tracks = []) {
+  const items = (tracks || []).filter(item => item && item.id);
+  if (!items.length) return;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  try {
+    await commitQueue(items, items[0].id);
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+    return;
+  }
+  loadCurrent();
+  render();
+}
+async function playSelectedTracks(ids = []) {
+  // Selection is a list of ids and the id -> item lookups are bounded by the
+  // 12,000-entry item cache, which is exactly why a group right-click hands the
+  // rows over directly (`playTracks`) instead: a 13,000-track folder would lose
+  // its last thousand songs to the cache trim and still "succeed".
+  return playTracks(selectedItems(ids));
+}
+function clientContextTracks() {
+  const ids = state.view === "favorites"
+    ? state.favorites
+    : isPlaylistView()
+      ? (currentPlaylist()?.trackIds || [])
+      : [];
+  const source = state.view === "queue" ? state.queue : ids.map(itemById).filter(Boolean);
+  const search = currentQueryText().toLowerCase();
+  return sortTracks(search ? source.filter(item => trackMatchesSearch(item, search)) : source);
+}
+function fetchLibraryItemsByIds(batch = [], signal = undefined) {
+  return globalThis.fnAudioLibraryItemRequestLoader.loadBatch({
+    batch,
+    inflight: state.itemHydrationInflight,
+    limit: state.itemHydrationInflightLimit,
+    signal,
+    fetchJson: async (ids, requestSignal) => {
+      const result = await fetchJsonResponseBounded(
+        `api/library/items?ids=${encodeURIComponent(ids.join(","))}`,
+        requestSignal ? { signal: requestSignal } : {},
+        10000,
+      );
+      const response = result.response;
+      const data = result.data || {};
+      if (!response.ok) throw new Error(data.error || "读取歌曲失败");
+      return Array.isArray(data.items) ? data.items : [];
+    },
+  });
+}
+async function resolveTracksByIds(ids = []) {
+  const orderedIds = fnAudioItemHydrationPolicy.normalizeItemIds(ids);
+  const missing = orderedIds.filter(id => !state.itemCache.has(id));
+  if (!missing.length) return orderedIds.map(itemById).filter(Boolean);
+  const batches = fnAudioItemHydrationPolicy.batchesForItemIds(missing);
+  const pool = fnAudioBatchRequestPool(batches, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY,
+    batch => fetchLibraryItemsByIds(batch));
+  try {
+    for (let index = 0; index < batches.length; index += 1) {
+      // A large favorite/playlist can require many 100-item batches. Keep the
+      // LRU protection pass until every batch is present.
+      cacheLibraryItems(await pool.get(index), false);
+    }
+  } finally {
+    // A failed consumer must not leave the remaining ID batches issuing I/O.
+    pool.cancel("item resolution finished");
+  }
+  state.itemCache.trim(new Set((state.queue || []).map(item => String(item?.id || "")).filter(Boolean)));
+  return orderedIds.map(itemById).filter(Boolean);
+}
+async function allTracksForCurrentContext() {
+  if (isClientPagedView()) {
+    if (state.view === "queue") return clientContextTracks();
+    const ids = state.view === "favorites"
+      ? state.favorites
+      : (currentPlaylist()?.trackIds || []);
+    const source = await resolveTracksByIds(ids);
+    const search = currentQueryText().toLowerCase();
+    return sortTracks(search ? source.filter(item => trackMatchesSearch(item, search)) : source);
+  }
+  if (state.view === "random100") {
+    const search = currentQueryText().toLowerCase();
+    const source = search ? state.pageItems.filter(item => trackMatchesSearch(item, search)) : state.pageItems;
+    return sortTracks(source);
+  }
+  if (isPagedTrackListing()) return fetchAllTracksForCurrentView();
+  return sortTracks(filteredTracks());
+}
+async function playFromCurrentTrack(trackId) {
+  const id = String(trackId || "");
+  let tracks = [];
+  try {
+    tracks = await allTracksForCurrentContext();
+  } catch (error) {
+    alert("读取当前列表失败");
+    return;
+  }
+  const start = tracks.findIndex(item => String(item?.id || "") === id);
+  if (start < 0) return alert("当前歌曲已不在这个列表中");
+  const queue = tracks;
+  if (!queue.length) return;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  try {
+    await commitQueue(queue, id);
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+    return;
+  }
+  loadCurrent();
+  render();
+}
+async function insertSelectedTracks(ids = []) {
+  const items = selectedItems(ids);
+  if (!items.length) return;
+  const existing = new Set(state.queue.map(item => String(item.id)));
+  const additions = items.filter(item => !existing.has(String(item.id)));
+  if (!additions.length) return;
+  const insertAt = state.index >= 0 ? state.index + 1 : state.queue.length;
+  const queue = [...state.queue];
+  queue.splice(insertAt, 0, ...additions);
+  try {
+    await commitQueue(queue, state.queue[state.index]?.id || queue[0]?.id || "");
+    render();
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+  }
+}
+async function removeTrackFromQueue(trackId) {
+  const id = String(trackId);
+  const removeIndex = state.queue.findIndex(x => x.id === id);
+  if (removeIndex < 0) return;
+  const removingCurrent = removeIndex === state.index;
+  const queue = state.queue.filter(x => String(x.id) !== id);
+  let nextCurrent = state.queue[state.index]?.id || "";
+  if (removingCurrent) nextCurrent = queue[Math.min(removeIndex, queue.length - 1)]?.id || "";
+  try {
+    await commitQueue(queue, nextCurrent);
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+    return;
+  }
+  if (!queue.length && removingCurrent) stopPlayback();
+  else if (removingCurrent) loadCurrent();
+  render();
+}
+async function clearQueue() {
+  if (!state.queue.length || !confirm("确定清空当前播放队列吗？")) return;
+  try {
+    await commitQueue([], "");
+    await stopPlayback();
+    render();
+  } catch (error) {
+    alert(error.message || "清空播放队列失败");
+  }
+}
+async function playById(id) {
+  const item = itemById(id);
+  if (!item) return;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  const queue = state.queue.some(x => String(x.id) === String(id)) ? [...state.queue] : [...state.queue, item];
+  const previousIndex = state.index;
+  try {
+    await commitQueue(queue, id);
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+    return;
+  }
+  loadCurrent();
+  // ``playById`` is the one queue writer that never rebuilds the list, so it has
+  // to move the current-row marker itself.  The other writers render afterwards,
+  // which is why this stays on this path instead of in ``applyConfirmedQueue``:
+  // a cross-page jump would then render twice.
+  syncCurrentQueuePresentation(previousIndex);
+}
+async function playGroup(name) {
+  const key = groupViews[state.view];
+  let group = isPagedTrackListing() ? state.pageItems : state.items.filter(item => (item[key] || "未分类") === name);
+  if (!group.length && groupViews[state.view]) {
+    group = await fetchAllTracksForCurrentView({ view: state.view, group: name });
+  }
+  if (!group.length) return;
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  const queue = state.shuffle ? shuffleItems(group) : group;
+  try {
+    await commitQueue(queue, queue[0]?.id || "");
+  } catch (error) {
+    alert(error.message || "播放队列保存失败");
+    return;
+  }
+  loadCurrent();
+  render();
+}
+function playableTracks() {
+  if (isPagedTrackListing()) return state.pageItems;
+  if (state.view === "folders") return folderTracks();
+  if (groupViews[state.view]) return state.groupName ? filteredTracks() : [];
+  if (isPlaylistView()) return playlistTracks();
+  return filteredTracks();
+}
+function nextIndex() {
+  if (!state.queue.length) return -1;
+  if (state.shuffle && state.queue.length > 1) {
+    let next = state.index;
+    while (next === state.index) next = Math.floor(Math.random() * state.queue.length);
+    return next;
+  }
+  if (state.index < state.queue.length - 1) return state.index + 1;
+  return state.repeat === "all" ? 0 : -1;
+}
+async function warmCurrentTrackCache(item) {
+  if (!item || !shouldTranscodeToMp3(item) || state.transcodeCacheReady || isRemoteTarget()) return false;
+  try {
+    const response = await apiFetch("api/transcode/warm", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ track_id: item.id, mode: "mp3" }),
+    });
+    const data = await readResponseJsonBounded(response);
+    return response.ok && data.ready === true;
+  } catch (error) {
+    return false;
+  }
+}
+async function loadCurrent() {
+  const item = currentItem();
+  if (!item) return;
+  const loadToken = ++state.playbackLoadToken;
+  syncState();
+  if (isRemoteTarget()) {
+    stopLocalAudio();
+    // A device load takes the output from the caster just as a local play does,
+    // and the server ends that renderer session when it applies this load. Drop
+    // the row here rather than after the reply: `updateRemoteUi` paints the cast
+    // first while the claim is still set, so the rail showed the caster's 30s
+    // (and the caster's title) for the whole round trip. The preempted uri keeps
+    // the next poll from handing the row back in that window.
+    if (isIncomingRendererSession()) {
+      state.rendererPreemptedUri = String(state.rendererSession?.uri || "");
+      state.rendererSession = null;
+      state.rendererSnapshotAt = 0;
+    }
+    // Position belongs to the track, and this track starts at 0: the readout must
+    // not keep the outgoing track's place while the load is still on the wire.
+    // That round trip is 0.26s - 0.92s here, which is exactly the gap between a
+    // click and the row moving on a DAC.
+    state.remoteBaseSeconds = 0;
+    state.remoteSnapshotAt = Date.now();
+    // The length belongs to the track as much as the position does. Until this
+    // load is confirmed the device still declares the *outgoing* track's length
+    // (30s while a cast owned the row, the previous song when switching tracks
+    // on a DAC), and `seekDuration` prefers a declared value over the library
+    // row -- so the rail kept showing the old length for as long as the reply
+    // took, measured at 0.5s-2.4s. Clearing the declaration makes the clicked
+    // track's own length stand in until the output reports its own.
+    if (state.remoteStatus?.position) {
+      state.remoteStatus = {
+        ...state.remoteStatus,
+        position: { ...state.remoteStatus.position, rel_seconds: 0, duration_seconds: 0 },
+      };
+    }
+    setTextContentIfChanged($("nowTitle"), displayTrackTitle(item));
+    setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)} · ${state.playTargetName}`);
+    const localCover = coverUrl(item, 512);
+    setNowPlayingCover(localCover);
+    prefetchCurrentTrackMetadata(item);
+    syncLyricsForCurrentTrack(item);
+    updateMediaSessionMetadata(item);
+    updateMediaSessionPlaybackState();
+    updateFavoriteControls();
+    pushToDevice(state.playTarget, item).then(loaded => {
+      if (loaded && loadToken === state.playbackLoadToken
+        && String(currentItem()?.id || "") === String(item.id || "")) {
+        setTimeout(refreshRemoteStatus, 300);
+      }
+    }).catch(() => {});
+    nativeRemoteEnter(true);
+    // Repaint on the click, not on the reply: the length comes from the library
+    // row until the device declares its own, and `currentSeconds` now counts from
+    // the zero above. The load reply and the status poll then replace both with
+    // what the output actually reports.
+    updateRemoteUi();
+    syncPlayerProgress();
+    updateNowMarquee();
+    return;
+  }
+  // TODO.md:72 ruling D-2: reaching this point means the user asked *this* browser to
+  // play, which now takes the output back from an incoming cast instead of decoding
+  // both at once. The branch above is the opposite intent - the user pushed this
+  // track to another device deliberately - so it preempt nothing. The call has no
+  // suspension point, so the load token taken at the top still matches afterwards.
+  preemptIncomingRendererForLocalPlayback();
+  const needsMp3 = shouldTranscodeToMp3(item);
+  if (needsMp3 && !state.transcodeCacheReady) {
+    state.transcodeCacheReady = await warmCurrentTrackCache(item);
+    if (loadToken !== state.playbackLoadToken || String(currentItem()?.id || "") !== String(item.id || "")) return;
+  }
+  if (nativePlaybackAvailable()) {
+    state.playSourceKind = "native";
+    const shouldResume = String(state.nativePlayback.mediaId || "") === String(item.id || "")
+      && state.nativePlayback.playing === true;
+    nativeLoadQueue(true, shouldResume ? playbackSeconds(state.nativePlayback.position) : 0);
+    setTextContentIfChanged($("nowTitle"), displayTrackTitle(item));
+    setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)}`);
+    const nativeCover = coverUrl(item, 512);
+    setNowPlayingCover(nativeCover);
+    prefetchCurrentTrackMetadata(item);
+    syncLyricsForCurrentTrack(item);
+    updateMediaSessionMetadata(item);
+    setPlayButton(true);
+    updateMediaSessionPlaybackState();
+    updateFavoriteControls();
+    syncPlayerProgress();
+    updateNowMarquee();
+    syncState();
+    return;
+  }
+  const useCache = needsMp3 && state.transcodeCacheReady;
+  state.playSourceKind = needsMp3 && !useCache ? "stream" : "cache";
+  const params = new URLSearchParams();
+  if (needsMp3) {
+    params.set("transcode", "mp3");
+    if (useCache) params.set("cache", "1");
+    else {
+      const start = (item.cue_track === true ? playbackSeconds(item.cue_start) : 0) + Math.max(0, playbackSeconds(state.streamOffset));
+      if (start > 0) params.set("start", String(start));
+    }
+  } else if (shouldTranscodeDsdToWav(item)) {
+    params.set("transcode", "dsd_wav");
+  } else if (item.cue_track === true) {
+    params.set("transcode", "cue_flac");
+  } else if (isApeTrack(item)) {
+    params.set("transcode", "ape_flac");
+  } else {
+    params.set("transcode", "original");
+  }
+  audio.src = `${item.url}?${params.toString()}`;
+  if (item.cue_track === true && !needsMp3) {
+    state.playSourceKind = "cue_segment";
+    state.pendingSeekTime = null;
+  } else if (playbackSeconds(item.cue_start) > 0) state.pendingSeekTime = playbackSeconds(item.cue_start);
+  setTextContentIfChanged($("elapsed"), "0:00");
+  setTextContentIfChanged($("duration"), clock(seekDuration()));
+  $("seek").value = 0;
+  audio.play().catch(() => {});
+  setTextContentIfChanged($("nowTitle"), displayTrackTitle(item));
+  setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)}`);
+  setNowPlayingCover(coverUrl(item, 512));
+  prefetchCurrentTrackMetadata(item);
+  syncLyricsForCurrentTrack(item);
+  updateMediaSessionMetadata(item);
+  setPlayButton(true);
+  updateMediaSessionPlaybackState();
+  updateFavoriteControls();
+  syncPlayerProgress();
+  updateNowMarquee();
+  syncState();
+  refreshCurrentTranscodeStatus();
+}
+// Extrapolation only has to bridge the gap between two *accepted* status
+// snapshots. The slowest healthy source is the remote fallback poll (5000 ms,
+// and only while the event stream is down), so twice that interval is the point
+// where the UI has stopped tracking the device and started inventing time.
+// Clamping (rather than dropping back to the last reported position) keeps the
+// display smooth through real poll latency while bounding both failure shapes:
+// a known duration no longer sticks at 100% forever once status stops
+// arriving, and an unknown one (live radio, renderers that never report a
+// length) can no longer count up without limit.
+const TRANSPORT_EXTRAPOLATION_LIMIT_SECONDS = 10;
+
+function transportExtrapolation(snapshotAt, playing) {
+  if (!playing || !Number.isFinite(snapshotAt) || snapshotAt <= 0) return 0;
+  const elapsed = (Date.now() - snapshotAt) / 1000;
+  // A backward clock step (NTP, timezone-carrying hosts) must not subtract from
+  // the reported position: the remote branch returns this raw, so a negative
+  // value here would render a negative elapsed time.
+  if (!(elapsed > 0)) return 0;
+  return Math.min(elapsed, TRANSPORT_EXTRAPOLATION_LIMIT_SECONDS);
+}
+// The clamp above is what stops a dead status channel from counting up forever, but a
+// frozen counter is indistinguishable from a paused track: the row simply lies now
+// (TODO.md:74).  This reads the same budget back as "the channel has run out", so the two
+// can never disagree about where the boundary is.  It takes the snapshot time and the
+// transport state as arguments instead of reaching into `state`, which keeps it honest
+// about *which* channel it was asked about and leaves the one-gate shape asserted in
+// test_ui_transport_staleness.js intact.
+function transportStateIsUnknown(snapshotAt, playing) {
+  return playing === true && transportExtrapolation(snapshotAt, true) >= TRANSPORT_EXTRAPOLATION_LIMIT_SECONDS;
+}
+function currentSeconds() {
+  if (isIncomingRendererSession()) {
+    const transport = String(state.rendererSession.transport || "").toUpperCase();
+    const base = playbackSeconds(state.rendererSession.position);
+    const elapsed = transportExtrapolation(state.rendererSnapshotAt, transport === "PLAYING");
+    const duration = playbackSeconds(state.rendererSession.duration);
+    const seconds = Math.max(0, base + elapsed);
+    return duration > 0 ? Math.min(duration, seconds) : seconds;
+  }
+  if (isRemoteTarget()) {
+    const item = currentItem();
+    const duration = seekDuration();
+    const transport = (state.remoteStatus?.transport?.state || "").toUpperCase();
+    const elapsed = transportExtrapolation(state.remoteSnapshotAt, transport === "PLAYING");
+    const raw = playbackSeconds(state.remoteBaseSeconds, playbackSeconds(state.remoteStatus?.position?.rel_seconds)) + elapsed;
+    const cueStart = playbackSeconds(item?.cue_start);
+    const seconds = item?.cue_track === true && !state.remoteCueSegment ? Math.max(0, raw - cueStart) : raw;
+    return duration > 0 ? Math.min(duration, seconds) : seconds;
+  }
+  return localPlaybackSeconds();
+}
+function localPlaybackSeconds() {
+  // The tail of ``currentSeconds`` pulled out verbatim: the position of what
+  // this browser (or the Android host player) is actually running, independent
+  // of any cast in progress.  Callers that make a *decision* about local
+  // playback must use this instead of ``currentSeconds``, which answers about
+  // the renderer while a render session is active.
+  if (nativePlaybackAvailable()) return playbackSeconds(state.nativePlayback.position);
+  const item = currentItem();
+  const audioSeconds = playbackSeconds(audio.currentTime);
+  const raw = state.playSourceKind === "stream"
+    ? playbackSeconds(state.streamOffset) + audioSeconds
+    : audioSeconds;
+  if (item?.cue_track === true) {
+    if (state.playSourceKind === "stream") return Math.max(0, raw);
+    if (state.playSourceKind === "cue_segment") return Math.max(0, raw);
+    return Math.max(0, raw - playbackSeconds(item.cue_start));
+  }
+  return raw;
+}
+function seekDuration() {
+  if (isIncomingRendererSession()) return playbackSeconds(state.rendererSession.duration);
+  const item = currentItem();
+  if (nativePlaybackAvailable()) return playbackSeconds(state.nativePlayback.duration, playbackSeconds(item?.duration));
+  if (item?.cue_track === true && item.duration) return playbackSeconds(item.duration);
+  if (item?.cue_track === true && isRemoteTarget()) {
+    const remoteDuration = playbackSeconds(state.remoteStatus?.position?.duration_seconds);
+    // A declared segment already arrives folded, so its duration is the track
+    // length; subtracting cue_start again would shorten the rail.
+    if (state.remoteCueSegment) return remoteDuration;
+    const cueStart = playbackSeconds(item.cue_start);
+    return remoteDuration > cueStart ? remoteDuration - cueStart : 0;
+  }
+  if (isRemoteTarget()) {
+    // A device that has not declared a length yet is not a zero-length track.
+    // The library row already states the duration, and using it keeps the rail
+    // correct from the click instead of from the first status snapshot; a
+    // declared value always wins once the output reports one.
+    const declared = playbackSeconds(state.remoteStatus?.position?.duration_seconds);
+    return declared > 0 ? declared : playbackSeconds(item?.duration);
+  }
+  if (item?.duration) return playbackSeconds(item.duration);
+  return Number.isFinite(audio.duration) ? audio.duration : 0;
+}
+function localPlaybackDuration() {
+  // ``seekDuration`` without the two state-dependent branches: an incoming
+  // render session answers with the *caster's* length, and a remote target has
+  // its own cue arithmetic.  Both keep that in ``seekDuration`` for painting;
+  // this is only for code that acts on local playback, whose callers have
+  // already excluded a remote target.  ``audio.ontimeupdate`` is such a caller,
+  // so the pair it compares is always the local element's own seconds against
+  // the local track's own length.
+
+  // That precondition used to live only in this comment and in the test suite. It is the pair a
+  // cue-tail decision is made from, and a remote target has its own cue arithmetic, so answering
+  // from the local element there would advance *this* browser's queue on the device's progress.
+  // Fail loudly instead: one boolean per local tick is not a cost, and a wrong queue advance is
+  // (TODO.md:49). An *incoming* render session is still not part of this check, but it no
+  // longer excuses overlapping playback either: TODO.md:72 ruling D-1 ended the state where a
+  // cast and the local element ran together, and the handler now refuses to read a cue tail at
+  // all while a caster owns the row. This helper stays the plain local half of the pair, which
+  // is what its remaining callers ask for (test_ui_playback_authority.js case 3 pins both).
+  if (isRemoteTarget()) {
+    throw new TypeError("localPlaybackDuration requires a caller that excluded remote playback");
+  }
+  const item = currentItem();
+  if (nativePlaybackAvailable()) return playbackSeconds(state.nativePlayback.duration, playbackSeconds(item?.duration));
+  if (item?.cue_track === true && item.duration) return playbackSeconds(item.duration);
+  if (item?.duration) return playbackSeconds(item.duration);
+  return Number.isFinite(audio.duration) ? audio.duration : 0;
+}
+async function refreshCurrentTranscodeStatus() {
+  const item = currentItem();
+  if (!item || isRemoteTarget() || nativePlaybackAvailable()) {
+    state.transcodeStatusRequestToken += 1;
+    try { state.transcodeStatusController?.abort(); } catch (_) {}
+    state.transcodeStatusController = null;
+    state.transcodeCacheReady = false;
+    return;
+  }
+  const trackId = String(item.id || "");
+  if (!shouldTranscodeToMp3(item)) {
+    state.transcodeStatusRequestToken += 1;
+    try { state.transcodeStatusController?.abort(); } catch (_) {}
+    state.transcodeStatusController = null;
+    state.transcodeCacheReady = false;
+    return;
+  }
+  const token = ++state.transcodeStatusRequestToken;
+  try { state.transcodeStatusController?.abort(); } catch (_) {}
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.transcodeStatusController = controller;
+  try {
+    const request = fetch(`api/transcode/status?track_id=${encodeURIComponent(item.id)}&mode=mp3`, {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: null,
+    });
+    const data = result.data;
+    if (!data || data.error) return;
+    if (token !== state.transcodeStatusRequestToken
+      || state.transcodeStatusController !== controller
+      || String(currentItem()?.id || "") !== trackId) return;
+    const ready = data.ready === true;
+    if (ready && !state.transcodeCacheReady) {
+      const wasPlaying = !audio.paused;
+      const position = currentSeconds();
+      state.transcodeCacheReady = true;
+      state.streamOffset = 0;
+      state.playSourceKind = "cache";
+      state.pendingSeekTime = item.cue_track === true ? playbackSeconds(item.cue_start) + position : position;
+      loadCurrent();
+      if (wasPlaying) audio.play().catch(() => {});
+      return;
+    }
+    state.transcodeCacheReady = ready;
+  } catch (error) {
+    if (error?.name !== "AbortError") return;
+  } finally {
+    if (token === state.transcodeStatusRequestToken
+      && state.transcodeStatusController === controller) {
+      state.transcodeStatusController = null;
+    }
+  }
+}
+function previewSeek(value) {
+  const duration = seekDuration();
+  if (!duration) return;
+  const percent = seekPercent(value);
+  setTextContentIfChanged($("elapsed"), clock(percent / 100 * duration));
+  updateSeekRail(percent);
+}
+function commitSeek(value = $("seek").value) {
+  const duration = seekDuration();
+  state.seeking = false;
+  if (!duration) return;
+  const seconds = seekPercent(value) / 100 * duration;
+  setTextContentIfChanged($("elapsed"), clock(seconds));
+  if (isIncomingRendererSession()) {
+    controlIncomingRenderer("seek", seconds);
+    return;
+  }
+  if (isRemoteTarget()) {
+    const target = currentItem()?.cue_track === true && !state.remoteCueSegment ? playbackSeconds(currentItem().cue_start) + seconds : seconds;
+    remoteControl("seek", target);
+    return;
+  }
+  if (nativePlaybackAvailable()) {
+    nativePlaybackCall("seekTo", seconds);
+    return;
+  }
+  const item = currentItem();
+  const needsStreamRestart = shouldTranscodeToMp3(item) && !state.transcodeCacheReady;
+  if (needsStreamRestart) {
+    state.streamOffset = Math.max(0, seconds);
+    state.playSourceKind = "stream";
+    state.pendingSeekTime = null;
+    loadCurrent();
+    return;
+  }
+  state.streamOffset = 0;
+  state.playSourceKind = currentItem()?.cue_track === true ? "cue_segment" : "cache";
+  audio.currentTime = seconds;
+  updateMediaSessionPosition();
+}
+function updateLyricsMeta(item = currentItem()) {
+  const title = item ? displayTrackTitle(item) : "未选择曲目";
+  const detailArtist = item ? (displayText(item.artist) || "未知歌手") : "未知歌手";
+  const album = item ? (displayText(item.album) || "未知专辑") : "未知专辑";
+  $("lyricsTitle").textContent = title;
+  $("lyricsTitle").title = title;
+  $("lyricsMetaArtist").textContent = detailArtist;
+  $("lyricsMetaArtist").title = detailArtist;
+  $("lyricsMetaAlbum").textContent = album;
+  $("lyricsMetaAlbum").title = album;
+  // A single's album is usually the title itself, so the block under the
+  // artwork printed "Heat Waves" twice.  The line only earns its place when it
+  // says something the title did not (R489).
+  $("lyricsMetaAlbum").hidden = album === title;
+  if (!item) {
+    $("lyricsBg").style.backgroundImage = "";
+    setCoverArtwork($("lyricsCover"), "");
+    updateFavoriteControls();
+    return;
+  }
+  const localCover = coverUrl(item, 512);
+  $("lyricsBg").style.backgroundImage = localCover ? `url("${localCover}")` : "";
+  setCoverArtwork($("lyricsCover"), localCover);
+  updateFavoriteControls();
+}
+function renderLyrics(lines) {
+  state.lyrics = lines;
+  // Every line node below is replaced, so whatever the highlight projection
+  // remembers about the previous set describes nodes that no longer exist.
+  state.lyricsActiveLine = null;
+  const box = $("lyricsLines");
+  // A single placeholder in a 720px-wide column looks stranded in the top-left
+  // corner; the empty state is centred instead of left-aligned like real lyrics.
+  box.classList.toggle("is-empty", !lines.length);
+  box.innerHTML = lines.length
+    ? lines.map((line, index) => `<p data-lyric="${index}">${escapeHtml(line.text)}</p>`).join("")
+    : `<p class="muted-line">没有找到歌词。可以把同名 .lrc 文件放到歌曲目录。</p>`;
+  updateLyricHighlight();
+}
+function showLyricsMessage(message) {
+  state.lyrics = [];
+  // Same rule as renderLyrics(): the message node replaces every lyric line, so
+  // there is no active line left to remember.
+  state.lyricsActiveLine = null;
+  const lines = $("lyricsLines");
+  lines.scrollTop = 0;
+  lines.classList.add("is-empty");
+  lines.innerHTML = `<p class="muted-line">${escapeHtml(message)}</p>`;
+}
+function cancelLyricsPoll() {
+  if (!state.lyricsPollTimer) return;
+  clearTimeout(state.lyricsPollTimer);
+  state.lyricsPollTimer = 0;
+}
+function scheduleLyricsPoll(trackId) {
+  cancelLyricsPoll();
+  if (state.lyricsPollAttempts >= 15) return;
+  state.lyricsPollAttempts += 1;
+  state.lyricsPollTimer = setTimeout(() => {
+    state.lyricsPollTimer = 0;
+    if (String(currentItem()?.id || "") !== String(trackId || "")) return;
+    loadLyricsForCurrentTrack(currentItem(), true);
+  }, 900);
+}
+async function loadLyricsForCurrentTrack(item = currentItem(), force = false, retryFailed = false) {
+  updateLyricsMeta(item);
+  if (!item) {
+    cancelLyricsPoll();
+    cancelLyricsRequest();
+    state.lyricsPollAttempts = 0;
+    state.lyricsRequestToken += 1;
+    state.lyricsTrackId = "";
+    state.lyricsLoadingTrackId = "";
+    state.lyricsStatus = "idle";
+    showLyricsMessage("请选择一首歌曲");
+    return;
+  }
+  const trackId = String(item.id);
+  if (!force && state.lyricsTrackId === trackId && ["loading", "loaded", "pending"].includes(state.lyricsStatus)) return;
+  if (state.lyricsTrackId !== trackId) {
+    cancelLyricsPoll();
+    cancelLyricsRequest();
+    state.lyricsPollAttempts = 0;
+  }
+  // A forced poll/reopen owns a fresh request. Abort the previous request
+  // first so a slow WebView response cannot keep a stale connection alive or
+  // race the new lyrics projection.
+  if (force) cancelLyricsRequest();
+  const requestToken = ++state.lyricsRequestToken;
+  state.lyricsTrackId = trackId;
+  state.lyricsLoadingTrackId = trackId;
+  state.lyricsStatus = "loading";
+  showLyricsMessage("正在匹配歌词...");
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.lyricsRequestController = controller;
+  try {
+    const retry = retryFailed ? "&retry=1" : "";
+    const result = await fetchMetadataRequest(
+      `api/lyrics?track_id=${encodeURIComponent(trackId)}${retry}`,
+      10000,
+      controller?.signal,
+    );
+    const response = result.response;
+    // Lyrics and track metadata share the same host/CGI bridge. Some
+    // deployments wrap successful JSON in bounded transport envelopes;
+    // normalize here so valid lyrics are not mistaken for an empty result.
+    const data = unwrapMetadataResponsePayload(result.data);
+    // A missing metadata worker is a service state, not an empty lyric
+    // result.  Do not keep polling forever (which made the page look as if
+    // metadata had silently stopped working); surface the bounded backend
+    // reason and let an explicit reopen retry after the worker is restored.
+    if (!response.ok) {
+      const unavailable = response.status === 503 || data.status === "unavailable";
+      const reason = String(data.error || (unavailable ? "后台元数据服务没有启动" : "歌词加载失败"))
+        .replace(/[\r\n]+/g, " ").trim().slice(0, 180);
+      const error = new Error(reason || "歌词加载失败");
+      error.metadataUnavailable = unavailable;
+      throw error;
+    }
+    if (requestToken !== state.lyricsRequestToken || String(currentItem()?.id || "") !== trackId) return;
+    // A priority lyrics lookup may still be pending while its artwork was
+    // already resolved by the track/album lane. Apply that cover before the
+    // pending branch; otherwise the UI hides a usable cached image until
+    // lyrics complete (or forever when the provider has no lyric).
+    const lyricArtwork = usableCoverSource(data.image_url);
+    if (lyricArtwork && !item.cover_url && !item.cover_thumbnail_url) {
+      item.cover_url = lyricArtwork;
+      item.cover_thumbnail_url = lyricArtwork;
+      invalidateTrackRowsMarkup(state.pageItems);
+      restoreLibraryNowPlaying();
+      updateLyricsMeta(item);
+      if (data.pending !== true) render();
+    }
+    if (data.pending === true) {
+      state.lyricsStatus = "pending";
+      showLyricsMessage("正在获取歌词...");
+      scheduleLyricsPoll(trackId);
+      return;
+    }
+    if (["failed", "no_match"].includes(data.status) && !data.lyrics) {
+      state.lyricsStatus = "error";
+      cancelLyricsPoll();
+      showLyricsMessage(data.status === "no_match" ? "暂未找到歌词，重新打开歌词页可再次查询。" : (data.error ? `歌词获取失败：${data.error}` : "歌词获取失败，请稍后重试。"));
+      return;
+    }
+    state.lyricsStatus = "loaded";
+    cancelLyricsPoll();
+    state.lyricsPollAttempts = 0;
+    renderLyrics(parseLyrics(data.lyrics || ""));
+  } catch (error) {
+    if (requestToken !== state.lyricsRequestToken || String(currentItem()?.id || "") !== trackId) return;
+    if (error?.name === "AbortError") return;
+    state.lyricsStatus = "error";
+    // The backend differentiates an unavailable metadata worker, provider
+    // failures and an ordinary empty match. Do not collapse that evidence into
+    // the same generic text: it makes a recoverable service/startup failure
+    // indistinguishable from a song that simply has no online lyric. Keep the
+    // displayed detail bounded because it may originate from a remote response.
+    const detail = String(error?.message || "").replace(/[\r\n]+/g, " ").trim().slice(0, 180);
+    showLyricsMessage(detail ? `歌词加载失败：${detail}` : "歌词加载失败，请稍后重试。");
+    if (!error?.metadataUnavailable) scheduleLyricsPoll(trackId);
+  } finally {
+    if (requestToken === state.lyricsRequestToken) {
+      state.lyricsLoadingTrackId = "";
+      if (state.lyricsRequestController === controller) state.lyricsRequestController = null;
+    }
+  }
+}
+function syncLyricsForCurrentTrack(item = currentItem()) {
+  updateLyricsMeta(item);
+  const trackId = String(item?.id || "");
+  if (trackId !== state.lyricsTrackId) loadLyricsForCurrentTrack(item);
+}
+function cancelLyricsRequest() {
+  try { state.lyricsRequestController?.abort(); } catch (_) {}
+  state.lyricsRequestController = null;
+}
+function fetchMetadataRequest(url, timeoutMs = 10000, externalSignal = undefined) {
+  const run = ({ signal, abort }) => {
+    // The shared loader owns the transport so one caller cancelling cannot
+    // cancel another caller waiting on the same URL. A hard timeout still
+    // aborts the shared request and all of its subscribers together.
+    const request = fetch(url, {
+      cache: "no-store",
+      ...(signal ? { signal } : {}),
+    });
+    return globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: Math.max(1000, Math.min(30000, Number(timeoutMs) || 10000)),
+      onTimeout: abort,
+      fallback: null,
+    });
+  };
+  if (state.metadataRequestLoader?.load) return state.metadataRequestLoader.load(url, run, externalSignal);
+  return run({ signal: externalSignal, abort: () => {} });
+}
+function unwrapMetadataResponsePayload(value) {
+  // Keep this in step with the policy's bounded bridge support.  Some
+  // host/CGI paths add a transport layer at each boundary, so a valid
+  // metadata result can legitimately arrive under four whitelisted
+  // envelopes.  Going beyond this remains deliberately forbidden by the
+  // policy to avoid traversing arbitrary host objects.
+  return globalThis.fnAudioMetadataResponsePolicy?.unwrap(value, 4)
+    || (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+}
+function isRecoverableFilenameMetadata(payload, candidate) {
+  return globalThis.fnAudioMetadataResponsePolicy?.isRecoverableFilenameFallback(payload, candidate) === true;
+}
+function cancelCurrentTrackMetadataPrefetch() {
+  if (state.metadataPrefetchTimer) clearTimeout(state.metadataPrefetchTimer);
+  if (state.metadataPrefetchLyricsTimer) clearTimeout(state.metadataPrefetchLyricsTimer);
+  state.metadataPrefetchTimer = 0;
+  state.metadataPrefetchLyricsTimer = 0;
+  try { state.metadataPrefetchController?.abort(); } catch (_) {}
+  try { state.metadataPrefetchLyricsController?.abort(); } catch (_) {}
+  state.metadataPrefetchController = null;
+  state.metadataPrefetchLyricsController = null;
+  state.metadataPrefetchToken += 1;
+  state.metadataPrefetchLyricsToken += 1;
+  state.metadataPrefetchTrackId = "";
+  state.metadataPrefetchLyricsTrackId = "";
+}
+function rememberVisibleMetadataPrefetchKey(key, limit = 256) {
+  const value = typeof key === "string" ? key : "";
+  if (!value || !state.visibleMetadataPrefetchKeys) return false;
+  const bounded = Math.max(1, Math.min(1024, Number(limit) || 256));
+  if (state.visibleMetadataPrefetchKeys.has(value)) return false;
+  while (state.visibleMetadataPrefetchKeys.size >= bounded) {
+    const oldest = state.visibleMetadataPrefetchKeys.values().next().value;
+    if (oldest === undefined) break;
+    state.visibleMetadataPrefetchKeys.delete(oldest);
+  }
+  state.visibleMetadataPrefetchKeys.add(value);
+  return true;
+}
+function prefetchCurrentTrackMetadata(item = currentItem()) {
+  const trackId = String(item?.id || "");
+  if (!trackId) return;
+  if (state.metadataPrefetchTrackId === trackId) {
+    // A terminal provider result is not necessarily permanent. Allow a
+    // bounded, cooldown-based re-arm for the same song so a transient outage
+    // or stale negative cache can recover without requiring a track change.
+    // The per-track cap prevents status polling from turning this into an
+    // unbounded request loop.
+    const startedAt = Number(state.metadataPrefetchStartedAt) || 0;
+    const age = Date.now() - startedAt;
+    if (state.metadataPrefetchAttempts < METADATA_PREFETCH_MAX_ATTEMPTS || age < 30000 || state.metadataPrefetchRearms >= 2) return;
+    state.metadataPrefetchRearms += 1;
+  } else {
+    // A previous song may still be waiting on a slow provider. Abort its
+    // in-flight requests before opening the new priority lane; token checks
+    // alone prevent stale writes but still waste sockets and worker slots.
+    cancelCurrentTrackMetadataPrefetch();
+    state.metadataPrefetchRearms = 0;
+  }
+  if (state.metadataPrefetchTimer) clearTimeout(state.metadataPrefetchTimer);
+  state.metadataPrefetchTrackId = trackId;
+  state.metadataPrefetchStartedAt = Date.now();
+  state.metadataPrefetchUnavailable = false;
+  state.metadataPrefetchAttempts = 0;
+  const token = ++state.metadataPrefetchToken;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.metadataPrefetchController = controller;
+  // Keep normal pending polls distinct from an explicit retry of a terminal
+  // provider result.  Retrying every 900ms used to recreate/requeue the same
+  // current-track job before a slow fallback source could finish.
+  let retryFailed = false;
+  // Lyrics are the most visible part of metadata when playback starts. Keep
+  // one bounded, fire-and-forget request alongside the candidate lookup so a
+  // later lyrics-page open can use the already resolved body instead of
+  // waiting for a fresh provider chain. This is intentionally independent of
+  // the background-enrichment switch and guarded by the current track token.
+  // Even when a file already contains embedded lyrics, the same priority
+  // endpoint may have a cached/provider artwork result. Do not skip this
+  // lane solely because lyrics are present; only skip once both visible
+  // metadata pieces are already available locally.
+  const needsPriorityLyricsLane = !String(item.lyrics || "").trim()
+    || (!item.cover_url && !item.cover_thumbnail_url);
+  if (state.metadataPrefetchLyricsTrackId !== trackId && needsPriorityLyricsLane) {
+    state.metadataPrefetchLyricsTrackId = trackId;
+    state.metadataPrefetchLyricsAttempts = 0;
+    if (state.metadataPrefetchLyricsTimer) clearTimeout(state.metadataPrefetchLyricsTimer);
+    const lyricsToken = ++state.metadataPrefetchLyricsToken;
+    const lyricsController = typeof AbortController === "function" ? new AbortController() : null;
+    state.metadataPrefetchLyricsController = lyricsController;
+    let scheduleLyricsRetry = null;
+    const requestLyrics = (retryFailed = false) => {
+      const requestedRetry = retryFailed;
+      return fetchMetadataRequest(`api/lyrics?track_id=${encodeURIComponent(trackId)}${requestedRetry ? "&retry=1" : ""}`, 10000, lyricsController?.signal)
+      .then(result => ({
+        ok: result.response?.ok,
+        data: result.data || {},
+      }))
+      .then(data => {
+        if (!data || lyricsToken !== state.metadataPrefetchLyricsToken
+          || String(currentItem()?.id || "") !== trackId) return;
+        // `/api/lyrics` normally returns its projection at the top level.
+        // Some host bridges use a `{ data: ... }` envelope, so support both
+        // shapes. Reading only `data.data` discarded normal completed
+        // lyrics/artwork and made playback look permanently pending.
+        const lyricPayload = unwrapMetadataResponsePayload(data);
+        const status = String(lyricPayload?.status || "").toLowerCase();
+        const pending = lyricPayload?.pending === true || status === "pending";
+        const terminal = ["failed", "no_match"].includes(status) && !lyricPayload?.lyrics;
+        if ((data.ok !== true || pending || terminal) && state.metadataPrefetchLyricsAttempts < 12) {
+          scheduleLyricsRetry?.(!requestedRetry && (terminal || data.ok !== true));
+          return;
+        }
+        const lyrics = typeof lyricPayload?.lyrics === "string" ? lyricPayload.lyrics.trim() : "";
+        const lyricArtwork = usableCoverSource(lyricPayload?.image_url);
+        let changed = false;
+        if (lyricArtwork && !item.cover_url && !item.cover_thumbnail_url) {
+          item.cover_url = lyricArtwork;
+          item.cover_thumbnail_url = lyricArtwork;
+          changed = true;
+        }
+        if (lyrics) {
+          item.lyrics = lyrics;
+          changed = true;
+        }
+        if (!changed) return;
+        state.itemCache.set(trackId, item);
+        invalidateLibraryResponseForTrack(trackId);
+        invalidateTrackRowsMarkup(state.pageItems);
+        restoreLibraryNowPlaying();
+        updateMediaSessionMetadata(item);
+        scheduleMetadataRowRender(trackId, ["cover_url", "cover_thumbnail_url", "lyrics"]);
+        if (state.lyricsTrackId === trackId) {
+          if (lyrics) {
+            // The visible loader keeps one invariant: a lyric body, a rendered
+            // panel and the word "loaded" arrive together.  This lane used to file
+            // the same body under a sixth word that no gate knows, which opted the
+            // track out of the reuse check in loadLyricsForCurrentTrack() - every
+            // reopen then blanked a panel that already held the lyric and
+            // re-requested the provider behind a 10 s timeout.  Skipping the render
+            // while the panel was hidden is the other half of the same fault: it
+            // leaves state.lyrics describing a DOM that never received it, so the
+            // reuse check can no longer be trusted.  Go through the one path.
+            state.lyricsStatus = "loaded";
+            renderLyrics(parseLyrics(lyrics));
+          }
+        }
+      }).finally(() => {
+        // A settled lyric lookup no longer owns the current song. Preserve
+        // the controller only while a bounded retry timer remains, so a later
+        // priority call can retry an empty projection and track switches can
+        // cancel the next request.
+        if (lyricsToken === state.metadataPrefetchLyricsToken
+          && state.metadataPrefetchLyricsController === lyricsController
+          && !state.metadataPrefetchLyricsTimer) {
+          state.metadataPrefetchLyricsController = null;
+          if (String(currentItem()?.id || "") === trackId) {
+            state.metadataPrefetchLyricsTrackId = "";
+          }
+        }
+      });
+    };
+    scheduleLyricsRetry = (retryFailed = false) => {
+      // A bounded client timeout is a recoverable provider/proxy failure.
+      // Keep lyrics priority alive without allowing an unbounded timer chain.
+      if (lyricsToken !== state.metadataPrefetchLyricsToken
+        || String(currentItem()?.id || "") !== trackId
+        || state.metadataPrefetchLyricsAttempts >= 12) return;
+      state.metadataPrefetchLyricsAttempts += 1;
+      state.metadataPrefetchLyricsController = lyricsController;
+      state.metadataPrefetchLyricsTimer = setTimeout(() => {
+        state.metadataPrefetchLyricsTimer = 0;
+        requestLyrics(retryFailed).catch(() => scheduleLyricsRetry(false));
+      }, 900);
+    };
+    requestLyrics().catch(() => scheduleLyricsRetry(false));
+  }
+  const scheduleRearm = () => {
+    if (token !== state.metadataPrefetchToken || String(currentItem()?.id || "") !== trackId) return;
+    if (state.metadataPrefetchRearms >= 2 || state.metadataPrefetchTimer) return;
+    // Do not keep hitting a provider immediately after its negative-cache
+    // window. One quiet cooldown gives it time to recover; `prefetch...`
+    // checks the age and the two-rearm cap again before any new request.
+    state.metadataPrefetchController = controller;
+    state.metadataPrefetchTimer = setTimeout(() => {
+      state.metadataPrefetchTimer = 0;
+      prefetchCurrentTrackMetadata(currentItem());
+    }, 30000);
+  };
+  const scheduleRetry = () => {
+    if (token !== state.metadataPrefetchToken || String(currentItem()?.id || "") !== trackId) return;
+    if (state.metadataPrefetchAttempts >= METADATA_PREFETCH_MAX_ATTEMPTS) {
+      scheduleRearm();
+      return;
+    }
+    state.metadataPrefetchAttempts += 1;
+    if (state.metadataPrefetchTimer) clearTimeout(state.metadataPrefetchTimer);
+    // A request rejection reaches its outer retry handler after this
+    // request's `finally` has released the controller. Restore ownership as
+    // soon as the retry is scheduled so a track switch can cancel the next
+    // attempt before it consumes another provider/socket slot.
+    state.metadataPrefetchController = controller;
+    state.metadataPrefetchTimer = setTimeout(() => {
+      state.metadataPrefetchTimer = 0;
+      // Only terminal provider results need an explicit recovery request.
+      // A pending job must retain its FIFO/backoff state while a slower
+      // fallback source is still running.
+      request(retryFailed).catch(() => scheduleRetry());
+    }, 900);
+  };
+  // This is deliberately fire-and-forget: playback must never wait for a
+  // third-party provider.  The server keeps the request bounded and queues
+  // the current track at priority 1 even when background enrichment is off.
+  const request = (retryFailed = false) => {
+    const requestedRetry = retryFailed;
+    return fetchMetadataRequest(`api/metadata/track?track_id=${encodeURIComponent(trackId)}${requestedRetry ? "&retry=1" : ""}`, 10000, controller?.signal)
+    .then(result => {
+      const response = result.response;
+      const payload = result.data;
+      // A restarting metadata worker can briefly surface a 5xx. Treat that
+      // as bounded pending work so the current song gets another chance;
+      // client/auth and malformed-track errors remain terminal.
+      if (response.ok) return payload;
+      // Provider gateways and CGI proxies may briefly answer with a bounded
+      // overload/rate-limit status. Keep the current-track lane alive for
+      // these transient transport failures instead of silently abandoning
+      // metadata after the first non-5xx response.
+      if (globalThis.fnAudioMetadataResponsePolicy?.isTransientHttpStatus?.(response.status)) {
+        return payload?.status === "unavailable"
+          ? { ...payload, unavailable: true }
+          : { pending: true };
+      }
+      return null;
+    })
+    .then(data => {
+      if (!data || token !== state.metadataPrefetchToken || String(currentItem()?.id || "") !== trackId) return;
+      data = unwrapMetadataResponsePayload(data);
+      if (data.unavailable === true || String(data.status || "").toLowerCase() === "unavailable") {
+        // Metadata workers can be starting up while the player is already
+        // usable. Keep the current-track lane alive with the same bounded
+        // retry budget so a transient 503 does not permanently suppress
+        // lyrics/artwork for the remainder of the session.
+        state.metadataPrefetchUnavailable = true;
+        scheduleRetry();
+        return;
+      }
+      state.metadataPrefetchUnavailable = false;
+      // A provider can return usable candidates without selecting an
+      // automatic `best` match (for example when confidence/margin is below
+      // the write-back threshold).  Show the first bounded candidate in the
+      // current row as a presentation fallback; this never confirms or
+      // writes tags and keeps local Tag values authoritative.
+      // An empty `best: {}` is a normal review/pending projection. Treat it
+      // as absent so a bounded candidate can still update the current row;
+      // otherwise metadata was fetched successfully but the UI stayed blank.
+      const best = globalThis.fnAudioMetadataCandidatePresentationPolicy?.selectDisplayCandidate(
+        data.best,
+        data.candidates,
+      );
+      const responseStatus = String(data.status || "").toLowerCase();
+      const responsePending = data.pending === true || responseStatus === "pending";
+      retryFailed = !requestedRetry && (responseStatus === "failed" || responseStatus === "no_match");
+      if (!best) {
+        // A cached artwork projection can be useful even when the match row
+        // has no displayable candidate. Apply it independently so a sparse
+        // provider result does not erase a known cover or suppress metadata
+        // recovery in the UI.
+        const cachedArtwork = usableCoverSource(data.image_url);
+        if (cachedArtwork && !item.cover_url && !item.cover_thumbnail_url) {
+          item.cover_url = cachedArtwork;
+          item.cover_thumbnail_url = cachedArtwork;
+          state.itemCache.set(trackId, item);
+          invalidateLibraryResponseForTrack(trackId);
+          invalidateTrackRowsMarkup(state.pageItems);
+          restoreLibraryNowPlaying();
+          updateMediaSessionMetadata(item);
+          scheduleMetadataRowRender(trackId, ["cover_url", "cover_thumbnail_url"]);
+        }
+        // Older/current backends project queued work as `status: "pending"`
+        // while newer responses also expose `pending: true`. Accept both
+        // forms so a successful enqueue never looks like a dead lookup.
+        const status = responseStatus;
+        const pending = responsePending;
+        // ``review`` normally carries candidates and is therefore handled
+        // above.  Treat a legacy/corrupt empty review projection as
+        // recoverable too: otherwise a structurally successful response with
+        // no usable values makes the current-song lane go quiet until its
+        // server TTL expires.
+        // Some host bridges expose an in-progress request as a generic HTTP
+        // 200 `{ok:true}` envelope. With none of the metadata projection keys
+        // present, that response is not a terminal no-match; retain the
+        // bounded retry lane instead of silently stopping enrichment.
+        const missingProjection = !Object.prototype.hasOwnProperty.call(data, "status")
+          && !Object.prototype.hasOwnProperty.call(data, "best")
+          && !Object.prototype.hasOwnProperty.call(data, "candidates")
+          && !Object.prototype.hasOwnProperty.call(data, "pending")
+          && !Object.prototype.hasOwnProperty.call(data, "image_url");
+        const recoverable = pending || status === "failed" || status === "no_match" || status === "review" || status === "auto";
+        if (state.metadataPrefetchAttempts < METADATA_PREFETCH_MAX_ATTEMPTS && (recoverable || missingProjection)) {
+          scheduleRetry();
+        }
+        return;
+      }
+      const fields = ["title", "artist", "album", "album_artist", "date", "genre", "track_no", "composer"];
+      let changed = false;
+      const changedFields = [];
+      fields.forEach(field => {
+        const value = best[field];
+        if (value == null || String(value).trim() === "") return;
+        if (!String(item[field] || "").trim() || item.metadata_source?.[field] !== "tag") {
+          if (String(item[field] || "") !== String(value)) { item[field] = value; changed = true; changedFields.push(field); }
+        }
+      });
+      const candidateArtwork = usableCoverSource(
+        globalThis.fnAudioMetadataCandidatePresentationPolicy?.selectDisplayArtwork?.(best, data.candidates, data.image_url)
+          || data.image_url,
+      );
+      if (candidateArtwork && !item.cover_url && !item.cover_thumbnail_url) {
+        item.cover_url = candidateArtwork;
+        item.cover_thumbnail_url = candidateArtwork;
+        changed = true;
+        changedFields.push("cover_url", "cover_thumbnail_url");
+      }
+      if (changed) {
+        // The playing item may come from a restored queue rather than the
+        // visible page. Keep the bounded identity cache in sync so a later
+        // view switch cannot regress to the pre-enrichment row.
+        state.itemCache.set(trackId, item);
+        invalidateLibraryResponseForTrack(trackId);
+        invalidateTrackRowsMarkup(state.pageItems);
+        restoreLibraryNowPlaying();
+        updateMediaSessionMetadata(item);
+        scheduleMetadataRowRender(trackId, changedFields);
+      }
+      // A filename candidate is presentation-only while the provider lookup
+      // is still pending. Keep the bounded retry alive after applying it;
+      // otherwise the first useful local identity would accidentally suppress
+      // the remote candidate that can supply artwork/album fields.
+      if ((responsePending || data.retryable === true)
+        && state.metadataPrefetchAttempts < METADATA_PREFETCH_MAX_ATTEMPTS) {
+        scheduleRetry();
+      } else if (isRecoverableFilenameMetadata(data, best)
+        && state.metadataPrefetchAttempts < METADATA_PREFETCH_MAX_ATTEMPTS) {
+        // A filename candidate is useful for immediate display, but it is not
+        // proof that remote metadata is unavailable. Keep a bounded recovery
+        // poll alive so a transient provider miss can later supply album,
+        // artwork and complete tags.
+        scheduleRetry();
+      }
+    }).finally(() => {
+      // A completed terminal lookup no longer owns the current row. Keep the
+      // controller only while an in-flight request or its bounded retry timer
+      // can still be cancelled; otherwise visible-page recovery may safely
+      // pick up fields the priority response could not provide.
+      if (token === state.metadataPrefetchToken
+        && state.metadataPrefetchController === controller
+        && !state.metadataPrefetchTimer) {
+        state.metadataPrefetchController = null;
+      }
+    });
+  };
+  request().catch(() => scheduleRetry());
+}
+function retryCurrentTrackMetadataAfterRecovery(metadata) {
+  // A dead metadata pool can be recovered lazily by the next API request. If
+  // the previous prefetch exhausted its bounded unavailable retries, the same
+  // track ID would otherwise short-circuit forever. Re-arm it only after the
+  // status endpoint confirms a live service, and only once per recovery edge.
+  if (!state.metadataPrefetchUnavailable || !metadata || metadata.running !== true) return;
+  const item = currentItem();
+  const trackId = String(item?.id || "");
+  if (!trackId || state.metadataPrefetchRecoverySeen === trackId) return;
+  state.metadataPrefetchRecoverySeen = trackId;
+  state.metadataPrefetchTrackId = "";
+  state.metadataPrefetchAttempts = 0;
+  state.metadataPrefetchUnavailable = false;
+  prefetchCurrentTrackMetadata(item);
+}
+async function openLyrics() {
+  const item = currentItem();
+  $("lyricsView").hidden = false;
+  updateLyricsMeta(item);
+  const trackId = String(item?.id || "");
+  const retry = state.lyricsTrackId === trackId && ["pending", "error"].includes(state.lyricsStatus);
+  // Only a deliberate re-open after a terminal failure is allowed to reset a
+  // failed provider job. Timed pending polls remain bounded and never request
+  // an unbounded retry loop from the server.
+  await loadLyricsForCurrentTrack(item, retry, state.lyricsStatus === "error");
+  // The reuse gate above can return without touching the panel, so this is also
+  // the only projection a reused lyric gets. A fresh render already did its own.
+  updateLyricHighlight();
+}
+function updateLyricHighlight() {
+  if (!state.lyrics.length || $("lyricsView").hidden) return;
+  const now = currentSeconds();
+  // A cue only becomes active once its own timestamp is due, so "no line yet" is
+  // a real state: an intro before the first cue, and every plain-text lyric
+  // (parseLyrics gives those rows time: -1), have no line to blame on the clock.
+  // Starting at 0 announced the first line as if it were being sung.
+  let active = -1;
+  state.lyrics.forEach((line, index) => {
+    if (line.time >= 0 && line.time <= now + 0.25) active = index;
+  });
+  // Three polling surfaces - the native status callback, the cast UI refresh and
+  // audio timeupdate at about four ticks a second - all arrive here, while the
+  // active line moves every few seconds.  Without this gate every tick re-toggled
+  // every line node and restarted the smooth scroll, so the animation never
+  // settled and the panel kept dragging the reader back to the current line.
+  if (active === state.lyricsActiveLine) return;
+  state.lyricsActiveLine = active;
+  document.querySelectorAll("[data-lyric]").forEach(node => node.classList.toggle("active", Number(node.dataset.lyric) === active));
+  if (active < 0) return;
+  const activeNode = document.querySelector(`[data-lyric="${active}"]`);
+  const lyricBox = $("lyricsLines");
+  if (activeNode && lyricBox) {
+    const target = activeNode.offsetTop - (lyricBox.clientHeight / 2) + (activeNode.clientHeight / 2);
+    lyricBox.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  }
+}
+function syncState() {
+  scheduleUserStateSave();
+}
+async function loadLibrary(refresh = false) {
+  return loadPagedLibrary(1, refresh);
+}
+function invalidateLibraryLoad() {
+  // A non-paged view has no replacement library request, so explicitly
+  // invalidate the previous paged request before rendering the new surface.
+  state.libraryRequestSeq += 1;
+  if (state.libraryAbortController) state.libraryAbortController.abort();
+  state.libraryAbortController = null;
+  // Status polling can outlive the page request. Invalidate it as well so a
+  // late scan-complete response cannot reload the view that was just left.
+  state.libraryStatusRequestToken += 1;
+  if (state.libraryStatusController) {
+    try { state.libraryStatusController.abort(); } catch (_) {}
+  }
+  state.libraryStatusController = null;
+  state.libraryStatusPromise = null;
+  state.libraryStatusRefreshQueued = false;
+  if (state.libraryStatusTimer) {
+    clearTimeout(state.libraryStatusTimer);
+    state.libraryStatusTimer = 0;
+  }
+  state.libraryLoadKey = "";
+  state.libraryLoadPromise = null;
+  state.libraryLoading = false;
+  state.libraryInteractionBlocked = false;
+  cancelFolderNavigationPrefetch();
+  cancelReferencedItemHydrationSchedule();
+  cancelMetadataRowRender();
+  cancelVisibleMetadataPrefetch({ releaseKeys: true });
+}
+function libraryResponseWeight(data) {
+  return globalThis.fnAudioLibraryResponsePolicy?.responseWeight?.(data) || 1;
+}
+function clearLibraryResponseCaches() {
+  state.libraryResponseEpoch += 1;
+  state.libraryResponseCache.clear();
+  state.folderNavigationPrefetchKey = "";
+  // Clearing the map detaches stale requests from future callers. Cancel them
+  // without releasing their slots early; the loader releases each slot only
+  // after the underlying promise settles, keeping the hard concurrency cap
+  // valid while cancellation propagates through the transport.
+  for (const request of state.libraryResponseInflight.values()) {
+    request?.__fnAudioAbort?.();
+  }
+  state.libraryResponseInflight.clear();
+  // Album metadata is derived from the same library snapshot. Invalidate it
+  // with page responses so a completed scan cannot leave stale presentation
+  // fields visible until the LRU naturally evicts them.
+  state.albumMetadata.clear?.();
+  state.librarySnapshotEmptyGuardUsed = false;
+}
+
+function shouldRetainSnapshotForEmptyResponse(data, refresh = false) {
+  return Boolean(globalThis.fnAudioLibraryEmptyResponsePolicy?.shouldRetainSnapshot(
+    data,
+    state.pageItems,
+    { refresh, guardUsed: state.librarySnapshotEmptyGuardUsed, snapshotHit: state.librarySnapshot?.hit === true },
+  ));
+}
+async function refreshVisibleMetadataProjection() {
+  if (!isPagedTrackListing() || state.libraryLoading || !state.pageItems?.length) return false;
+  const items = state.pageItems;
+  const requestSeq = state.libraryRequestSeq;
+  // A metadata status poll can queue a second projection refresh while the
+  // first by-id read is still waiting. Page identity alone is insufficient:
+  // both reads can target the same page and the older response may otherwise
+  // commit after the newer one. Keep a separate projection generation so only
+  // the latest refresh may mutate visible rows.
+  const projectionSeq = (Number(state.metadataProjectionRequestSeq) || 0) + 1;
+  state.metadataProjectionRequestSeq = projectionSeq;
+  const isCurrentProjection = () => projectionSeq === state.metadataProjectionRequestSeq;
+  const rows = items.slice(0, 500);
+  const ids = rows.map(item => String(item?.id || "")).filter(Boolean);
+  const refreshed = [];
+  try {
+    // This is a local SQLite projection read, never a new provider search.
+    // A placeholder cover URL alone cannot tell us whether its image exists.
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      if (!isCurrentProjection() || requestSeq !== state.libraryRequestSeq || items !== state.pageItems || state.libraryLoading) return false;
+      refreshed.push(...await fetchLibraryItemsByIds(ids.slice(offset, offset + 100)));
+      if (!isCurrentProjection()) return false;
+    }
+  } catch (_) { return false; }
+  if (!isCurrentProjection() || requestSeq !== state.libraryRequestSeq || items !== state.pageItems || state.libraryLoading) return false;
+  const byId = new Map((refreshed || []).map(item => [String(item?.id || ""), item]));
+  const fields = ["title", "artist", "album", "album_artist", "composer", "genre", "date", "track_no",
+    "cover_url", "cover_thumbnail_url"];
+  let changed = false;
+  for (const item of rows) {
+    const fresh = byId.get(String(item.id));
+    if (!fresh) continue;
+    const changedFields = fields.filter(field => fresh[field] != null
+      && (field.startsWith("cover_") || String(fresh[field]).trim())
+      && String(fresh[field]) !== String(item[field] ?? ""));
+    if (!changedFields.length) continue;
+    for (const target of [item, ...(state.queue || []).filter(entry => String(entry?.id || "") === String(item.id))]) {
+      changedFields.forEach(field => { target[field] = fresh[field]; });
+      if (fresh.metadata_source) target.metadata_source = fresh.metadata_source;
+    }
+    state.itemCache.set(String(item.id), item);
+    if (!changed) invalidateTrackRowsMarkup(items);
+    changed = true;
+    scheduleMetadataRowRender(String(item.id), changedFields);
+  }
+  if (changed) restoreLibraryNowPlaying();
+  return true;
+}
+function metadataProjectionSignature(data = {}) {
+  return globalThis.fnAudioMetadataProjectionPolicy?.signature(data) || "";
+}
+function validateLibraryResponse(url, data) {
+  const endpoint = String(url).split("?")[0].split("/").pop();
+  const field = ["roots", "folders", "groups"].includes(endpoint) ? endpoint : "items";
+  if (!data || typeof data !== "object" || !Array.isArray(data[field])
+    || (field !== "roots" && (!Number.isSafeInteger(data.count) || data.count < 0))) {
+    throw new Error("音乐库响应格式异常，请重试或检查 NAS 服务");
+  }
+  const text = value => typeof value === "string" && value.trim().length > 0;
+  const validRow = row => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    if (field === "roots") {
+      if ((row.root !== undefined && typeof row.root !== "string") || (row.path !== undefined && typeof row.path !== "string")) return false;
+      return text(row.root || row.path);
+    }
+    if (field === "folders") return text(row.path);
+    if (field === "groups") return typeof row.name === "string";
+    return text(row.id);
+  };
+  if (!data[field].every(validRow)) throw new Error("音乐库响应格式异常，请重试或检查 NAS 服务");
+  return data;
+}
+async function fetchLibraryResponse(url, message, refresh = false, signal = undefined) {
+  const loader = globalThis.fnAudioLibraryResponseLoader;
+  if (!loader || typeof loader.loadLibraryResponse !== "function") {
+    // The module script never arrived (a dropped or rejected request is permanent
+    // for this page load).  Reading the property anyway threw a TypeError that
+    // surfaced as "Cannot read properties of undefined" in the list, which says
+    // nothing about what to do; the watchdog in index.html reloads once, and this
+    // covers the retry itself being the one that got lost.
+    throw new Error("页面资源未完整加载，请刷新页面后重试");
+  }
+  return loader.loadLibraryResponse({
+    url,
+    message,
+    refresh,
+    signal,
+    cache: state.libraryResponseCache,
+    inflight: state.libraryResponseInflight,
+    active: state.libraryResponseActive,
+    inflightLimit: state.libraryResponseInflightLimit,
+    epoch: state.libraryResponseEpoch,
+    getEpoch: () => state.libraryResponseEpoch,
+    fetchJson: (requestUrl, requestMessage, requestSignal) => fetchJsonChecked(
+      requestUrl,
+      requestSignal ? { signal: requestSignal } : {},
+      requestMessage,
+      { strictBody: true },
+    ).then(data => validateLibraryResponse(requestUrl, data)),
+  });
+}
+function cacheLibraryItems(items = [], trim = true) {
+  (items || []).forEach(item => {
+    if (item && item.id) {
+      const id = String(item.id);
+      state.itemCache.set(id, item);
+      state.unresolvedItemIds?.delete?.(id);
+    }
+  });
+  if (trim) state.itemCache.trim(new Set((state.queue || []).map(item => String(item?.id || "")).filter(Boolean)));
+}
+function mergeAuthoritativePageItems(items = []) {
+  return globalThis.fnAudioLibraryMetadataMergePolicy?.merge(items, state.pageItems, state.itemCache)
+    || (Array.isArray(items) ? items : []);
+}
+function trackPagePresentationSignatures(items = []) {
+  // This mirrors the visible row markup without constructing its HTML. It is
+  // used only for the snapshot-to-authoritative handoff: equal signatures mean
+  // the existing list markup is safe to retain, including decoded cover nodes.
+  if (!Array.isArray(items) || items.length > 500 || state.view === "queue") return [];
+  const columns = activeTrackColumns();
+  const nonTitleColumns = columns.filter(key => key !== "title");
+  return items.map((item, index) => {
+    const values = trackColumnValues(item, nonTitleColumns);
+    const rowSignature = trackRowMarkupSignature(item, index, columns, values, coverUrl(item));
+    // The row signature intentionally excludes identity because it is a
+    // presentation optimization. The rendered wrapper includes id/data-play,
+    // so add it here before allowing literal markup reuse.
+    return JSON.stringify([String(item?.id || ""), rowSignature]);
+  });
+}
+function reuseSnapshotTrackMarkup(previousItems, nextItems, snapshotHit) {
+  if (!snapshotHit || !isPagedTrackListing() || state.view === "queue") return false;
+  const cache = state.trackRowsMarkupCache;
+  const previousMarkup = cache?.get?.(previousItems);
+  if (!previousMarkup || !previousMarkup.key || typeof previousMarkup.html !== "string") return false;
+  const reusable = globalThis.fnAudioLibrarySnapshotReusePolicy?.canReuseMarkup(
+    trackPagePresentationSignatures(previousItems),
+    trackPagePresentationSignatures(nextItems),
+  ) === true;
+  if (!reusable) return false;
+  cache?.set?.(nextItems, previousMarkup);
+  state.uiMetrics.snapshotMarkupReuses = Math.min(1000000, state.uiMetrics.snapshotMarkupReuses + 1);
+  return true;
+}
+function setTextContentIfChanged(node, value) {
+  if (!node) return;
+  const text = String(value ?? "");
+  if (node.textContent !== text) node.textContent = text;
+}
+function setStyleVarIfChanged(node, name, value) {
+  if (!node || !node.style) return;
+  const text = String(value ?? "");
+  // Comparing against the serialized value is best effort: a WebView that pads
+  // custom properties with whitespace simply keeps writing, which is the
+  // behaviour this call site had before the check existed.
+  if (node.style.getPropertyValue(name) === text) return;
+  node.style.setProperty(name, text);
+}
+function setDatasetStateIfChanged(node, value) {
+  if (!node || !node.dataset) return;
+  // "unknown" is the only state worth naming; clearing writes the empty string rather
+  // than deleting the attribute.  Both match no `[data-state="unknown"]` selector, and a
+  // plain value means a second, third and hundredth identical call all have nothing left
+  // to do - the 500ms poll must not touch the DOM when the transport row did not change.
+  const next = value === true ? "unknown" : "";
+  if ((node.dataset.state || "") === next) return;
+  node.dataset.state = next;
+}
+function updateLibraryStatusDecorations() {
+  renderLibraryHealth();
+  const loadError = $("libraryLoadError");
+  if (loadError) loadError.hidden = !state.libraryLoadError;
+  setTextContentIfChanged($("libraryLoadErrorText"), state.libraryLoadError || "");
+  const serverPortValue = $("serverPortValue");
+  setTextContentIfChanged(serverPortValue, state.libraryStatus?.server_port || "--");
+  setTextContentIfChanged($("allCount"), libraryCount(state.libraryStatus?.count));
+  setTextContentIfChanged($("dsdCount"), libraryCount(state.libraryStatus?.dsd_count));
+  setTextContentIfChanged($("recentCount"), libraryCount(state.libraryStatus?.count));
+  const emptyTitle = $("emptyTitle");
+  const emptyText = $("emptyText");
+  const currentView = String(state.view || "");
+  // A search that matches nothing is not an empty library: saying "还没有音乐"
+  // there tells the user their library is gone when only the query missed.
+  const query = currentQueryText();
+  const emptyContext = query
+    ? {
+        title: "没有找到歌曲",
+        text: `没有与“${query.length > 30 ? `${query.slice(0, 30)}…` : query}”匹配的歌曲，换个关键词试试，或清空搜索查看全部歌曲。`,
+      }
+    : currentView.startsWith("playlist:")
+      ? { title: "播放列表为空", text: "从歌曲操作菜单中选择“加入播放列表”，或返回全部音乐选择歌曲。" }
+      : currentView === "favorites"
+        ? { title: "还没有收藏歌曲", text: "在歌曲操作菜单或播放器中收藏歌曲后，会显示在这里。" }
+        : currentView === "queue"
+          ? { title: "当前队列为空", text: "从音乐库播放歌曲后，歌曲会出现在当前队列。" }
+          : null;
+  if (emptyTitle) setTextContentIfChanged(emptyTitle, emptyContext?.title || "还没有音乐");
+  if (emptyText && emptyContext) {
+    setTextContentIfChanged(emptyText, emptyContext.text);
+  } else if (emptyText && state.libraryStatus) {
+    const path = state.libraryStatus.library_path || "";
+    setTextContentIfChanged(emptyText, `${state.libraryStatus.message || "没有找到音乐文件"}${path ? `：${path}` : ""}`);
+  }
+  const scanText = scanProgressText();
+  if (scanText) {
+    setTextContentIfChanged($("viewSub"), scanText);
+    setTextContentIfChanged($("mobileViewSub"), scanText);
+  }
+}
+function cancelVisibleMetadataPrefetch(options = {}) {
+  const cancelRearms = options.cancelRearms !== false;
+  const releaseKeys = options.releaseKeys === true;
+  const preserveRearm = !cancelRearms && Boolean(state.visibleMetadataPrefetchRearmTimer);
+  if (state.visibleMetadataPrefetchTimer) {
+    if (state.visibleMetadataPrefetchUsesIdle && typeof cancelIdleCallback === "function") cancelIdleCallback(state.visibleMetadataPrefetchTimer);
+    else clearTimeout(state.visibleMetadataPrefetchTimer);
+    state.visibleMetadataPrefetchTimer = 0;
+  }
+  state.visibleMetadataPrefetchUsesIdle = false;
+  try { state.visibleMetadataPrefetchController?.abort(); } catch (_) {}
+  state.visibleMetadataPrefetchController = null;
+  // Do not discard completed-key history on an ordinary same-page refresh,
+  // but always release keys whose requests were cancelled before completion.
+  state.visibleMetadataPrefetchActiveKeys?.forEach((owner, key) => {
+    if (state.visibleMetadataPrefetchActiveKeys.get(key) === owner) {
+      state.visibleMetadataPrefetchKeys.delete(key);
+      state.visibleMetadataPrefetchActiveKeys.delete(key);
+    }
+  });
+  state.visibleMetadataPrefetchRequestSeq = 0;
+  state.visibleMetadataPrefetchItems = null;
+  if (cancelRearms) {
+    if (state.visibleMetadataPrefetchRearmTimer) clearTimeout(state.visibleMetadataPrefetchRearmTimer);
+    state.visibleMetadataPrefetchRearmTimer = 0;
+    state.visibleMetadataPrefetchRearmKeys?.clear();
+    state.visibleMetadataPrefetchRearmSeq = 0;
+    if (state.visibleMetadataPrefetchCooldownTimer) clearTimeout(state.visibleMetadataPrefetchCooldownTimer);
+    state.visibleMetadataPrefetchCooldownTimer = 0;
+    state.visibleMetadataPrefetchCooldownKeys?.clear();
+    state.visibleMetadataPrefetchCooldownStreaks?.clear();
+    state.visibleMetadataPrefetchCooldownSeq = 0;
+  }
+  // A visibility cancellation aborts requests that may have claimed a key
+  // before receiving a result. Release those page hints so returning to the
+  // foreground can retry the same visible rows; ordinary page/status
+  // cancellation retains completed-key deduplication.
+  if (releaseKeys) state.visibleMetadataPrefetchKeys?.clear();
+  state.visibleMetadataPrefetchSeq += 1;
+  // Status refreshes cancel the old worker generation but keep a finite
+  // pending re-arm alive. Rebind that timer to the new generation so its
+  // callback is not discarded as stale after the refresh.
+  if (preserveRearm) state.visibleMetadataPrefetchRearmSeq = state.visibleMetadataPrefetchSeq;
+}
+function scheduleVisibleMetadataPrefetchRearm(key, data, attempts, generation, requestSeq) {
+  if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return false;
+  const knownRearms = Number(state.visibleMetadataPrefetchRearmKeys?.get(key) || 0);
+  const policy = globalThis.fnAudioVisibleMetadataPrefetchPolicy;
+  if (!policy?.shouldRearmPending?.(data, attempts, knownRearms, 12, 2)) return false;
+  state.visibleMetadataPrefetchRearmKeys.set(key, knownRearms + 1);
+  // Keep the ordinary dedupe key until the quiet re-arm fires. Status polling
+  // can therefore keep refreshing chrome without restarting this same row.
+  if (state.visibleMetadataPrefetchRearmTimer) return true;
+  const delay = policy.pendingRearmDelayMs?.(knownRearms + 1) || 3500;
+  state.visibleMetadataPrefetchRearmSeq = generation;
+  state.visibleMetadataPrefetchRearmTimer = setTimeout(() => {
+    state.visibleMetadataPrefetchRearmTimer = 0;
+    if (state.visibleMetadataPrefetchRearmSeq !== state.visibleMetadataPrefetchSeq
+      || requestSeq !== state.libraryRequestSeq) return;
+    state.visibleMetadataPrefetchRearmSeq = 0;
+    // Release every pending key for this settled page together. The new lane
+    // retains its six-row/two-request caps, rather than creating one timer per
+    // track and repeatedly cancelling itself.
+    state.visibleMetadataPrefetchRearmKeys.forEach((_, pendingKey) => {
+      state.visibleMetadataPrefetchKeys.delete(pendingKey);
+    });
+    scheduleVisibleMetadataPrefetch(state.pageItems, requestSeq);
+  }, delay);
+  return true;
+}
+// Hold the page dedupe key of a row whose completed lookup gained nothing, then
+// release cooled rows together on one page-owned timer. Mirroring the re-arm
+// lane is deliberate: one timer per track would simply recreate the background
+// poller this replaces. Nothing-gained verdicts for the same row escalate so a
+// library that can never match goes quiet instead of polling forever.
+function scheduleVisibleMetadataPrefetchCooldown(key, delayMs, nowMs = Date.now()) {
+  const value = typeof key === "string" ? key : "";
+  if (!value) return false;
+  const streaks = state.visibleMetadataPrefetchCooldownStreaks instanceof Map
+    ? state.visibleMetadataPrefetchCooldownStreaks
+    : (state.visibleMetadataPrefetchCooldownStreaks = new Map());
+  const streak = Math.min(10, (Number(streaks.get(value)) || 0) + 1);
+  streaks.set(value, streak);
+  const policy = globalThis.fnAudioVisibleMetadataPrefetchPolicy;
+  const escalated = typeof policy?.escalatedCooldownMs === "function"
+    ? policy.escalatedCooldownMs(delayMs, streak)
+    : Number(delayMs) || 0;
+  // A zero window is the product switch that turns the cooldown lane off again,
+  // so it must never be silently raised to the one second floor.
+  if (!escalated) return false;
+  const bounded = Math.min(300000, Math.max(1000, Math.floor(escalated)));
+  const keys = state.visibleMetadataPrefetchCooldownKeys instanceof Map
+    ? state.visibleMetadataPrefetchCooldownKeys
+    : (state.visibleMetadataPrefetchCooldownKeys = new Map());
+  keys.set(value, Number(nowMs) + bounded);
+  armVisibleMetadataPrefetchCooldownTimer(Number(nowMs));
+  return true;
+}
+// The page owns exactly one cooldown timer, armed for the earliest expiry, so a
+// row cooled while that timer is already running still gets its own full window.
+function nextVisibleMetadataPrefetchCooldownExpiry() {
+  let earliest = 0;
+  state.visibleMetadataPrefetchCooldownKeys?.forEach((expiry) => {
+    const value = Number(expiry);
+    if (!Number.isFinite(value)) return;
+    if (!earliest || value < earliest) earliest = value;
+  });
+  return earliest;
+}
+function armVisibleMetadataPrefetchCooldownTimer(nowMs = Date.now()) {
+  if (state.visibleMetadataPrefetchCooldownTimer) clearTimeout(state.visibleMetadataPrefetchCooldownTimer);
+  state.visibleMetadataPrefetchCooldownTimer = 0;
+  const earliest = nextVisibleMetadataPrefetchCooldownExpiry();
+  if (!earliest) return false;
+  state.visibleMetadataPrefetchCooldownSeq = state.libraryRequestSeq;
+  state.visibleMetadataPrefetchCooldownTimer = setTimeout(() => {
+    state.visibleMetadataPrefetchCooldownTimer = 0;
+    flushVisibleMetadataPrefetchCooldowns(Date.now());
+    armVisibleMetadataPrefetchCooldownTimer(Date.now());
+  }, Math.max(250, earliest - Number(nowMs)));
+  return true;
+}
+function flushVisibleMetadataPrefetchCooldowns(nowMs = Date.now()) {
+  const keys = state.visibleMetadataPrefetchCooldownKeys;
+  if (!(keys instanceof Map)) return 0;
+  const expired = [];
+  keys.forEach((expiry, key) => { if (Number(expiry) <= Number(nowMs)) expired.push(key); });
+  for (const cooledKey of expired) keys.delete(cooledKey);
+  if (!expired.length) return 0;
+  // A verdict cooled for another page generation must not release keys that a
+  // fresh library request now owns.
+  if (state.visibleMetadataPrefetchCooldownSeq !== state.libraryRequestSeq) return 0;
+  for (const cooledKey of expired) state.visibleMetadataPrefetchKeys.delete(cooledKey);
+  return expired.length;
+}
+
+// One parked lane per page. The hold deadline is the only thing that can end the window,
+// so the retry is scheduled exactly at its expiry plus one frame, and capped by the same
+// bound so a clock jump can never defer the row metadata chrome indefinitely.
+function parkVisibleMetadataPrefetch(items, requestSeq, nowMs = Date.now()) {
+  if (state.visibleMetadataPrefetchTimer) return false;
+  const delay = Math.min(LIBRARY_INTERACTION_HOLD_MS + 500,
+    Math.max(0, Number(state.libraryInteractionHoldUntil || 0) - nowMs) + 60);
+  state.visibleMetadataPrefetchUsesIdle = false;
+  state.visibleMetadataPrefetchTimer = setTimeout(() => {
+    state.visibleMetadataPrefetchTimer = 0;
+    if (requestSeq !== state.libraryRequestSeq) return;
+    scheduleVisibleMetadataPrefetch(items, requestSeq);
+  }, delay);
+  return true;
+}
+function scheduleVisibleMetadataPrefetch(items = [], requestSeq = state.libraryRequestSeq) {
+  const policy = globalThis.fnAudioVisibleMetadataPrefetchPolicy;
+  const hasPendingWork = Boolean(
+    state.visibleMetadataPrefetchTimer
+    || state.visibleMetadataPrefetchController
+    || state.visibleMetadataPrefetchRearmTimer
+  );
+  if (policy?.shouldReuseActiveLane?.(
+    requestSeq,
+    state.visibleMetadataPrefetchRequestSeq,
+    items === state.visibleMetadataPrefetchItems,
+    hasPendingWork,
+  )) return;
+  // While a navigation owns the connections this lane waits. It is optional chrome, and a
+  // dozen concurrent row lookups per page change is what made the next click land behind a
+  // queue. The parked lane resumes itself once, on the timer below, and a new page cancels
+  // that timer, so it can be neither dropped nor run twice.
+  if (uiBackgroundWorkBlocked()) {
+    parkVisibleMetadataPrefetch(items, requestSeq);
+    return;
+  }
+  // A status/projection refresh may reschedule the active lane. Preserve a
+  // pending re-arm in that case; page changes and hidden documents still use
+  // the default cancellation path and clear it completely.
+  cancelVisibleMetadataPrefetch({ cancelRearms: false });
+  // The currently playing item already has an immediate priority metadata
+  // lane. Excluding it here avoids duplicate provider requests and prevents
+  // the optional first-page queue from competing with lyrics/artwork needed
+  // for the active song.
+  const currentTrackId = String(currentItem()?.id || "");
+  // A restored queue can identify the current song before playback has been
+  // started. In that cold-start window there is no playback-owned metadata
+  // lane yet, so excluding the current row would leave it permanently on the
+  // local/empty projection. Exclude it only while the priority lane already
+  // owns an active request; otherwise let the bounded first-page lane recover
+  // it as well. The server-side job key still coalesces duplicate requests.
+  const priorityLaneActive = globalThis.fnAudioVisibleMetadataPrefetchPolicy?.ownsCurrentTrackLane?.(
+    currentTrackId,
+    state.metadataPrefetchTrackId,
+    state.metadataPrefetchController,
+    state.metadataPrefetchTimer,
+  ) === true;
+  const excludedCurrentTrackId = priorityLaneActive ? currentTrackId : "";
+  const candidates = globalThis.fnAudioVisibleMetadataPrefetchPolicy?.selectCandidates(items, 6, excludedCurrentTrackId) || [];
+  if (!candidates.length) return;
+  const generation = state.visibleMetadataPrefetchSeq;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.visibleMetadataPrefetchController = controller;
+  state.visibleMetadataPrefetchRequestSeq = requestSeq;
+  state.visibleMetadataPrefetchItems = items;
+  const run = async () => {
+    state.visibleMetadataPrefetchTimer = 0;
+    state.visibleMetadataPrefetchUsesIdle = false;
+    if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < candidates.length) {
+        if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return;
+        const item = candidates[cursor++];
+        const id = String(item.id);
+        const key = `${libraryLoadRequestKey(state.page)}:${id}`;
+        // Keep deduplication memory bounded across many page switches. Older
+        // keys are only a best-effort optimization and may be discarded.
+        if (!rememberVisibleMetadataPrefetchKey(key, 256)) continue;
+        state.visibleMetadataPrefetchActiveKeys.set(key, generation);
+        try {
+          let data = null;
+          let retryFailed = false;
+          let attempts = 0;
+          // A provider chain can legitimately take several seconds when an
+          // early source times out before a later one responds. Four 450ms
+          // polls often ended before the queued job finished, leaving the
+          // page looking as if metadata discovery was disabled. Keep this
+          // lane bounded and cancellable, but give it the same practical
+          // window as the current-track path.
+          for (let attempt = 0; attempt < 12; attempt += 1) {
+            if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return;
+            const requestedRetry = retryFailed;
+            // Keep each optional row lookup bounded as well. The shared
+            // controller still cancels the whole lane on page changes, while
+            // this per-request timeout prevents one stalled proxy from
+            // occupying a worker slot for the rest of the page.
+            const metadataRequestStartedAt = Date.now();
+            const result = await fetchMetadataRequest(
+              `api/metadata/track?track_id=${encodeURIComponent(id)}${requestedRetry ? "&retry=1" : ""}`,
+              8000,
+              controller?.signal,
+            );
+            const response = result.response;
+            attempts = attempt + 1;
+            const metadataRequestElapsedMs = Math.min(3600000, Math.max(0, Date.now() - metadataRequestStartedAt));
+            if (!state.uiMetrics.metadataPrefetchFirstMs) {
+              state.uiMetrics.metadataPrefetchFirstMs = Math.min(3600000, Math.max(0,
+                Date.now() - Number(state.uiMetrics.sessionStartedAt || Date.now())));
+            }
+            state.uiMetrics.metadataPrefetchLastMs = metadataRequestElapsedMs;
+            state.uiMetrics.metadataPrefetchMaxMs = Math.max(state.uiMetrics.metadataPrefetchMaxMs, metadataRequestElapsedMs);
+            state.uiMetrics.metadataPrefetchTotalMs = Math.min(3600000, state.uiMetrics.metadataPrefetchTotalMs + metadataRequestElapsedMs);
+            state.uiMetrics.metadataPrefetchRequests = Math.min(1000000, state.uiMetrics.metadataPrefetchRequests + 1);
+            if (response.ok) data = unwrapMetadataResponsePayload(result.data);
+            else if (globalThis.fnAudioMetadataResponsePolicy?.isTransientHttpStatus?.(response.status)) {
+              // Treat transient gateway/rate-limit responses as pending so
+              // the bounded visible-row retry lane can recover metadata.
+              data = { pending: true };
+            }
+            const status = typeof data?.status === "string" ? data.status.toLowerCase() : "";
+            // Only a terminal negative result needs an explicit replacement
+            // request. Pending responses must remain ordinary polls; sending
+            // retry=1 on every attempt can repeatedly reset a fast no_match
+            // job, trigger provider rate limits, and make metadata look
+            // permanently unavailable.
+            retryFailed = !requestedRetry && (status === "failed" || status === "no_match");
+            if (!globalThis.fnAudioVisibleMetadataPrefetchPolicy?.shouldRetry(data, attempt, 12)) break;
+            await new Promise(resolve => setTimeout(resolve, 700));
+          }
+          // A response from a cancelled page is stale work, not a provider
+          // failure. Do not let page switches pollute failure diagnostics or
+          // make a healthy provider look unreliable.
+          if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return;
+          if (!data) {
+            state.uiMetrics.metadataPrefetchFailures = Math.min(1000000, state.uiMetrics.metadataPrefetchFailures + 1);
+            state.visibleMetadataPrefetchKeys.delete(key);
+            continue;
+          }
+          const best = globalThis.fnAudioMetadataCandidatePresentationPolicy?.selectDisplayCandidate(
+            data.best,
+            data.candidates,
+          );
+          // Artwork may be persisted independently of a recording match
+          // (for example after a lyrics/artwork worker finishes before the
+          // candidate row).  Do not discard that useful result merely because
+          // the candidate projection is still empty.
+          const artwork = usableCoverSource(
+            globalThis.fnAudioMetadataCandidatePresentationPolicy?.selectDisplayArtwork?.(best, data.candidates, data.image_url)
+              || data.image_url,
+          );
+          if (!best && !artwork) {
+            const terminalStatus = String(data.status || "").toLowerCase();
+            if (terminalStatus === "no_match") {
+              state.uiMetrics.metadataPrefetchNoMatches = Math.min(1000000, state.uiMetrics.metadataPrefetchNoMatches + 1);
+            } else if (terminalStatus === "failed") {
+              state.uiMetrics.metadataPrefetchFailures = Math.min(1000000, state.uiMetrics.metadataPrefetchFailures + 1);
+            }
+            const rearmPending = scheduleVisibleMetadataPrefetchRearm(key, data, attempts, generation, requestSeq);
+            // A cooled terminal negative keeps its page key, so the next lane
+            // pass skips the row instead of re-requesting the same no_match.
+            if (!rearmPending && !globalThis.fnAudioVisibleMetadataPrefetchPolicy
+              ?.releaseCompletedKey?.(key, data, scheduleVisibleMetadataPrefetchCooldown,
+                { informative: false, recoverable: false })) {
+              state.visibleMetadataPrefetchKeys.delete(key);
+            }
+            continue;
+          }
+          state.uiMetrics.metadataPrefetchSuccesses = Math.min(1000000, state.uiMetrics.metadataPrefetchSuccesses + 1);
+          let changed = false;
+          const changedFields = [];
+          ["title", "artist", "album", "album_artist", "date", "genre", "track_no", "composer"].forEach(field => {
+            if (!best) return;
+            const value = best[field];
+            if (value == null || String(value).trim() === "") return;
+            if (!String(item[field] || "").trim() && String(item[field] || "") !== String(value)) {
+              item[field] = value;
+              changed = true;
+              changedFields.push(field);
+            }
+          });
+          if (artwork && !item.cover_url && !item.cover_thumbnail_url) {
+            item.cover_url = artwork;
+            item.cover_thumbnail_url = artwork;
+            changed = true;
+            changedFields.push("cover_url");
+          }
+          if (changed) {
+            state.itemCache.set(id, item);
+            invalidateLibraryResponseForTrack(id);
+            invalidateTrackRowsMarkup(state.pageItems);
+            // This lane may enrich a non-playing visible row; use the page
+            // refresh path rather than the current-track-only guard used by
+            // playback metadata prefetch.
+            scheduleMetadataRowRender(id, changedFields);
+          }
+          // A local/filename candidate can be useful for immediate display
+          // while the provider result is still retryable.  Do not let that
+          // presentation-only success permanently consume the page dedupe
+          // key: once the worker/provider projection changes, the row must be
+          // eligible for another bounded lookup (for example to obtain the
+          // missing album or artwork).
+          const releaseStatus = String(data.status || "").toLowerCase();
+          const terminalRelease = data.retryable === true || releaseStatus === "failed"
+            || releaseStatus === "no_match";
+          const decision = {
+            informative: changed === true,
+            recoverable: !terminalRelease && isRecoverableFilenameMetadata(data, best),
+          };
+          // A row that finally gained fields starts its negative streak over.
+          if (decision.informative) state.visibleMetadataPrefetchCooldownStreaks?.delete(key);
+          const rearmPending = scheduleVisibleMetadataPrefetchRearm(key, data, attempts, generation, requestSeq);
+          // A completed lookup that filled nothing on the row must not release
+          // its page dedupe key in the same tick: the next lane pass would
+          // re-queue the byte-for-byte identical request, which is exactly how
+          // untagged rows became permanent background traffic. The policy owns
+          // that verdict and hands the key back only when there is nothing to
+          // cool down, so the old immediate release still covers those shapes.
+          if (!rearmPending && (terminalRelease
+            || (decision.recoverable && state.uiMetrics.metadataPrefetchFailures < 1000000))
+            && !globalThis.fnAudioVisibleMetadataPrefetchPolicy
+              ?.releaseCompletedKey?.(key, data, scheduleVisibleMetadataPrefetchCooldown, decision)) {
+            state.visibleMetadataPrefetchKeys.delete(key);
+          }
+        } catch (error) {
+          if (error?.name === "AbortError") return;
+          // A provider/network miss is isolated; record it for diagnostics so
+          // the UI does not report an artificially perfect prefetch rate.
+          // The next explicit playback or lyrics request can still retry
+          // through the normal priority lane.
+          state.uiMetrics.metadataPrefetchFailures = Math.min(1000000, state.uiMetrics.metadataPrefetchFailures + 1);
+          state.visibleMetadataPrefetchKeys.delete(key);
+        } finally {
+          if (state.visibleMetadataPrefetchActiveKeys.get(key) === generation) {
+            state.visibleMetadataPrefetchActiveKeys.delete(key);
+          }
+        }
+      }
+    };
+    try {
+      await Promise.all([worker(), worker()]);
+    } finally {
+      // A worker can throw before its first request, for example while
+      // deriving the page load key. Release the lane identity either way:
+      // a leaked controller keeps shouldReuseActiveLane() short-circuiting
+      // every later schedule for this page, so visible rows never got their
+      // metadata back until the user switched pages.
+      if (state.visibleMetadataPrefetchController === controller) {
+        state.visibleMetadataPrefetchController = null;
+        // A pending page-owned re-arm still needs this identity so a
+        // metadata status refresh cannot invalidate its recovery window.
+        if (!state.visibleMetadataPrefetchRearmTimer) {
+          state.visibleMetadataPrefetchRequestSeq = 0;
+          state.visibleMetadataPrefetchItems = null;
+        }
+      }
+    }
+  };
+  // Do not let optional visible-row enrichment steal the first paint. Current
+  // playback metadata still uses its dedicated immediate priority lane; this
+  // delay only applies to non-playing rows on a freshly rendered page.
+  const queueIdleRun = () => {
+    if (generation !== state.visibleMetadataPrefetchSeq || requestSeq !== state.libraryRequestSeq) return;
+    if (typeof requestIdleCallback === "function") {
+      state.visibleMetadataPrefetchUsesIdle = true;
+      state.visibleMetadataPrefetchTimer = requestIdleCallback(() => { run().catch(() => {}); }, { timeout: 450 });
+    } else {
+      state.visibleMetadataPrefetchUsesIdle = false;
+      state.visibleMetadataPrefetchTimer = setTimeout(() => { run().catch(() => {}); }, 0);
+    }
+  };
+  state.visibleMetadataPrefetchUsesIdle = false;
+  state.visibleMetadataPrefetchTimer = setTimeout(queueIdleRun, 220);
+}
+function libraryLoadRequestKey(page = 1) {
+  return globalThis.fnAudioLibraryLoadKey.buildLibraryLoadKey(
+    state, page, currentCreatorName, isCreatorAllTracksView, currentQueryText,
+  );
+}
+function configuredLibraryRoots(status = state.libraryStatus) {
+  if (!Array.isArray(status?.library_paths)) return [];
+  return status.library_paths.filter(root => typeof root === "string" && root.trim());
+}
+function loadPagedLibrary(page = 1, refresh = false) {
+  const key = refresh ? "" : libraryLoadRequestKey(page);
+  if (key && state.libraryLoadKey === key && state.libraryLoadPromise) return state.libraryLoadPromise;
+  const promise = loadPagedLibraryWorker(page, refresh);
+  state.libraryLoadKey = key;
+  state.libraryLoadPromise = promise;
+  const clear = () => {
+    if (state.libraryLoadPromise === promise) {
+      state.libraryLoadKey = "";
+      state.libraryLoadPromise = null;
+    }
+  };
+  promise.then(clear, clear);
+  return promise;
+}
+// Controls that start their own library request. A second click on one of these
+// while a page is being replaced is not a conflicting action: the request sequence
+// and the abort controller already own the race, so it only has to reach its handler.
+const LIBRARY_NAVIGATION_SELECTOR = "[data-group-row],[data-folder-crumb-root],[data-folder-page-step],[data-group-back],[data-creator-root-back],[data-open-creator-all-tracks],[data-page-step]";
+function isLibraryNavigationTarget(target, list = $("trackList")) {
+  const node = target?.closest?.(LIBRARY_NAVIGATION_SELECTOR);
+  return Boolean(node && list?.contains?.(node));
+}
+function libraryInteractionBlockedFor(target, list = $("trackList")) {
+  if (!state.libraryInteractionBlocked) return false;
+  return !isLibraryNavigationTarget(target, list);
+}
+// The deadline, not the in-flight flag, is what parks the background lanes. The hold used
+// to be published only from the paged worker and AND-ed with that flag, so a folder click
+// that landed on a prefetched pair - which commits in the same frame and never enters that
+// worker - released every lane the instant it painted. Re-measured on the device with
+// 0.2.50: the first click of a session issued 12 /api/metadata/track calls inside the
+// 268 ms before the list committed, and 13-14 within the following 5 s, all of them
+// competing for the gateway's six HTTP/1.1 connections with the click the user was about
+// to make. A deadline is also the only thing a press can arm before its request leaves,
+// and it stays bounded, so no background lane can be starved by it.
+function armLibraryInteractionHold(nowMs = Date.now()) {
+  const until = nowMs + LIBRARY_INTERACTION_HOLD_MS;
+  state.libraryInteractionHoldUntil = Math.max(Number(state.libraryInteractionHoldUntil || 0), until);
+  return state.libraryInteractionHoldUntil;
+}
+function uiBackgroundWorkBlocked(nowMs = Date.now()) {
+  return nowMs <= Number(state.libraryInteractionHoldUntil || 0);
+}
+// A real device measured the pointerdown->pointerup hold of a deliberate folder
+// click at 137-139 ms, while one paged navigation costs ~116 ms of gateway round
+// trip. Running the control's own handler at press time therefore moves that
+// whole round trip inside the hold, so the page is committed by the time the
+// pointer lifts. Mouse and pen only: a touch scroll gesture also starts with
+// pointerdown. The click that follows must then be swallowed exactly once,
+// because the folder/page pager handlers advance a step per invocation and are
+// not idempotent.
+const NAVIGATION_SPECULATION_WINDOW_MS = 1500;
+function armLibraryNavigationSpeculation(node) {
+  state.libraryNavigationSpeculation = { node, at: Date.now() };
+}
+function clearLibraryNavigationSpeculation() {
+  state.libraryNavigationSpeculation = null;
+}
+function libraryNavigationSpeculationPending() {
+  const pending = state.libraryNavigationSpeculation;
+  if (!pending) return false;
+  if (Date.now() - Number(pending.at || 0) > NAVIGATION_SPECULATION_WINDOW_MS) {
+    clearLibraryNavigationSpeculation();
+    return false;
+  }
+  return true;
+}
+function speculateLibraryNavigation(event, list = $("trackList")) {
+  if (!event) return false;
+  if (event.pointerType !== "mouse" && event.pointerType !== "pen") return false;
+  if (event.button || event.isPrimary === false) return false;
+  if (libraryInteractionBlockedFor(event.target, list)) return false;
+  const node = event.target?.closest?.(LIBRARY_NAVIGATION_SELECTOR);
+  if (!node || !list?.contains?.(node)) return false;
+  if (typeof node.onclick !== "function") return false;
+  // Pressing a navigation control owns the connections for the round trip it is about to
+  // make even when the pair is already cached and the worker above never runs.
+  armLibraryInteractionHold();
+  // Reclaim what is already on the wire at pointerdown instead of waiting for the click
+  // to reach the worker: the outgoing page's row-metadata polls hold 1-6 of the gateway's
+  // six HTTP/1.1 connections for up to 8 s each, and the measured gap between a folder
+  // press and its own navigation request leaving was 69 ms of queueing behind exactly
+  // that stale work. Completed dedupe keys stay (cancelRearms false), so the parked lane
+  // does not re-ask for chrome the rows already have; the cover queue belongs to rows
+  // about to be replaced and recovers through the idle hydrate.
+  cancelVisibleMetadataPrefetch({ cancelRearms: false });
+  state.coverLoadScheduler?.stop?.();
+  armLibraryNavigationSpeculation(node);
+  try {
+    node.onclick(event);
+  } catch (_) {
+    clearLibraryNavigationSpeculation();
+    return false;
+  }
+  return true;
+}
+// A pressed control already ran, so its click may only be discarded when the
+// click itself lands on another navigation control (the list can be replaced
+// while the pointer is still down). A click on a track row is never swallowed.
+function isConsumedNavigationClick(event, list = $("trackList")) {
+  if (!libraryNavigationSpeculationPending()) return false;
+  clearLibraryNavigationSpeculation();
+  const node = event?.target?.closest?.(LIBRARY_NAVIGATION_SELECTOR);
+  return Boolean(node && list?.contains?.(node));
+}
+// A paged folder navigation costs 72-124 ms of gateway round trip for its pair of
+// requests on the real device, and press-time speculation can only hide that cost
+// inside the pointer hold (measured 139-150 ms). A pointer is on a control for far
+// longer than it is held, so dwelling on one now asks for exactly the pair the
+// click is going to issue: the press then finds those two keys already in the page
+// response cache and commits in the same frame without touching the network.
+const NAVIGATION_HOVER_DWELL_MS = 40;
+// One place builds the pair, so a speculative request can never drift from the
+// request the control is going to issue, which is the only reason the cache hits.
+function folderNavigationUrls(root, path, folderPage = 1, trackPage = 1, view = state.view) {
+  const folderParams = new URLSearchParams();
+  if (root) folderParams.set("root", root);
+  if (path) folderParams.set("parent", path);
+  if (currentQueryText()) folderParams.set("search", currentQueryText());
+  folderParams.set("dir", state.sortDir || "asc");
+  folderParams.set("paged", "1");
+  folderParams.set("limit", String(state.folderPageSize));
+  const folderContinuation = browseCursorForPage("folder", folderPage);
+  folderParams.set("offset", folderContinuation ? "0" : String(Math.max(0, (folderPage - 1) * state.folderPageSize)));
+  if (folderContinuation) folderParams.set("cursor", folderContinuation);
+  return [
+    `api/library/folders?${folderParams.toString()}`,
+    `api/library?${libraryQueryParamsFor(root, path, trackPage, view).toString()}`,
+  ];
+}
+function navigationHoverCandidate(event, list = $("trackList")) {
+  if (!event) return null;
+  if (event.pointerType !== "mouse" && event.pointerType !== "pen") return null;
+  // A held button is a drag or a selection gesture, not a hover.
+  if (event.buttons) return null;
+  const node = event.target?.closest?.(LIBRARY_NAVIGATION_SELECTOR);
+  if (!node || !list?.contains?.(node)) return null;
+  if (typeof node.onclick !== "function") return null;
+  return node;
+}
+// Only folder rows are prefetched: a row already declares the root and path its
+// click assigns, so its pair can be built without mutating anything. Album,
+// creator and pager controls still take the press path.
+function libraryNavigationPrefetchUrls(node) {
+  if (state.view !== "folders") return [];
+  if (String(node?.dataset?.groupType || "") !== "folder") return [];
+  const decode = value => { try { return decodeURIComponent(value || ""); } catch (error) { return value || ""; } };
+  const root = decode(node?.dataset?.groupRoot);
+  const path = decode(node?.dataset?.groupPath);
+  if (!root && !path) return [];
+  return folderNavigationUrls(root, path, 1, 1);
+}
+function cancelLibraryNavigationHoverDwell() {
+  if (state.libraryNavigationHoverTimer) clearTimeout(state.libraryNavigationHoverTimer);
+  state.libraryNavigationHoverTimer = 0;
+  state.libraryNavigationHoverNode = null;
+}
+// A request that already left is never retracted: the click adopts it through the
+// loader's in-flight dedupe, so aborting it here would reject the navigation the
+// user actually asked for. The lane is a bounded budget rather than one slot: on the
+// real device a pointer that rested 92 ms on the row it was leaving consumed a single
+// in-flight slot and the click it finally made on the next row still paid the whole
+// round trip. Refusing everything after the first pair therefore starved exactly the
+// hover this feature exists for, while an unbounded lane would put the R198 congestion
+// back. Three pairs per two seconds is the bound, and an in-flight pair only ever
+// suppresses its own URLs.
+const NAVIGATION_PREFETCH_WINDOW_MS = 2000;
+const NAVIGATION_PREFETCH_BUDGET = 3;
+function navigationPrefetchBudget(nowMs) {
+  const budget = state.libraryNavigationPrefetch;
+  if (budget && nowMs - Number(budget.windowStart || 0) <= NAVIGATION_PREFETCH_WINDOW_MS) return budget;
+  const fresh = { windowStart: nowMs, issued: 0, inFlight: new Set() };
+  state.libraryNavigationPrefetch = fresh;
+  return fresh;
+}
+function prefetchLibraryNavigation(node) {
+  const urls = libraryNavigationPrefetchUrls(node);
+  if (!urls.length) return false;
+  const budget = navigationPrefetchBudget(Date.now());
+  const waiting = urls.filter(url => !budget.inFlight.has(url)
+    && !Boolean(state.libraryResponseCache?.has?.(url)));
+  if (!waiting.length) return false;
+  if (budget.issued >= NAVIGATION_PREFETCH_BUDGET) return false;
+  budget.issued += 1;
+  waiting.forEach(url => budget.inFlight.add(url));
+  const release = url => () => budget.inFlight.delete(url);
+  waiting.forEach(url => {
+    let request = null;
+    try { request = fetchLibraryResponse(url, "", false, undefined); } catch (error) { request = null; }
+    Promise.resolve(request).then(release(url), release(url));
+  });
+  return true;
+}
+function armLibraryNavigationHover(event, list = $("trackList")) {
+  const node = navigationHoverCandidate(event, list);
+  if (!node) {
+    cancelLibraryNavigationHoverDwell();
+    return false;
+  }
+  // Continuing to move inside the same row must not restart the dwell window.
+  if (state.libraryNavigationHoverNode === node) return true;
+  cancelLibraryNavigationHoverDwell();
+  if (!libraryNavigationPrefetchUrls(node).length) return false;
+  // Rows of a page that is being replaced describe a list the user is about to
+  // leave, so hovering during a load may not spend the connections on them.
+  if (uiBackgroundWorkBlocked()) return false;
+  state.libraryNavigationHoverNode = node;
+  state.libraryNavigationHoverTimer = setTimeout(() => {
+    state.libraryNavigationHoverTimer = 0;
+    const dwelling = state.libraryNavigationHoverNode;
+    state.libraryNavigationHoverNode = null;
+    if (!dwelling || !isLibraryNavigationTarget(dwelling, list)) return;
+    prefetchLibraryNavigation(dwelling);
+  }, NAVIGATION_HOVER_DWELL_MS);
+  return true;
+}
+const FOLDER_ENTRY_PREFETCH_DELAY_MS = 40;
+function cancelFolderNavigationPrefetch() {
+  if (state.folderNavigationPrefetchTimer) clearTimeout(state.folderNavigationPrefetchTimer);
+  state.folderNavigationPrefetchTimer = 0;
+}
+function folderEntryRootUrl() {
+  const params = new URLSearchParams();
+  if (currentQueryText()) params.set("search", currentQueryText());
+  return `api/library/roots${params.toString() ? `?${params.toString()}` : ""}`;
+}
+function folderNavigationPrefetchKey() {
+  return JSON.stringify([
+    configuredLibraryRoots(), currentQueryText(), state.sortKey || "title", state.sortDir || "asc",
+    state.pageSize, state.folderPageSize,
+  ]);
+}
+function prefetchFolderNavigationEntry() {
+  if (state.view === "folders" || state.libraryStatus?.scanning === true || document.hidden === true) return false;
+  const key = folderNavigationPrefetchKey();
+  if (state.folderNavigationPrefetchKey === key) return false;
+  state.folderNavigationPrefetchKey = key;
+  cancelFolderNavigationPrefetch();
+  const resetAfterFailure = error => {
+    if (state.folderNavigationPrefetchKey === key) state.folderNavigationPrefetchKey = "";
+    throw error;
+  };
+  const prefetchPair = root => Promise.all(folderNavigationUrls(root, "", 1, 1, "folders")
+    .map(url => fetchLibraryResponse(url, "", false)));
+  const roots = configuredLibraryRoots();
+  const request = roots.length === 1
+    ? prefetchPair(roots[0])
+    : fetchLibraryResponse(folderEntryRootUrl(), "", false).then(data => {
+      const discovered = Array.isArray(data?.roots)
+        ? data.roots.map(row => String(row?.root || row?.path || "").trim()).filter(Boolean)
+        : [];
+      return discovered.length === 1 ? prefetchPair(discovered[0]) : data;
+    });
+  Promise.resolve(request).catch(resetAfterFailure).catch(() => {});
+  return true;
+}
+function scheduleFolderNavigationPrefetch() {
+  if (state.view === "folders" || state.libraryStatus?.scanning === true || document.hidden === true) return false;
+  cancelFolderNavigationPrefetch();
+  state.folderNavigationPrefetchTimer = setTimeout(() => {
+    state.folderNavigationPrefetchTimer = 0;
+    prefetchFolderNavigationEntry();
+  }, FOLDER_ENTRY_PREFETCH_DELAY_MS);
+  return true;
+}
+// Fire-and-forget UI entry points already render the bounded error state.
+// Consume their rejection while explicit awaiters retain failure propagation.
+function requestLibraryLoad(page = 1, refresh = false) {
+  // Defer invocation so failures while deriving the request key are handled
+  // by the same fire-and-forget boundary as asynchronous load failures.
+  return Promise.resolve().then(() => loadPagedLibrary(page, refresh)).catch(() => {});
+}
+async function loadPagedLibraryWorker(page = 1, refresh = false) {
+  const seq = ++state.libraryRequestSeq;
+  cancelReferencedItemHydrationSchedule();
+  cancelMetadataRowRender();
+  cancelVisibleMetadataPrefetch({ releaseKeys: true });
+  cancelLibraryNavigationHoverDwell();
+  // The outgoing page can still hold a cover queue of hundreds of images with four
+  // requests in flight. Those bytes belong to rows about to be replaced, so release
+  // the browser connections for the navigation the user actually asked for. A later
+  // hydrate starts a fresh generation, and the failed/aborted paths recover through the
+  // idle-scheduler check in needsVisibleTrackCoverHydration().
+  state.coverLoadScheduler?.stop?.();
+  armLibraryInteractionHold();
+  state.libraryInteractionBlocked = true;
+  if (state.libraryStatusTimer) {
+    clearTimeout(state.libraryStatusTimer);
+    state.libraryStatusTimer = 0;
+  }
+  if (state.accessProfileTimer) {
+    clearTimeout(state.accessProfileTimer);
+    state.accessProfileTimer = 0;
+  }
+  let retainedEmptySnapshot = false;
+  // Browsers can cancel the previous page request immediately. The native
+  // authenticated bridge also cancels its underlying OkHttp call; the
+  // sequence check remains necessary for responses that race cancellation.
+  if (state.libraryAbortController) state.libraryAbortController.abort();
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.libraryAbortController = controller;
+  const requestSignal = controller?.signal;
+  const releaseController = () => {
+    if (state.libraryAbortController === controller) state.libraryAbortController = null;
+  };
+  if (refresh) clearLibraryResponseCaches();
+  state.libraryLoading = true;
+  state.libraryLoadError = "";
+  updateLibraryStatusDecorations();
+  state.page = libraryPageNumber(page);
+  // When no bootstrap snapshot exists, hide only the static empty-state frame
+  // as soon as the authoritative request begins.  Calling the full render()
+  // here used to construct an empty list, schedule cover/layout work, and
+  // then immediately replace it with page one; on older WebViews that extra
+  // empty commit was visible as a list flash.  The final authoritative render
+  // below remains responsible for the complete page projection.
+  if (!hasVisibleLibraryPresentation()) {
+    const empty = $("empty");
+    if (empty) empty.hidden = true;
+    updateLibraryStatusDecorations();
+  }
+  if (refresh) {
+    state.libraryStatus = { ...(state.libraryStatus || {}), scanning: true, scanned: 0, found: state.pageItems.length };
+    // Do not repaint the whole page merely to expose scan progress.  A refresh
+    // often follows a user action while the current rows are still visible;
+    // repainting here used to make old WebViews briefly flash the list before
+    // the authoritative response arrived.  The status scheduler updates the
+    // small progress labels independently below.
+    updateLibraryStatusDecorations();
+  }
+  try {
+  if (state.view === "folders" && !state.folderRoot && !state.folderPath) {
+    const configuredRoots = configuredLibraryRoots();
+    // A single-root library is already identified by the status response. Avoid
+    // a serial /roots round trip before the folders + tracks pair; this is the
+    // cold category-entry path and every gateway request adds a fixed CGI cost.
+    if (configuredRoots.length === 1) {
+      const root = configuredRoots[0].trim();
+      const existing = (state.folderRootRows || []).find(row => String(row.root || row.path || "") === root);
+      state.folderRootRows = [existing || {
+        path: root,
+        root,
+        parent: "",
+        name: root.split(/[\\/]/).filter(Boolean).pop() || root,
+        track_count: libraryCount(state.libraryStatus?.count),
+        cover_track_id: "",
+      }];
+      state.folderRoot = root;
+      state.folderPath = "";
+      return loadPagedLibraryWorker(page, refresh);
+    }
+    const rootParams = new URLSearchParams();
+    if (currentQueryText()) rootParams.set("search", currentQueryText());
+    const data = await fetchLibraryResponse(
+      `api/library/roots${rootParams.toString() ? `?${rootParams.toString()}` : ""}`,
+      "读取音乐目录失败",
+      refresh,
+      requestSignal,
+    );
+    if (seq !== state.libraryRequestSeq) return;
+    state.folderRootRows = [...(data.roots || [])].sort((a, b) => displayText(a.name || a.path || "").localeCompare(displayText(b.name || b.path || ""), "zh-CN", { numeric: true, sensitivity: "base" }) * sortDirectionFactor());
+    if (state.folderRootRows.length === 1) {
+      state.folderRoot = state.folderRootRows[0].root || state.folderRootRows[0].path || "";
+      state.folderPath = "";
+      // This worker is itself owned by `state.libraryLoadPromise`. Re-entering
+      // the public deduplicating wrapper with the same key can return that
+      // very promise and create a self-referential await chain when a NAS has
+      // exactly one configured music root. Continue within the existing load
+      // chain instead; the nested worker gets a fresh request sequence and
+      // controller while callers still await the original public promise.
+      return loadPagedLibraryWorker(page, refresh);
+    }
+    state.pageItems = [];
+    state.items = [];
+    state.pageTotal = state.folderRootRows.length;
+  } else if (state.view === "folders" && (state.folderRoot || state.folderPath)) {
+    const [foldersUrl, tracksUrl] = folderNavigationUrls(
+      state.folderRoot, state.folderPath, state.folderPage, state.page,
+    );
+    const [folderData, data] = await Promise.all([
+      fetchLibraryResponse(foldersUrl, "读取文件夹失败", refresh, requestSignal),
+      fetchLibraryResponse(
+        `${tracksUrl}${refresh ? "&refresh=1" : ""}`,
+        "读取歌曲列表失败",
+        refresh,
+        requestSignal,
+      ),
+    ]);
+    if (seq !== state.libraryRequestSeq) return;
+    const folderRows = Array.isArray(folderData.folders) ? folderData.folders : [];
+    state.folderRows = fnAudioLibraryRenderPolicy.boundedRows(folderRows.filter(row => String(row.root || "") === String(state.folderRoot || "")));
+    state.folderTotal = libraryCount(folderData.count);
+    rememberBrowsePageCursor("folder", state.folderPage, folderData);
+    state.pageItems = mergeAuthoritativePageItems(fnAudioLibraryRenderPolicy.boundedRows(data.items));
+    state.items = state.pageItems;
+    state.pageTotal = libraryCount(data.count);
+    cacheLibraryItems(state.pageItems);
+  } else if (isPagedGroupListing()) {
+    const params = new URLSearchParams();
+    params.set("view", isCreatorView() && currentCreatorName() ? "albums" : state.view);
+    if (isCreatorView() && currentCreatorName()) {
+      params.set(state.view === "composers" ? "composer" : "artist", currentCreatorName());
+    }
+    params.set("search", currentQueryText());
+    params.set("paged", "1");
+    params.set("limit", String(state.pageSize));
+    const groupContinuation = browseCursorForPage("group", state.page);
+    params.set("offset", groupContinuation ? "0" : String(Math.max(0, (state.page - 1) * state.pageSize)));
+    if (groupContinuation) params.set("cursor", groupContinuation);
+    params.set("dir", state.sortDir || "asc");
+    const data = await fetchLibraryResponse(`api/library/groups?${params.toString()}`, "读取分类失败", refresh, requestSignal);
+    if (seq !== state.libraryRequestSeq) return;
+    state.groupRows = fnAudioLibraryRenderPolicy.boundedRows(data.groups);
+    state.groupRows.forEach(group => {
+      const name = displayText(group.name || "");
+      if (!name || (!group.artist && !group.release_date && !group.image_url)) return;
+      state.albumMetadata.set(name, {
+        artist: group.artist || "",
+        release_date: group.release_date || "",
+        image_url: group.image_url || "",
+        source: group.metadata_source || "",
+      });
+    });
+    state.pageItems = [];
+    state.items = [];
+    state.pageTotal = libraryCount(data.count);
+    rememberBrowsePageCursor("group", state.page, data);
+  } else if (isPagedLibraryView()) {
+    const params = currentQueryParams();
+    const continuation = cursorForLibraryPage(state.page);
+    if (continuation) {
+      // A cursor already positions the next page; avoid paying for an
+      // additional SQLite OFFSET traversal on deep sequential navigation.
+      params.set("cursor", continuation);
+      params.set("offset", "0");
+    }
+    if (refresh) params.set("refresh", "1");
+    const data = await fetchLibraryResponse(`api/library?${params.toString()}`, "读取歌曲列表失败", refresh, requestSignal);
+    if (seq !== state.libraryRequestSeq) return;
+    const retainSnapshot = shouldRetainSnapshotForEmptyResponse(data, refresh);
+    if (retainSnapshot) {
+      state.librarySnapshotEmptyGuardUsed = true;
+      retainedEmptySnapshot = true;
+      // Do not let the one-shot retry read the same transient empty payload
+      // from the session LRU again. The visible snapshot remains authoritative
+      // until the follow-up request gets a real page (or confirms empty).
+      state.libraryResponseCache.delete?.(`api/library?${params.toString()}`);
+    } else {
+      state.librarySnapshotEmptyGuardUsed = false;
+      const snapshotItems = state.pageItems;
+      const snapshotHit = state.librarySnapshot?.hit === true;
+      state.pageItems = mergeAuthoritativePageItems(fnAudioLibraryRenderPolicy.boundedRows(data.items));
+      // On a warm launch the restored page has already produced HTML and may
+      // have decoded its first covers. If the authoritative payload paints the
+      // exact same rows, transfer that bounded markup cache to the new array:
+      // renderTrackRows then returns the existing string and commitTrackListHtml
+      // does no template parsing, DOM reconciliation, cover scheduling, or
+      // layout work. Real metadata/cover/paging changes still take the normal
+      // keyed patch path below.
+      reuseSnapshotTrackMarkup(snapshotItems, state.pageItems, snapshotHit);
+      state.items = state.pageItems;
+      state.pageTotal = libraryCount(data.count);
+      cacheLibraryItems(state.pageItems);
+      rememberLibraryPageCursor(state.page, data);
+    }
+  } else {
+    const data = await fetchLibraryResponse(
+      `api/library?paged=1&limit=${state.pageSize}&offset=0${refresh ? "&refresh=1" : ""}`,
+      "读取歌曲列表失败",
+      refresh,
+      requestSignal,
+    );
+    if (seq !== state.libraryRequestSeq) return;
+    state.pageItems = mergeAuthoritativePageItems(fnAudioLibraryRenderPolicy.boundedRows(data.items));
+    state.items = state.pageItems;
+    state.pageTotal = libraryCount(data.count);
+    cacheLibraryItems(state.pageItems);
+  }
+  // Check request ownership before mutating shared loading/size state. An
+  // obsolete response must be completely inert; otherwise a fast view/search
+  // switch can clear the new request's loading guard and flash the empty pane.
+  if (seq !== state.libraryRequestSeq) return;
+  if (!retainedEmptySnapshot) {
+    // Once an authoritative page has arrived, the bootstrap snapshot is no
+    // longer evidence for empty-response protection. Keeping hit=true here
+    // could make a later genuine empty library response retain stale rows.
+    state.librarySnapshot = {
+      hit: false,
+      stale: false,
+      savedAt: Number(state.librarySnapshot?.savedAt || 0),
+    };
+  }
+  state.libraryPageKey = isPagedTrackListing() ? libraryLoadRequestKey(state.page) : "";
+  state.libraryLoading = false;
+  state.libraryLoaded = state.pageItems.length;
+  state.libraryInteractionBlocked = false;
+  state.libraryTotal = state.pageTotal;
+  render();
+  // When playback state was restored before this page arrived, kick off the
+  // priority lane now instead of waiting for a subsequent play/lyrics action.
+  // This is intentionally after the authoritative list commit so metadata
+  // requests cannot delay first paint or cause a placeholder repaint.
+  const restoredCurrent = currentItem();
+  const restoredNeedsMetadata = restoredCurrent?.id
+    && globalThis.fnAudioVisibleMetadataPrefetchPolicy?.needsMetadata?.(restoredCurrent) === true;
+  if (restoredNeedsMetadata) {
+    prefetchCurrentTrackMetadata(restoredCurrent);
+  }
+  scheduleReferencedItemHydration(seq);
+  scheduleVisibleMetadataPrefetch(state.pageItems, seq);
+  if (retainedEmptySnapshot) {
+    const retryKey = libraryLoadRequestKey(state.page);
+    setTimeout(() => {
+      if (
+        seq === state.libraryRequestSeq
+        && state.librarySnapshotEmptyGuardUsed
+        && isPagedLibraryView()
+        && libraryLoadRequestKey(state.page) === retryKey
+      ) requestLibraryLoad(state.page, false);
+    }, 250);
+  }
+  scheduleLibraryPageSnapshot(state.page);
+  // Status is useful for counters and scan progress, but it must never hold
+  // back first paint of an already-indexed page. The scheduler refreshes it
+  // periodically; update it opportunistically without re-rendering rows.
+  // The status endpoint may perform a library scan/count aggregation. Defer
+  // it by one short turn so it cannot compete with the first page's JSON
+  // parse, layout and cover decoding on large libraries/older WebViews.
+  state.libraryStatusTimer = setTimeout(() => {
+    state.libraryStatusTimer = 0;
+    if (seq !== state.libraryRequestSeq) return;
+    // Reuse the shared status request boundary so the first post-paint probe
+    // cannot race the scanning scheduler into duplicate SQLite aggregation.
+    refreshLibraryStatus(refresh);
+  }, 120);
+  // The access profile only changes a small mode badge. Defer it until after
+  // the first page/status work has had a chance to paint, so a cold WebView
+  // does not contend with the initial song JSON and cover requests.
+  state.accessProfileTimer = setTimeout(() => {
+    state.accessProfileTimer = 0;
+    if (seq !== state.libraryRequestSeq) return;
+    state.accessProfileLoader?.load().then(data => {
+      if (!data || seq !== state.libraryRequestSeq) return;
+      if (data.profile) {
+        state.accessProfile = data.profile;
+        updateModeButton();
+      }
+    }).catch(() => {});
+  }, 320);
+  } catch (error) {
+    if (seq !== state.libraryRequestSeq) return;
+    if (error?.name === "AbortError" && error?.code !== "RESPONSE_BODY_TIMEOUT") {
+      state.libraryInteractionBlocked = false;
+      return;
+    }
+    state.libraryLoading = false;
+    state.libraryInteractionBlocked = false;
+    state.libraryLoadError = String(error?.message || error || "音乐库加载失败");
+    state.libraryStatus = {
+      ...(state.libraryStatus || {}),
+      scanning: false,
+      error: String(error?.message || error || "音乐库加载失败"),
+    };
+    render();
+    throw error;
+  } finally {
+    releaseController();
+  }
+}
+async function fetchAllTracksForCurrentView(extra = {}, querySnapshot = null) {
+  const pageSize = Math.max(1, Math.min(500, (querySnapshot ? querySnapshot.pageSize : state.pageSize) || 120));
+  // Group workers may start after navigation. Share the operation's query
+  // snapshot; direct callers capture their current query when invoked.
+  const baseQueryParams = querySnapshot ? new URLSearchParams(querySnapshot.params) : currentQueryParams();
+  const pageItemsOf = data => Array.isArray(data?.items) ? data.items : [];
+  const canReuseCurrentPage = !querySnapshot && state.page === 1
+    && isPagedTrackListing()
+    && state.view !== "random100"
+    && state.libraryPageKey === libraryLoadRequestKey(1)
+    && !Object.keys(extra || {}).some(key => extra[key] !== undefined && extra[key] !== null && String(extra[key]) !== "")
+    && Array.isArray(state.pageItems)
+    && state.pageItems.length > 0
+    && state.pageItems.length <= pageSize
+    && !state.libraryLoading;
+  async function fetchPage(offset) {
+    const params = new URLSearchParams(baseQueryParams.toString());
+    params.set("limit", String(pageSize));
+    params.set("offset", String(offset));
+    Object.entries(extra || {}).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && String(value) !== "") params.set(key, String(value));
+    });
+    // Reuse the same bounded response cache as normal pagination.  In the
+    // common "play all" path page 1 has just rendered, so requesting offset
+    // zero again only repeats JSON parsing and a SQLite read on large
+    // libraries.  Cache invalidation remains centralized in refresh, scans
+    // and library mutations.
+    return fetchLibraryResponse(`api/library?${params.toString()}`, "读取完整歌曲列表失败");
+  }
+  const firstPage = canReuseCurrentPage
+    ? { items: state.pageItems, count: state.pageTotal }
+    : await fetchPage(0);
+  const firstItems = pageItemsOf(firstPage);
+  cacheLibraryItems(firstItems);
+  const total = fnAudioLibraryFullListPolicy.boundedCount(firstPage?.count);
+  if (!firstItems.length || firstItems.length >= total) return firstItems;
+  let merged = fnAudioLibraryPageMerge.mergePagedItems(firstItems, [], total);
+  for (const offsets of fnAudioLibraryPagePlan.pageOffsetBatches(total, pageSize, firstItems.length, 200000, 32)) {
+    const pool = fnAudioBatchRequestPool(offsets, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY, fetchPage);
+    let complete = false;
+    try {
+      for (let index = 0; index < offsets.length; index += 1) {
+        const data = await pool.get(index);
+        const pageItems = pageItemsOf(data);
+        cacheLibraryItems(pageItems, false);
+        merged = fnAudioLibraryPageMerge.appendPageItems(merged, pageItems, total);
+        if (fnAudioLibraryFullListPolicy.shouldStopMerge(merged.length, total, pageItems.length)) {
+          complete = true;
+          break;
+        }
+      }
+    } finally {
+      // Release queued work on errors as well as an early complete result.
+      // Active requests retain their slots until they settle naturally.
+      pool.cancel("library batch finished");
+    }
+    if (complete) {
+      break;
+    }
+  }
+  state.itemCache.trim(new Set((state.queue || []).map(item => String(item?.id || "")).filter(Boolean)));
+  return merged;
+}
+async function hydrateReferencedItems() {
+  const ids = new Set();
+  state.queue.forEach(item => item?.id && ids.add(String(item.id)));
+  if (state.view === "favorites") {
+    state.favorites.forEach(id => ids.add(String(id)));
+  } else if (isPlaylistView()) {
+    (currentPlaylist()?.trackIds || []).forEach(id => ids.add(String(id)));
+  }
+  hydrateReferencedIds([...ids]);
+}
+function hydrateReferencedIds(ids = []) {
+  const normalizedIds = fnAudioItemHydrationPolicy.normalizeItemIds(ids);
+  const requestedView = state.view;
+  // render() calls clientPagedResult() again after each hydrated batch. Do not
+  // cancel the same pool from inside that render: it causes a large favorites
+  // or playlist page to repeatedly restart its requests and briefly redraw.
+  if (state.itemHydrationPool && globalThis.fnAudioItemHydrationRequest?.matches(state.itemHydrationRequest, requestedView, normalizedIds)) return;
+  if (state.itemHydrationPool?.cancel) state.itemHydrationPool.cancel("stale item hydration");
+  // A cancelled generation must also release its coalesced frame. Otherwise
+  // the old callback can consume the only render slot after a fast view
+  // switch, leaving the new page hydrated in memory but visually stale.
+  if (state.itemHydrationRenderTimer) {
+    if (typeof cancelAnimationFrame === "function") {
+      try { cancelAnimationFrame(state.itemHydrationRenderTimer); } catch (_) {}
+    } else clearTimeout(state.itemHydrationRenderTimer);
+    state.itemHydrationRenderTimer = 0;
+  }
+  // Cancellation rejects queued batches asynchronously. Release ownership
+  // synchronously so a new view can re-request the same IDs immediately;
+  // generation checks below prevent the old worker from touching new state.
+  state.hydratingIds.clear();
+  const generation = ++state.itemHydrationGeneration;
+  const missing = normalizedIds.filter(id => !state.itemCache.has(id) && !state.unresolvedItemIds.has(id));
+  if (!missing.length) {
+    state.itemHydrationPool = null;
+    state.itemHydrationRequest = null;
+    return;
+  }
+  missing.forEach(id => state.hydratingIds.add(id));
+  const batches = fnAudioItemHydrationPolicy.batchesForItemIds(missing);
+  const pool = fnAudioBatchRequestPool(batches, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY,
+    batch => fetchLibraryItemsByIds(batch));
+  state.itemHydrationPool = pool;
+  state.itemHydrationRequest = globalThis.fnAudioItemHydrationRequest?.create(requestedView, normalizedIds) || null;
+  (async () => {
+    const scheduleHydrationRender = () => {
+      if (state.itemHydrationRenderTimer || state.view !== requestedView || !isClientPagedView(requestedView)) return;
+      const flush = () => {
+        state.itemHydrationRenderTimer = 0;
+        if (state.itemHydrationGeneration !== generation) return;
+        if (state.view === requestedView && isClientPagedView(requestedView)) render();
+      };
+      state.itemHydrationRenderTimer = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(flush)
+        : setTimeout(flush, 0);
+    };
+    let changed = false;
+    let renderedFirstBatch = false;
+    let needsFinalRender = false;
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      const batch = batches[batchIndex];
+      try {
+        const items = await pool.get(batchIndex);
+        if (state.itemHydrationGeneration !== generation || state.itemHydrationPool !== pool) return;
+        const found = new Set(items.map(item => String(item.id || "")));
+        cacheLibraryItems(items, false);
+        const batchChanged = items.length > 0;
+        changed = changed || batchChanged;
+        batch.forEach(id => {
+          state.hydratingIds.delete(id);
+          if (!found.has(id)) {
+            if (typeof state.unresolvedItemIds?.remember === "function") state.unresolvedItemIds.remember(id);
+            else state.unresolvedItemIds?.add?.(id);
+          }
+        });
+        // Contract retained for static regression: if (!renderedFirstBatch && batchChanged && state.view === requestedView && isClientPagedView(requestedView))
+        if (!renderedFirstBatch && batchChanged && state.view === requestedView && isClientPagedView(requestedView)) {
+          renderedFirstBatch = true;
+          scheduleHydrationRender();
+        } else if (renderedFirstBatch && batchChanged) {
+          needsFinalRender = true;
+          scheduleHydrationRender();
+        }
+      } catch (error) {
+        if (state.itemHydrationGeneration === generation && state.itemHydrationPool === pool) {
+          batch.forEach(id => state.hydratingIds.delete(id));
+        }
+      }
+    }
+    if (state.itemHydrationGeneration !== generation || state.itemHydrationPool !== pool) return;
+    state.itemCache.trim(new Set((state.queue || []).map(item => String(item?.id || "")).filter(Boolean)));
+    if (state.itemHydrationPool === pool) {
+      state.itemHydrationPool = null;
+      state.itemHydrationRequest = null;
+    }
+    // Contract retained for static regression: if (needsFinalRender && changed && state.view === requestedView && isClientPagedView(requestedView)) render();
+    if (needsFinalRender && changed && state.view === requestedView && isClientPagedView(requestedView)) scheduleHydrationRender();
+  })();
+}
+function stableDeviceTargets(targets = []) {
+  return fnAudioDeviceTargetPresentation.stableTargets(targets, displayText);
+}
+function resolvedDeviceTarget(targets, reportedTarget) {
+  return globalThis.fnAudioPlaybackTargetPolicy.resolvePublished(targets, reportedTarget) || "local";
+}
+function sameDeviceTarget(left, right) {
+  return globalThis.fnAudioPlaybackTargetPolicy.sameDevice(left, right);
+}
+async function recoverUnavailablePlaybackTarget(notify = false, expectedTarget = "") {
+  if (expectedTarget && String(state.playTarget || "") !== String(expectedTarget)) return false;
+  try {
+    const response = await apiFetch("api/playback/target", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({target_id: "local"}),
+    });
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) return false;
+    if (expectedTarget && String(state.playTarget || "") !== String(expectedTarget)) return false;
+    if (state.deviceSwitchInFlight) return false;
+    if (userStateRevision(data.revision, -1) >= 0) state.userStateRevision = userStateRevision(data.revision);
+  } catch (error) {
+    return false;
+  }
+  stopRemoteEventStream();
+  state.playTarget = "local";
+  state.playTargetName = "当前设备";
+  state.remoteStatus = null;
+  state.remoteStateVersion = 0;
+  state.remoteLoadedKey = "";
+  state.deviceTargetsSignature = "";
+  nativeRemoteExit();
+  updateDeviceLabel();
+  render();
+  scheduleUserStateSave();
+  if (notify) alert("原播放设备已离线，已切换到当前设备。请再次点击播放。");
+  return false;
+}
+async function validateRestoredPlaybackTarget() {
+  if (!isRemoteTarget()) return true;
+  const restoredTarget = String(state.playTarget || "");
+  let receivedTargets = false;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    try {
+      // Target discovery can wait for a network scan. It must not leave the
+      // initial user-state recovery pending forever when the service or proxy
+      // is half-open; a later device refresh will reconcile the target.
+      const request = fetch(`api/playback/targets${attempt === 0 ? "?refresh=1" : ""}`, {
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const result = await globalThis.fnAudioResponseJsonLoader.read({
+        request,
+        timeoutMs: 6000,
+        onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+        fallback: {},
+      });
+      const response = result.response;
+      // A saved remote target is only disproved by a device list this browser could
+      // actually read. Answering from the fallback here would POST a still-playing
+      // cast back to this device, so an unreadable body stays "no information".
+      if (!response.ok || !globalThis.fnAudioResponseJsonLoader.parsedBody(result.bodyStatus)) return true;
+      const data = result.data || {};
+      receivedTargets = true;
+      const rows = Array.isArray(data.targets) ? data.targets : [];
+      // A restored session can carry the output registry key ("mpd") that the
+      // device list publishes under its stable id ("mpd:<stable id>"). Without
+      // this the reload reported the very DAC that is still active as offline,
+      // posted the target back to "local" and silenced the paused device.
+      const published = globalThis.fnAudioPlaybackTargetPolicy.resolvePublished(rows, restoredTarget);
+      const target = published
+        ? rows.find(candidate => String(candidate?.id || "") === published)
+        : null;
+      if (target && (target.online === undefined || target.online === true)) {
+        state.playTargetName = displayText(target.name || "播放设备");
+        updateDeviceLabel();
+        return true;
+      }
+      if (data.refreshing !== true) break;
+      await new Promise(resolve => setTimeout(resolve, 750));
+    } catch (error) {
+      return true;
+    } finally {}
+  }
+  return receivedTargets ? recoverUnavailablePlaybackTarget(false, restoredTarget) : true;
+}
+// One row = icon, name/capabilities, state + one radio.  The old row used a 3px
+// left bar AND a tick to mean "current", printed no offline word, and repeated
+// the group title inside the row (R494).
+const DEVICE_TARGET_ICONS = {
+  host: '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.4"/><path d="M10.4 18.4h3.2"/></svg>',
+  dac: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 14.2v-2a8 8 0 0 1 16 0v2"/><rect x="2.6" y="13.2" width="4.8" height="6.8" rx="2"/><rect x="16.6" y="13.2" width="4.8" height="6.8" rx="2"/></svg>',
+  network: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9.4a13 13 0 0 1 18 0"/><path d="M6.4 12.9a8.6 8.6 0 0 1 11.2 0"/><path d="M9.7 16.3a4 4 0 0 1 4.6 0"/><circle cx="12" cy="19.2" r="1.2" fill="currentColor" stroke="none"/></svg>',
+};
+function deviceTargetGroupKey(target) {
+  if (target.id === "local") return "host";
+  return target.kind === "dlna_push" ? "network" : "host";
+}
+function deviceTargetKindLabel(target) {
+  if (target.id === "local") return "浏览器播放";
+  return target.kind === "dlna_push" ? "UPnP / DLNA" : "USB DAC";
+}
+function deviceTargetIsOnline(target) {
+  return target.online === true || target.online === undefined;
+}
+function deviceTargetStatusText(target, isCurrent) {
+  if (!deviceTargetIsOnline(target)) return "离线";
+  return isCurrent ? "正在播放" : "可用";
+}
+function deviceTargetDetail(target) {
+  const message = displayText(target.message || "");
+  const caps = target.caps ? dacCapsText(target.caps) : "";
+  const kind = deviceTargetKindLabel(target);
+  if (message) return message;
+  return caps ? `${kind} · ${caps}` : kind;
+}
+function renderDeviceTargets(targets, currentTarget) {
+  targets = globalThis.fnAudioDeviceTargetPresentation.projectTargets(targets);
+  const signature = JSON.stringify({
+    currentTarget,
+    query: state.deviceSearchQuery || "",
+    targets: targets.map(target => ({
+      id: target.id,
+      name: displayText(target.name || ""),
+      kind: target.kind || "",
+      online: deviceTargetIsOnline(target),
+      detail: deviceTargetDetail(target),
+      selected: target.selected === true,
+    })),
+  });
+  state.deviceTargetsRendered = targets;
+  if (signature === state.deviceTargetsSignature) return;
+  state.deviceTargetsSignature = signature;
+  const current = targets.find(target => target.id === currentTarget);
+  const currentName = displayText(current?.name || (currentTarget === "local" ? "这台设备" : state.playTargetName || "播放设备"));
+  // The name carries the accent so the answer is readable without scanning rows.
+  $("deviceCurrentTarget").innerHTML = `正在通过 <b>${escapeHtml(currentName)}</b> 播放`;
+  const searchWrap = $("deviceSearchWrap");
+  if (searchWrap) searchWrap.hidden = targets.length <= 8;
+  const query = displayText(state.deviceSearchQuery || "").trim().toLowerCase();
+  const visible = query
+    ? targets.filter(target => `${displayText(target.name || "")} ${deviceTargetDetail(target)}`.toLowerCase().includes(query))
+    : targets;
+  const rows = new Map(visible.map(target => {
+    const isCurrent = target.id === currentTarget;
+    const online = deviceTargetIsOnline(target);
+    const group = deviceTargetGroupKey(target);
+    const detail = deviceTargetDetail(target);
+    const status = deviceTargetStatusText(target, isCurrent);
+    return [String(target.id), `<button type="button" class="device-row${isCurrent ? " is-current" : ""}${online ? "" : " is-offline"}" data-target="${escapeHtml(target.id)}" data-target-name="${escapeHtml(displayText(target.name || "播放设备"))}" aria-pressed="${isCurrent}"${online ? "" : " disabled"}><span class="device-row-icon is-${group}" aria-hidden="true">${DEVICE_TARGET_ICONS[group]}</span><span class="device-row-text"><strong>${escapeHtml(displayText(target.name || "播放设备"))}</strong><small>${escapeHtml(detail)}</small></span><span class="device-row-state"><span class="device-row-status">${status}</span><span class="device-row-radio" aria-hidden="true">${isCurrent ? '<svg aria-hidden="true" viewBox="0 0 16 16"><path d="m3 8 3.2 3.2L13 4.5"/></svg>' : ""}</span></span></button>`];
+  }));
+  const groups = [
+    { key: "host", title: "本机与 USB" },
+    { key: "network", title: "网络播放器 · DLNA / UPnP" },
+  ];
+  const groupedRows = groups.map(group => {
+    const items = visible.filter(target => deviceTargetGroupKey(target) === group.key);
+    if (!items.length) return "";
+    return `<section class="device-section"><h3>${group.title}</h3>${items.map(target => rows.get(String(target.id))).join("")}</section>`;
+  }).join("");
+  $("deviceList").innerHTML = groupedRows
+    || `<p class="dialog-help">${query ? "没有匹配的设备，换个关键词试试。" : "没有找到可用的播放目标。"}</p>`;
+  document.querySelectorAll("[data-target]").forEach(button => {
+    button.onclick = () => selectPlaybackTarget(button.dataset.target, button.dataset.targetName || "当前设备");
+  });
+}
+function markCurrentDeviceTarget(targetId, switching = false) {
+  document.querySelectorAll("[data-target]").forEach(button => {
+    const isCurrent = sameDeviceTarget(button.dataset.target, targetId);
+    button.classList.toggle("is-current", isCurrent);
+    button.classList.toggle("is-switching", switching && isCurrent);
+    button.setAttribute("aria-pressed", String(isCurrent));
+    button.disabled = switching || button.classList.contains("is-offline");
+    const radio = button.querySelector(".device-row-radio");
+    if (radio) radio.innerHTML = isCurrent ? '<svg aria-hidden="true" viewBox="0 0 16 16"><path d="m3 8 3.2 3.2L13 4.5"/></svg>' : "";
+    const status = button.querySelector(".device-row-status");
+    if (status && !button.classList.contains("is-offline")) status.textContent = isCurrent ? "正在播放" : "可用";
+  });
+}
+function scheduleDeviceRefresh() {
+  clearTimeout(state.deviceRefreshTimer);
+  state.deviceRefreshTimer = setTimeout(() => {
+    if ($("deviceDialog").open) loadDevices();
+  }, 3000);
+}
+async function loadDevices(forceRefresh = false) {
+  if (state.deviceLoadInFlight && !forceRefresh) return;
+  if (state.deviceLoadInFlight) cancelDeviceLoad();
+  const list = $("deviceList");
+  const targetRevision = state.deviceTargetRevision;
+  if (!list.childElementCount) list.innerHTML = `<p class="dialog-help">正在搜索播放设备...</p>`;
+  const token = ++state.deviceLoadRequestToken;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.deviceLoadInFlight = true;
+  state.deviceLoadController = controller;
+  try {
+    const request = fetch(`api/playback/targets${forceRefresh ? "?refresh=1" : ""}`, {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    const data = result.data || {};
+    if (token !== state.deviceLoadRequestToken || state.deviceLoadController !== controller
+      || targetRevision !== state.deviceTargetRevision || state.deviceSwitchInFlight) return;
+    if (!response.ok) throw new Error(data.message || "设备列表读取失败");
+    // The same answer always carries a JSON document, so a body this browser could
+    // not parse is a transport failure, not an empty room: reading `{}` as "no
+    // devices" would hand the active cast back to this machine and clear the panel.
+    if (!globalThis.fnAudioResponseJsonLoader.parsedBody(result.bodyStatus)) throw new Error("设备列表读取失败");
+    const targets = stableDeviceTargets(data.targets || []);
+    const reportedTarget = data.current_target || state.playTarget || "local";
+    // "mpd" and "mpd:<stable id>" are one output; only a device that is really
+    // absent counts as unavailable.
+    const targetUnavailable = !globalThis.fnAudioPlaybackTargetPolicy.resolvePublished(targets, reportedTarget);
+    if (targetUnavailable && data.refreshing === true) {
+      if ($("deviceDialog").open) scheduleDeviceRefresh();
+      return;
+    }
+    const currentTarget = resolvedDeviceTarget(targets, reportedTarget);
+    const previousTarget = state.playTarget;
+    // The two spellings name the same DAC, so a rewrite of one into the other
+    // is not a device switch: no teardown, no re-subscribe, no refresh loop.
+    const sameTarget = sameDeviceTarget(previousTarget, currentTarget);
+    if (targetRevision > 0 && currentTarget !== previousTarget && !sameTarget) {
+      if ($("deviceDialog").open) scheduleDeviceRefresh();
+      return;
+    }
+    if (targetUnavailable && reportedTarget !== "local") {
+      await recoverUnavailablePlaybackTarget(false, reportedTarget);
+      // Recovery performs its own network write and can overlap a user
+      // selection or a forced device refresh. Do not let this older request
+      // repaint or overwrite state after ownership has moved on.
+      if (token !== state.deviceLoadRequestToken || state.deviceLoadController !== controller
+        || targetRevision !== state.deviceTargetRevision || state.deviceSwitchInFlight) return;
+    }
+    // Keep the spelling this session already uses when both name one device.
+    // Adopting the published id here would make the next control command look
+    // like a target change to the core, which closes and rewinds the output.
+    state.playTarget = sameTarget ? previousTarget : currentTarget;
+    state.playTargetName = currentTarget === "local" ? "当前设备" : (data.current_target_name || state.playTargetName);
+    if (!sameTarget && previousTarget !== currentTarget) {
+      stopRemoteEventStream();
+      if (isRemoteTarget()) {
+        // The server or another controller already moved the audible output away from
+        // this browser, so the same D-1 teardown applies: from here on nothing can
+        // reach the local element through its own controls any more.
+        if (localIsPlayingNow()) stopLocalAudio();
+        startRemoteEventStream();
+      }
+    }
+    state.devices = targets.filter(target => target.id !== "local");
+    renderDeviceTargets(targets, currentTarget);
+    const scanButton = $("scanDevices");
+    const refreshing = data.refreshing === true;
+    const available = Math.max(0, targets.length - 1);
+    scanButton.disabled = refreshing;
+    scanButton.textContent = refreshing ? "更新中…" : "重新扫描";
+    const status = $("deviceRefreshStatus");
+    if (status) {
+      status.classList.toggle("is-busy", refreshing);
+      // The server keeps this cache warm now, so a refresh that is running was
+      // already running before the dialog opened and the list below is populated:
+      // the user is not waiting for it.  "正在扫描局域网" read as a cold start on
+      // every open (reported 2026-11-11), which is exactly what this no longer is.
+      status.textContent = refreshing
+        ? `后台更新中 · ${available} 台可用`
+        : `上次更新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · ${available} 台可用`;
+    }
+    if (refreshing && $("deviceDialog").open) scheduleDeviceRefresh();
+  } catch (error) {
+    if (token === state.deviceLoadRequestToken && state.deviceLoadController === controller
+      && !state.deviceTargetsSignature && error?.name !== "AbortError") {
+      list.innerHTML = `<p class="dialog-help">设备列表读取失败，请重试。</p>`;
+    }
+  } finally {
+    if (token === state.deviceLoadRequestToken && state.deviceLoadController === controller) {
+      state.deviceLoadInFlight = false;
+      state.deviceLoadController = null;
+    }
+  }
+}
+function cancelDeviceLoad() {
+  state.deviceLoadRequestToken += 1;
+  try { state.deviceLoadController?.abort(); } catch (_) {}
+  state.deviceLoadController = null;
+  state.deviceLoadInFlight = false;
+}
+
+async function getTrimSdk() {
+  if (window.fnaudioTrimSdk) return window.fnaudioTrimSdk;
+  if (!window.fnaudioTrimSdkLoading) {
+    window.fnaudioTrimSdkLoading = (async () => {
+      try {
+        const module = await import("./vendor/trim-web-app.js");
+        const TrimApp = module.TrimApp || module.default;
+        if (TrimApp) window.fnaudioTrimSdk = new TrimApp();
+      } catch (error) {
+      }
+      return window.fnaudioTrimSdk || null;
+    })().finally(() => { window.fnaudioTrimSdkLoading = null; });
+  }
+  return window.fnaudioTrimSdkLoading;
+}
+function fnAppVersion() {
+  const match = String(navigator.userAgent || "").match(/FNAppVer\/([0-9.]+)/i);
+  return match ? match[1] : "";
+}
+async function saveLibraryPathsFromDialog(statusText = "已保存。需要更新时请点击刷新音乐库。") {
+  const status = $("librarySettingsStatus");
+  const paths = collectLibraryPaths();
+  if (!paths.length) {
+    if (status) status.textContent = "请先选择音乐目录";
+    return false;
+  }
+  // Refuse to write before the existing roots have been read.  When the status
+  // request failed the pane renders an empty list, so saving whatever was just
+  // picked would silently replace every configured directory with that one —
+  // exactly what "目录全部丢失，重新添加也只能添加一个" looked like on 2026-11-11.
+  if (!Array.isArray(state.libraryStatus?.library_paths)) {
+    if (status) status.textContent = "还没有读取到已配置的目录，请刷新页面后再保存，避免覆盖原有目录";
+    return false;
+  }
+  const response = await apiFetch("api/config/library", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ library_path: paths.join("\n") }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) {
+    if (status) status.textContent = data.message || "保存设置失败";
+    return false;
+  }
+  state.libraryStatus = data.status || state.libraryStatus;
+  if (status) status.textContent = statusText;
+  render();
+  return true;
+}
+
+async function openFolderBrowser(path = "") {
+  ensurePlaybackSettingsControls();
+  resetSettingsDirty();
+  $("folderDialog").showModal();
+  ensureSettingsStatusNodes();
+  setSettingsTab("library");
+  renderLibraryPathInputs(state.libraryStatus?.library_paths || []);
+  ["librarySettingsStatus", "runtimeSettingsStatus", "metadataOverviewSettingsStatus", "metadataTagSettingsStatus", "playbackSettingsStatus"].forEach(id => {
+    const node = $(id);
+    if (node) node.textContent = "";
+  });
+  settingsSetStatus($("settingsSaveStatus"), "");
+  // The phone layout always opens on the rail, never on the group that was
+  // last visited on the desktop.
+  const shell = settingsShell();
+  if (shell) shell.classList.remove("is-detail");
+  updateSettingsSummaries();
+}
+function ensureSettingsStatusNodes() {
+  const entries = [
+    ["library", "librarySettingsStatus"],
+    ["playback", "playbackSettingsStatus"],
+    ["runtime", "runtimeSettingsStatus"],
+    ["metadata", "metadataOverviewSettingsStatus", "overview"],
+    ["metadata", "metadataTagSettingsStatus", "tags"],
+  ];
+  entries.forEach(([paneName, id, subpaneName]) => {
+    if ($(id)) return;
+    const pane = document.querySelector(subpaneName
+      ? `[data-metadata-settings-pane="${subpaneName}"]`
+      : `[data-settings-pane="${paneName}"]`);
+    if (!pane) return;
+    const status = document.createElement("p");
+    status.className = "settings-pane-status";
+    status.id = id;
+    status.setAttribute("aria-live", "polite");
+    pane.appendChild(status);
+  });
+}
+function setSettingsTab(name = "library") {
+  state.settingsTab = name;
+  const tabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
+  tabs.forEach(button => {
+    const active = button.dataset.settingsTab === name;
+    if (!button.id) button.id = `settings-tab-${button.dataset.settingsTab}`;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll("[data-settings-pane]").forEach(pane => {
+    const active = pane.dataset.settingsPane === name;
+    pane.hidden = !active;
+    pane.classList.toggle("active", active);
+  });
+  // The rail swaps panes in place, so the new pane must start at its own top
+  // instead of inheriting the scroll offset of the one that was just hidden.
+  const activePane = document.querySelector(`[data-settings-pane="${name}"]`);
+  if (activePane) activePane.scrollTop = 0;
+  if (name === "metadata") {
+    ensureMetadataSettingsOverview();
+    updateMetadataSettingsOverview();
+    loadMetadataStatus();
+  }
+  if (name === "playback") loadPlaybackSettings();
+  if (name === "network" || name === "advanced") loadRuntimeSettings();
+  updateSettingsSummaries();
+  updateSettingsDirtyUi();
+}
+function settingsTabIndexForKey(key, currentIndex, count) {
+  if (!Number.isInteger(currentIndex) || !Number.isInteger(count) || count <= 0) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return (currentIndex + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (currentIndex + count - 1) % count;
+  return -1;
+}
+function bindSettingsTabs() {
+  document.querySelectorAll("[data-settings-tab]").forEach(button => {
+    button.onclick = () => {
+      setSettingsTab(button.dataset.settingsTab);
+      openSettingsDetail();
+      if (typeof button.focus === "function") button.focus({ preventScroll: true });
+    };
+    button.onkeydown = event => {
+      const tabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
+      const nextIndex = settingsTabIndexForKey(event.key, tabs.indexOf(button), tabs.length);
+      if (nextIndex < 0) return;
+      event.preventDefault();
+      const next = tabs[nextIndex];
+      setSettingsTab(next.dataset.settingsTab);
+      next.focus();
+    };
+  });
+  setSettingsTab(state.settingsTab || "library");
+}
+/* --------------------------------------------------------------- settings ---
+ * One dialog, one write path.  Seven pane handlers still own the endpoints, but
+ * the operator never sees them: a change marks the block that produced it, the
+ * rail shows which groups are waiting, and the footer writes every waiting group
+ * in a fixed order.  Groups are keyed by endpoint, not by tab, because the pool
+ * switch and the lyrics budget share one POST and live on two different tabs. */
+const SETTINGS_GROUPS = [
+  { key: "library", label: "音乐目录", blocks: ["library"], save: () => saveLibrarySettings() },
+  { key: "playback", label: "设备身份", blocks: ["playback-identity"], save: () => savePlaybackPaneSettings() },
+  { key: "metadata", label: "基础与安全", blocks: ["metadata-overview"], save: () => saveMetadataOverviewPaneSettings() },
+  { key: "metadata-providers", label: "数据源", blocks: ["metadata-providers"], save: () => saveMetadataProviderPaneSettings() },
+  { key: "metadata-tags", label: "Tag 写回", blocks: ["metadata-tags"], save: () => saveMetadataTagPaneSettings() },
+  { key: "dlna", label: "DLNA 设备", blocks: ["network-dlna"], save: () => saveDlnaPaneSettings() },
+  { key: "runtime", label: "运行设置", blocks: ["network-pool", "advanced-cache"], save: () => saveRuntimePaneSettings() },
+];
+// Which rail entry a block belongs to.  A block without an entry here is either
+// read-only (关于) or applies on click (播放输出, 主题, 补全任务) and never dirties.
+const SETTINGS_BLOCK_TABS = {
+  library: "library",
+  "playback-identity": "playback",
+  "metadata-overview": "metadata",
+  "metadata-providers": "metadata",
+  "metadata-tags": "metadata",
+  "network-dlna": "network",
+  "network-pool": "network",
+  "advanced-cache": "advanced",
+};
+function settingsShell() {
+  return document.querySelector("#folderDialog .settings-shell");
+}
+function settingsIsNarrow() {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(max-width: 760px)").matches;
+}
+function settingsDirtyBlocks() {
+  if (!(state.settingsDirty instanceof Set)) state.settingsDirty = new Set();
+  return state.settingsDirty;
+}
+function settingsBlockGroup(block) {
+  return SETTINGS_GROUPS.find(group => group.blocks.includes(block)) || null;
+}
+function settingsDirtyGroups() {
+  const dirty = settingsDirtyBlocks();
+  return SETTINGS_GROUPS.filter(group => group.blocks.some(block => dirty.has(block)));
+}
+function markSettingsDirty(block) {
+  if (!settingsBlockGroup(block)) return;
+  const dirty = settingsDirtyBlocks();
+  if (dirty.has(block)) return;
+  dirty.add(block);
+  state.settingsCloseArmed = false;
+  updateSettingsDirtyUi();
+}
+function clearSettingsDirty(blocks = []) {
+  const dirty = settingsDirtyBlocks();
+  blocks.forEach(block => dirty.delete(block));
+  updateSettingsDirtyUi();
+}
+function resetSettingsDirty() {
+  state.settingsDirty = new Set();
+  state.settingsCloseArmed = false;
+  updateSettingsDirtyUi();
+}
+function settingsSetStatus(node, message, tone = "") {
+  if (!node || !node.classList) return;
+  node.textContent = message || "";
+  node.classList.toggle("is-success", tone === "success");
+  node.classList.toggle("is-error", tone === "error");
+  updateSettingsFootVisibility();
+}
+function updateSettingsFootVisibility() {
+  const shell = settingsShell();
+  if (!shell) return;
+  const status = $("settingsSaveStatus");
+  const hasStatus = Boolean(status && status.textContent.trim());
+  shell.classList.toggle("has-foot", settingsDirtyGroups().length > 0 || hasStatus);
+}
+function updateSettingsDirtyUi() {
+  const groups = settingsDirtyGroups();
+  const count = groups.length;
+  const dirtyNode = $("settingsDirtyCount");
+  if (dirtyNode) dirtyNode.textContent = count ? `${count} 项未保存` : "";
+  const saveBtn = $("settingsSaveBtn");
+  if (saveBtn) {
+    saveBtn.hidden = count === 0;
+    saveBtn.textContent = count ? `保存更改（${count}）` : "保存更改";
+  }
+  const discardBtn = $("settingsDiscardBtn");
+  if (discardBtn) discardBtn.hidden = count === 0;
+  const dirty = settingsDirtyBlocks();
+  document.querySelectorAll("[data-settings-tab]").forEach(button => {
+    const tab = button.dataset.settingsTab;
+    const waiting = Object.entries(SETTINGS_BLOCK_TABS)
+      .some(([block, owner]) => owner === tab && dirty.has(block));
+    button.classList.toggle("has-dirty", waiting);
+  });
+  updateSettingsFootVisibility();
+}
+function settingsSummaryText(id, text) {
+  const node = $(id);
+  if (node) node.textContent = text || "";
+}
+function updateSettingsSummaries() {
+  const paths = Array.isArray(state.libraryStatus?.library_paths) ? state.libraryStatus.library_paths : [];
+  settingsSummaryText("settingsSummaryLibrary", paths.length ? `${paths.length} 个目录` : "未选择目录");
+  const renderer = typeof playbackRendererNameInput === "function" ? playbackRendererNameInput() : null;
+  settingsSummaryText("settingsSummaryPlayback", renderer?.value?.trim() || "跟随设备名");
+  const metadata = $("metadataEnabledInput");
+  settingsSummaryText("settingsSummaryMetadata", metadata ? (metadata.checked ? "已启用" : "已关闭") : "");
+  const port = $("serverPortValue")?.textContent?.trim();
+  settingsSummaryText("settingsSummaryNetwork", port && port !== "--" ? `端口 ${port}` : "");
+  const theme = $("themeModeInput");
+  settingsSummaryText("settingsSummaryAppearance", theme?.selectedOptions?.[0]?.textContent?.trim() || "");
+  const budget = $("lyricsCacheBudgetInput");
+  settingsSummaryText("settingsSummaryAdvanced", budget?.selectedOptions?.[0]?.textContent?.trim() || "");
+}
+function bindSettingsDirtyTracking() {
+  const shell = settingsShell();
+  if (!shell || shell.dataset.dirtyBound === "1") return;
+  shell.dataset.dirtyBound = "1";
+  const onChange = event => {
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    // Live controls write on click and must never queue a save.
+    if (target.closest("[data-settings-live]")) return;
+    const block = target.closest("[data-settings-block]");
+    if (!block) return;
+    markSettingsDirty(block.dataset.settingsBlock);
+  };
+  shell.addEventListener("input", onChange);
+  shell.addEventListener("change", onChange);
+}
+async function saveAllSettings() {
+  const groups = settingsDirtyGroups();
+  if (!groups.length) return false;
+  const saveBtn = $("settingsSaveBtn");
+  const discardBtn = $("settingsDiscardBtn");
+  const status = $("settingsSaveStatus");
+  const originalLabel = saveBtn ? saveBtn.textContent : "";
+  if (saveBtn) saveBtn.disabled = true;
+  if (discardBtn) discardBtn.disabled = true;
+  settingsSetStatus(status, "");
+  const failed = [];
+  for (const group of groups) {
+    if (saveBtn) saveBtn.textContent = `正在保存${group.label}...`;
+    let ok = false;
+    try {
+      ok = (await group.save()) !== false;
+    } catch (_) {
+      ok = false;
+    }
+    // A group only leaves the queue once its own endpoint confirmed the write,
+    // so one failure cannot be hidden behind a later success.
+    if (ok) clearSettingsDirty(group.blocks);
+    else failed.push(group.label);
+  }
+  if (saveBtn) {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalLabel;
+  }
+  if (discardBtn) discardBtn.disabled = false;
+  if (status) {
+    if (failed.length) settingsSetStatus(status, `${failed.join("、")} 保存失败`, "error");
+    else settingsSetStatus(status, "已保存", "success");
+  }
+  updateSettingsDirtyUi();
+  updateSettingsSummaries();
+  return failed.length === 0;
+}
+async function discardSettingsChanges() {
+  resetSettingsDirty();
+  const status = $("settingsSaveStatus");
+  settingsSetStatus(status, "已放弃未保存的更改");
+  const jobs = [loadRuntimeSettings(), loadPlaybackSettings(), loadMetadataStatus()];
+  await Promise.all(jobs.map(job => job.catch(() => null)));
+  // The path list only lives in the DOM until it is saved, so redrawing it from
+  // the last known server status is what actually puts the edits back.
+  renderLibraryPathInputs(state.libraryStatus?.library_paths || []);
+  updateSettingsSummaries();
+}
+function openSettingsDetail() {
+  const shell = settingsShell();
+  if (!shell || !settingsIsNarrow()) return;
+  shell.classList.add("is-detail");
+}
+function leaveSettingsDetail() {
+  const shell = settingsShell();
+  if (shell?.classList.contains("is-detail")) {
+    shell.classList.remove("is-detail");
+    return;
+  }
+  closeSettingsDialog();
+}
+function closeSettingsDialog() {
+  const dialog = $("folderDialog");
+  if (!dialog || !dialog.open) return true;
+  if (settingsDirtyGroups().length && !state.settingsCloseArmed) {
+    state.settingsCloseArmed = true;
+    settingsSetStatus($("settingsSaveStatus"), "还有未保存的更改：再点一次关闭会丢弃这些更改", "error");
+    return false;
+  }
+  state.settingsCloseArmed = false;
+  dialog.close();
+  return true;
+}
+function bindSettingsFooter() {
+  const saveBtn = $("settingsSaveBtn");
+  if (saveBtn) saveBtn.onclick = () => { void saveAllSettings(); };
+  const discardBtn = $("settingsDiscardBtn");
+  if (discardBtn) discardBtn.onclick = () => { void discardSettingsChanges(); };
+  const backBtn = $("settingsBackBtn");
+  if (backBtn) backBtn.onclick = leaveSettingsDetail;
+  const dialog = $("folderDialog");
+  if (dialog && dialog.dataset.closeBound !== "1") {
+    dialog.dataset.closeBound = "1";
+    // Esc closes natively, so the same "click twice to discard" rule has to be
+    // enforced here as well, and a close that slipped through still discards.
+    dialog.addEventListener("cancel", event => {
+      if (settingsDirtyGroups().length && !state.settingsCloseArmed) {
+        event.preventDefault();
+        state.settingsCloseArmed = true;
+        settingsSetStatus($("settingsSaveStatus"), "还有未保存的更改：再按一次 Esc 会丢弃这些更改", "error");
+      }
+    });
+    dialog.addEventListener("close", () => {
+      state.settingsCloseArmed = false;
+      settingsSetStatus($("settingsSaveStatus"), "");
+      if (settingsDirtyGroups().length) void discardSettingsChanges();
+      const shell = settingsShell();
+      if (shell) shell.classList.remove("is-detail");
+    });
+  }
+  bindSettingsDirtyTracking();
+  updateSettingsDirtyUi();
+}
+const LIBRARY_CONNECTION_POOL_SETTING_KEY = "library_connection_pool";
+// Spelled exactly as `CONFIG_BYTES_KEY` in app/server/metadata_local_lyrics_cache.py;
+// test_ui_runtime_settings.js compares the two so a rename cannot pass on one side.
+const LYRICS_CACHE_BUDGET_SETTING_KEY = "metadata_lyrics_cache_max_bytes";
+const RENDERER_NAME_SETTING_KEY = "renderer_name";
+const DLNA_TYPE_DETECTION_SETTING_KEY = "dlna_type_detection";
+function runtimeConnectionPoolInput() {
+  return $("libraryConnectionPoolInput");
+}
+function runtimeLyricsBudgetInput() {
+  return $("lyricsCacheBudgetInput");
+}
+function playbackRendererNameInput() {
+  return $("rendererNameInput");
+}
+function dlnaTypeDetectionInput() {
+  return $("dlnaTypeDetectionInput");
+}
+function applyRuntimeLyricsBudget(budget, limit) {
+  // Show the budget the process really enforces. An unusable answer leaves the
+  // control untouched - the markup default is not evidence - and a value that
+  // is not one of the presets (a hand-edited config, a future default) becomes
+  // selectable instead of silently snapping back to 8 MiB.
+  if (!budget || !Number.isInteger(limit) || limit <= 0) return false;
+  const wanted = String(limit);
+  budget.value = wanted;
+  if (budget.value === wanted) return true;
+  const option = document.createElement("option");
+  option.value = wanted;
+  option.textContent = `自定义 · ${formatSize(limit)}`;
+  budget.appendChild(option);
+  budget.value = wanted;
+  return budget.value === wanted;
+}
+async function loadRuntimeSettings() {
+  const input = runtimeConnectionPoolInput();
+  if (!input) return null;
+  const budget = runtimeLyricsBudgetInput();
+  try {
+    const response = await apiFetch("api/config/runtime", { cache: "no-store" });
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "");
+    // Echo the server value rather than assuming the click stuck: a config the
+    // loader had to coerce is not the config the pool is honouring.
+    input.checked = data?.config?.[LIBRARY_CONNECTION_POOL_SETTING_KEY] === true;
+    applyRuntimeLyricsBudget(budget, data?.config?.[LYRICS_CACHE_BUDGET_SETTING_KEY]);
+    const dlnaDetection = dlnaTypeDetectionInput();
+    if (dlnaDetection && typeof data?.config?.[DLNA_TYPE_DETECTION_SETTING_KEY] === "boolean") {
+      dlnaDetection.checked = data.config[DLNA_TYPE_DETECTION_SETTING_KEY];
+    }
+    return data;
+  } catch (error) {
+    const status = $("runtimeSettingsStatus");
+    if (status) status.textContent = "无法读取运行设置，当前显示的是上一次已知状态";
+    return null;
+  }
+}
+async function saveRuntimeSettings() {
+  const input = runtimeConnectionPoolInput();
+  const budget = runtimeLyricsBudgetInput();
+  if (!input || !budget) throw new Error("运行设置控件不可用");
+  const lyricsBudget = Number(budget.value);
+  if (!Number.isInteger(lyricsBudget) || lyricsBudget <= 0) throw new Error("运行设置控件不可用");
+  const dlnaDetection = dlnaTypeDetectionInput();
+  const response = await apiFetch("api/config/runtime", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // The endpoint preserves omitted settings from the live config, so this
+    // page sends only the two advanced performance controls it owns.
+    body: JSON.stringify({
+      [LIBRARY_CONNECTION_POOL_SETTING_KEY]: input.checked === true,
+      [LYRICS_CACHE_BUDGET_SETTING_KEY]: lyricsBudget,
+    }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存运行设置失败");
+  input.checked = data?.config?.[LIBRARY_CONNECTION_POOL_SETTING_KEY] === true;
+  applyRuntimeLyricsBudget(budget, data?.config?.[LYRICS_CACHE_BUDGET_SETTING_KEY]);
+  if (dlnaDetection && typeof data?.config?.[DLNA_TYPE_DETECTION_SETTING_KEY] === "boolean") {
+    dlnaDetection.checked = data.config[DLNA_TYPE_DETECTION_SETTING_KEY];
+  }
+  return data;
+}
+async function loadPlaybackSettings() {
+  const renderer = playbackRendererNameInput();
+  if (!renderer) return null;
+  const status = $("playbackSettingsStatus");
+  try {
+    const response = await apiFetch("api/config/runtime", { cache: "no-store" });
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "");
+    if (typeof data?.config?.[RENDERER_NAME_SETTING_KEY] === "string" && data.config[RENDERER_NAME_SETTING_KEY].trim()) {
+      renderer.value = data.config[RENDERER_NAME_SETTING_KEY];
+    }
+    if (status) status.textContent = "";
+    return data;
+  } catch (error) {
+    if (status) status.textContent = "无法读取播放与设备设置，当前显示的是上一次已知状态";
+    return null;
+  }
+}
+async function savePlaybackSettings() {
+  const renderer = playbackRendererNameInput();
+  if (!renderer) throw new Error("播放与设备设置控件不可用");
+  const rendererName = renderer.value.trim();
+  const invalidRendererName = !rendererName || [...rendererName].length > 128 || [...rendererName].some(char => {
+    const codePoint = char.codePointAt(0);
+    return codePoint < 32 || (codePoint >= 127 && codePoint <= 159)
+      || (codePoint >= 0xD800 && codePoint <= 0xDFFF) || codePoint === 0xFFFE || codePoint === 0xFFFF;
+  });
+  if (invalidRendererName) throw new Error("播放与设备设置控件不可用");
+  const response = await apiFetch("api/config/runtime", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ [RENDERER_NAME_SETTING_KEY]: rendererName }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存播放与设备设置失败");
+  if (typeof data?.config?.[RENDERER_NAME_SETTING_KEY] === "string" && data.config[RENDERER_NAME_SETTING_KEY].trim()) {
+    renderer.value = data.config[RENDERER_NAME_SETTING_KEY];
+  }
+  return data;
+}
+function metadataProviderFallbackEntries(recommended = []) {
+  const source = Array.isArray(recommended) && recommended.length === METADATA_PROVIDER_SAFE_ORDER.length
+    ? recommended
+    : METADATA_PROVIDER_SAFE_ORDER.map(id => ({ id, enabled: true }));
+  return METADATA_PROVIDER_SAFE_ORDER.map(id => {
+    const entry = source.find(item => item && item.id === id) || { id, enabled: true };
+    return { ...entry, id, enabled: entry.enabled === true, fixed_last: id === MUSICBRAINZ_PROVIDER_ID };
+  });
+}
+function normalizeMetadataProviderEntries(value, recommended = []) {
+  const fallback = metadataProviderFallbackEntries(recommended);
+  if (!Array.isArray(value) || value.length !== METADATA_PROVIDER_SAFE_ORDER.length) return fallback;
+  const seen = new Set();
+  const normalized = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || typeof raw.id !== "string"
+        || !METADATA_PROVIDER_SAFE_ORDER.includes(raw.id) || seen.has(raw.id)
+        || typeof raw.enabled !== "boolean") return fallback;
+    seen.add(raw.id);
+    normalized.push({ ...raw, id: raw.id, enabled: raw.enabled === true, fixed_last: raw.id === MUSICBRAINZ_PROVIDER_ID });
+  }
+  if (seen.size !== METADATA_PROVIDER_SAFE_ORDER.length || normalized.at(-1)?.id !== MUSICBRAINZ_PROVIDER_ID) return fallback;
+  return normalized;
+}
+function serializeMetadataProviderEntries(entries = []) {
+  return normalizeMetadataProviderEntries(entries).map(entry => ({ id: entry.id, enabled: entry.enabled === true }));
+}
+function moveMetadataProviderToIndex(entries = [], providerId = "", targetIndex = 0) {
+  const current = normalizeMetadataProviderEntries(entries);
+  if (providerId === MUSICBRAINZ_PROVIDER_ID) return current;
+  const fromIndex = current.findIndex(entry => entry.id === providerId);
+  if (fromIndex < 0) return current;
+  const maxIndex = Math.max(0, current.length - 2);
+  const boundedIndex = Math.max(0, Math.min(maxIndex, Number.isInteger(targetIndex) ? targetIndex : fromIndex));
+  const [moved] = current.splice(fromIndex, 1);
+  current.splice(boundedIndex, 0, moved);
+  const musicbrainz = current.find(entry => entry.id === MUSICBRAINZ_PROVIDER_ID);
+  return current.filter(entry => entry.id !== MUSICBRAINZ_PROVIDER_ID).concat(musicbrainz || { id: MUSICBRAINZ_PROVIDER_ID, enabled: true, fixed_last: true });
+}
+function metadataProviderDropTargetIndex(entries = [], draggedId = "", targetId = "", afterTarget = false) {
+  const current = normalizeMetadataProviderEntries(entries);
+  if (draggedId === MUSICBRAINZ_PROVIDER_ID) return -1;
+  const fromIndex = current.findIndex(entry => entry.id === draggedId);
+  const targetIndex = current.findIndex(entry => entry.id === targetId);
+  if (fromIndex < 0 || targetIndex < 0 || (targetId === MUSICBRAINZ_PROVIDER_ID && afterTarget)) return -1;
+  let destination = targetIndex + (afterTarget ? 1 : 0);
+  if (fromIndex < destination) destination -= 1;
+  return Math.max(0, Math.min(current.length - 2, destination));
+}
+function moveMetadataProviderEntries(entries = [], providerId = "", direction = 0) {
+  const current = normalizeMetadataProviderEntries(entries);
+  const index = current.findIndex(entry => entry.id === providerId);
+  if (index < 0 || providerId === MUSICBRAINZ_PROVIDER_ID) return current;
+  return moveMetadataProviderToIndex(current, providerId, index + (Number(direction) || 0));
+}
+function metadataProviderPayload() {
+  return serializeMetadataProviderEntries(state.metadataProviders);
+}
+function metadataProviderLabel(entry) {
+  return displayText(entry?.name || entry?.id || "数据源");
+}
+function metadataProviderDisplayName(providerId = "") {
+  const normalizedId = displayText(providerId).trim();
+  if (!normalizedId) return "未知数据源";
+  const entries = [
+    ...(Array.isArray(state.metadataProviders) ? state.metadataProviders : []),
+    ...(Array.isArray(state.metadataProviderRecommended) ? state.metadataProviderRecommended : []),
+  ];
+  const entry = entries.find(item => item && item.id === normalizedId);
+  const configuredName = displayText(entry?.name).trim();
+  if (configuredName) return configuredName;
+  return ({
+    netease: "网易云音乐",
+    kuwo: "酷我音乐",
+    kugou: "酷狗音乐",
+    migu: "咪咕音乐",
+    joox: "JOOX",
+    musicbrainz: "MusicBrainz",
+  })[normalizedId] || normalizedId;
+}
+function metadataCandidateSourceLabel(candidate = {}) {
+  const providerId = displayText(candidate.provider_id || "").trim();
+  const source = displayText(candidate.source || "").trim();
+  const knownIds = new Set(METADATA_PROVIDER_SAFE_ORDER);
+  if (knownIds.has(providerId)) return metadataProviderDisplayName(providerId);
+  if (knownIds.has(source)) return metadataProviderDisplayName(source);
+  return source || (providerId ? metadataProviderDisplayName(providerId) : "未知数据源");
+}
+function metadataProviderCapabilityText(entry) {
+  const capabilities = new Set(Array.isArray(entry?.capabilities) ? entry.capabilities : []);
+  return [
+    ["search", "搜索"],
+    ["cover", "封面"],
+    ["lyrics", "歌词"],
+  ].filter(([key]) => capabilities.has(key)).map(([, label]) => label).join(" · ") || "无可用能力说明";
+}
+function metadataProviderResultMark(value, supported = true) {
+  if (!supported) return "不支持";
+  return value === true ? "可用" : "不可用";
+}
+function metadataProviderResultText(result = {}) {
+  const search = result.search || {};
+  const cover = result.cover || {};
+  const lyrics = result.lyrics || {};
+  const responseMs = Number(result.response_ms);
+  const elapsed = Number.isFinite(responseMs) ? Math.max(0, Math.round(responseMs)) : 0;
+  return `搜索：${metadataProviderResultMark(search.available, search.supported)} · 封面：${metadataProviderResultMark(cover.available, cover.supported)} · 歌词：${metadataProviderResultMark(lyrics.available, lyrics.supported)} · 响应时间：${elapsed} ms`;
+}
+function metadataProviderResultDetails(result = {}) {
+  const search = result.search || {};
+  const cover = result.cover || {};
+  const lyrics = result.lyrics || {};
+  const parts = [];
+  if (search.title || search.artist || search.album) parts.push([search.title, search.artist, search.album].filter(Boolean).join(" · "));
+  if (cover.url) parts.push(cover.url);
+  if (lyrics.preview) parts.push(lyrics.preview.replace(/[\r\n]+/g, " ").slice(0, 120));
+  if (result.error) parts.push(result.error);
+  return parts.join(" | ");
+}
+function metadataProviderUnavailableResult(providerId, errorMessage = "数据源测试失败") {
+  const entry = (Array.isArray(state.metadataProviders) ? state.metadataProviders : [])
+    .concat(Array.isArray(state.metadataProviderRecommended) ? state.metadataProviderRecommended : [])
+    .find(item => item && item.id === providerId) || {};
+  const capabilities = new Set(Array.isArray(entry.capabilities) ? entry.capabilities : []);
+  const supported = capability => capabilities.has(capability) || (capability === "search" && capabilities.has("track"));
+  return {
+    ok: false,
+    error: displayText(errorMessage || "数据源测试失败"),
+    response_ms: 0,
+    search: { supported: supported("search"), available: false },
+    cover: { supported: supported("cover"), available: false },
+    lyrics: { supported: supported("lyrics"), available: false },
+  };
+}
+function metadataProviderProbeResponse(value) {
+  let payload = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+    const probe = payload.result;
+    const isProbeResult = probe && typeof probe === "object" && !Array.isArray(probe)
+      && typeof probe.provider_id === "string"
+      && (Object.prototype.hasOwnProperty.call(probe, "search")
+        || Object.prototype.hasOwnProperty.call(probe, "cover")
+        || Object.prototype.hasOwnProperty.call(probe, "lyrics")
+        || Object.prototype.hasOwnProperty.call(probe, "response_ms"));
+    // The normal metadata projection unwrapping treats a provider probe's
+    // `lyrics` field as a transport projection and also interprets the
+    // provider-level `ok` as the HTTP API's `ok`. Preserve this endpoint's
+    // explicit API envelope instead of losing its result.
+    if (typeof payload.ok === "boolean" && (payload.ok !== true || isProbeResult)) return payload;
+    const nested = ["data", "result", "payload", "metadata"]
+      .map(key => payload[key])
+      .find(candidate => candidate && typeof candidate === "object" && !Array.isArray(candidate));
+    if (!nested) return payload;
+    payload = nested;
+  }
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function metadataProviderStatusNode(row) {
+  return row?.querySelector?.("[data-metadata-provider-result]") || null;
+}
+function renderMetadataProviderTestResult(row, result) {
+  const node = metadataProviderStatusNode(row);
+  if (!node) return;
+  node.hidden = false;
+  node.className = `metadata-provider-result ${result?.ok === true ? "is-ok" : "is-failed"}`;
+  node.replaceChildren();
+  const summary = document.createElement("span");
+  const error = displayText(result?.error || "");
+  summary.textContent = `${error ? `测试失败：${error} · ` : ""}${metadataProviderResultText(result || {})}`;
+  node.append(summary);
+  const detail = metadataProviderResultDetails(result || {});
+  if (detail) {
+    const description = document.createElement("small");
+    description.textContent = displayText(detail);
+    node.append(description);
+  }
+}
+function metadataProviderResultFor(providerId) {
+  return state.metadataProviderResults?.[providerId] || null;
+}
+function ensureMetadataSettingsOverview() {
+  const pane = document.querySelector('[data-metadata-settings-pane="overview"]');
+  if (!pane || pane.querySelector(".metadata-settings-overview")) return;
+  const overview = document.createElement("div");
+  overview.className = "metadata-settings-overview";
+  overview.innerHTML = '<div><span>后台补全</span><strong data-metadata-overview="enabled">未启用</strong></div><div><span>Tag 写回</span><strong data-metadata-overview="tag-write">未启用</strong></div><div><span>数据源</span><strong data-metadata-overview="providers">读取中</strong></div>';
+  // The cards belong to the "补全概览" heading, not above it: prepending them
+  // left that heading with nothing but its own help text underneath.
+  const heading = pane.querySelector(".settings-section-heading");
+  if (heading) heading.after(overview);
+  else pane.prepend(overview);
+}
+function updateMetadataSettingsOverview() {
+  ensureMetadataSettingsOverview();
+  const enabled = $("metadataEnabledInput")?.checked === true;
+  const tagWrite = $("metadataTagWriteEnabledInput")?.checked === true;
+  const entries = normalizeMetadataProviderEntries(state.metadataProviders, state.metadataProviderRecommended);
+  const enabledCount = entries.filter(entry => entry.enabled === true).length;
+  const writeNode = document.querySelector('[data-metadata-overview="tag-write"]');
+  const enabledNode = document.querySelector('[data-metadata-overview="enabled"]');
+  const providersNode = document.querySelector('[data-metadata-overview="providers"]');
+  if (enabledNode) enabledNode.textContent = enabled ? "已启用" : "未启用";
+  if (writeNode) writeNode.textContent = tagWrite ? "已启用" : "未启用";
+  if (providersNode) providersNode.textContent = `${enabledCount} 个已启用`;
+}
+// The markup owns the source picker now: it sits in the search bar next to the
+// query, so the dialog no longer grows a second toolbar at runtime (R494).
+function ensureMetadataCandidateProviderPicker() {
+  const select = $("metadataCandidateProviderSelect");
+  if (!select || select.dataset.bound === "1") return;
+  select.dataset.bound = "1";
+  select.addEventListener("change", () => {
+    cancelMetadataCandidateLookup();
+    state.metadataCandidateSearchToken += 1;
+    try { state.metadataCandidateSearchController?.abort(); } catch (_) {}
+    state.metadataCandidateProviderId = select.value;
+    const statusNode = metadataCandidateStatusNode();
+    if (statusNode) statusNode.textContent = select.value
+      ? `已选择${select.options[select.selectedIndex]?.textContent || "指定数据源"}，请点击搜索开始查询。`
+      : "将按设置页顺序自动尝试数据源。";
+  });
+}
+function renderMetadataCandidateProviderPicker() {
+  ensureMetadataCandidateProviderPicker();
+  const select = $("metadataCandidateProviderSelect");
+  if (!select) return;
+  const entries = normalizeMetadataProviderEntries(state.metadataProviders, state.metadataProviderRecommended);
+  select.replaceChildren(new Option("自动匹配（按设置顺序）", ""));
+  entries.forEach(entry => select.append(new Option(metadataProviderDisplayName(entry.id), entry.id)));
+  select.value = state.metadataCandidateProviderId || "";
+}
+function metadataProviderGripMarkup() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+}
+function renderMetadataProviders() {
+  const list = $("metadataProviderList");
+  if (!list) return;
+  list.replaceChildren();
+  const entries = normalizeMetadataProviderEntries(state.metadataProviders, state.metadataProviderRecommended);
+  state.metadataProviders = entries;
+  updateMetadataSettingsOverview();
+  entries.forEach((entry, index) => {
+    // One row = handle, name/capabilities, order pair, test, switch.  The old row
+    // carried three full-size buttons plus a checkbox and read as a toolbar; the
+    // order pair is the only part that may be hidden, and only for the fixed
+    // fallback entry (R494).
+    const fixed = entry.id === MUSICBRAINZ_PROVIDER_ID;
+    const row = document.createElement("article");
+    row.className = `metadata-provider-row${fixed ? " is-fixed-last" : ""}${entry.enabled === true ? "" : " is-off"}`;
+    row.dataset.providerId = entry.id;
+    row.draggable = !fixed;
+    if (row.draggable) {
+      row.addEventListener("dragstart", event => {
+        state.metadataProviderDragId = entry.id;
+        event.dataTransfer?.setData("text/plain", entry.id);
+      });
+      row.addEventListener("dragend", () => { state.metadataProviderDragId = ""; });
+    }
+    row.addEventListener("dragover", event => {
+      if (state.metadataProviderDragId && state.metadataProviderDragId !== MUSICBRAINZ_PROVIDER_ID) event.preventDefault();
+    });
+    row.addEventListener("drop", event => {
+      event.preventDefault();
+      const draggedId = event.dataTransfer?.getData("text/plain") || state.metadataProviderDragId;
+      if (!draggedId || draggedId === entry.id) return;
+      const bounds = row.getBoundingClientRect();
+      const afterTarget = entry.id !== MUSICBRAINZ_PROVIDER_ID
+        && event.clientY >= bounds.top + bounds.height / 2;
+      const targetIndex = metadataProviderDropTargetIndex(state.metadataProviders, draggedId, entry.id, afterTarget);
+      if (targetIndex < 0) return;
+      state.metadataProviders = moveMetadataProviderToIndex(state.metadataProviders, draggedId, targetIndex);
+      state.metadataProviderDirty = true;
+      renderMetadataProviders();
+      updateMetadataProviderDirtyStatus();
+    });
+    const grip = document.createElement("span");
+    grip.className = "metadata-provider-grip";
+    grip.setAttribute("aria-hidden", "true");
+    grip.innerHTML = metadataProviderGripMarkup();
+    const body = document.createElement("span");
+    body.className = "metadata-provider-body";
+    const name = document.createElement("span");
+    name.className = "metadata-provider-name";
+    name.textContent = metadataProviderDisplayName(entry.id);
+    if (fixed) {
+      const tag = document.createElement("em");
+      tag.textContent = "兜底";
+      name.append(tag);
+    }
+    const capabilities = document.createElement("small");
+    capabilities.className = "metadata-provider-capabilities";
+    capabilities.textContent = metadataProviderCapabilityText(entry);
+    body.append(name, capabilities);
+    const move = document.createElement("span");
+    move.className = "metadata-provider-move";
+    const up = document.createElement("button");
+    up.type = "button";
+    up.className = "metadata-provider-move-button";
+    up.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg>';
+    up.title = "上移";
+    up.setAttribute("aria-label", "上移");
+    up.dataset.metadataProviderMove = "up";
+    up.disabled = fixed || index === 0;
+    up.addEventListener("click", () => moveMetadataProvider(entry.id, -1));
+    const down = document.createElement("button");
+    down.type = "button";
+    down.className = "metadata-provider-move-button";
+    down.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 10 6 6 6-6"/></svg>';
+    down.title = "下移";
+    down.setAttribute("aria-label", "下移");
+    down.dataset.metadataProviderMove = "down";
+    down.disabled = fixed || index >= entries.length - 2;
+    down.addEventListener("click", () => moveMetadataProvider(entry.id, 1));
+    if (fixed) move.classList.add("is-placeholder");
+    move.append(up, down);
+    const test = document.createElement("button");
+    test.type = "button";
+    test.className = "secondary-button metadata-provider-test";
+    test.textContent = state.metadataProviderTestInFlight === entry.id ? "测试中..." : "测试";
+    test.disabled = Boolean(state.metadataProviderTestInFlight);
+    test.dataset.metadataProviderTest = entry.id;
+    test.addEventListener("click", () => testMetadataProvider(entry.id));
+    const toggle = document.createElement("label");
+    toggle.className = "switch-control metadata-provider-switch";
+    toggle.title = entry.enabled === true ? "已启用，点击关闭" : "已关闭，点击启用";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = entry.enabled === true;
+    checkbox.dataset.metadataProviderToggle = entry.id;
+    checkbox.setAttribute("aria-label", `启用 ${metadataProviderDisplayName(entry.id)}`);
+    checkbox.addEventListener("change", () => {
+      const target = state.metadataProviders.find(item => item.id === entry.id);
+      if (target) target.enabled = checkbox.checked === true;
+      state.metadataProviderDirty = true;
+      updateMetadataProviderDirtyStatus();
+      updateMetadataSettingsOverview();
+      renderMetadataProviders();
+    });
+    const track = document.createElement("span");
+    track.setAttribute("aria-hidden", "true");
+    toggle.append(checkbox, track);
+    const result = document.createElement("div");
+    result.className = "metadata-provider-result";
+    result.dataset.metadataProviderResult = entry.id;
+    result.hidden = true;
+    row.append(grip, body, move, test, toggle, result);
+    list.append(row);
+    const previous = metadataProviderResultFor(entry.id);
+    if (previous) renderMetadataProviderTestResult(row, previous);
+  });
+}
+function updateMetadataProviderDirtyStatus() {
+  const status = $("metadataProviderStatusText");
+  // The footer is the only write path, so an edited provider order has to join
+  // the shared queue or the operator would have no way to commit it.
+  if (state.metadataProviderDirty === true) markSettingsDirty("metadata-providers");
+  if (!status) return;
+  const saveButton = $("saveMetadataProvidersBtn");
+  if (saveButton) saveButton.disabled = state.metadataProviderDirty !== true;
+  status.textContent = state.metadataProviderDirty === true
+    ? "数据源配置已修改，点击底部“保存更改”后生效。"
+    : "拖动左侧手柄调整顺序，或用箭头逐格移动；关闭的项目不参与查询。";
+}
+function moveMetadataProvider(providerId, direction) {
+  state.metadataProviders = moveMetadataProviderEntries(state.metadataProviders, providerId, direction);
+  state.metadataProviderDirty = true;
+  renderMetadataProviders();
+  updateMetadataProviderDirtyStatus();
+}
+function applyMetadataProviderSettings(data = {}) {
+  const recommended = Array.isArray(data.recommended) ? data.recommended : [];
+  state.metadataProviderRecommended = normalizeMetadataProviderEntries(recommended);
+  const configured = Array.isArray(data.providers) ? data.providers : data?.config?.metadata_providers;
+  state.metadataProviders = normalizeMetadataProviderEntries(configured, state.metadataProviderRecommended);
+  state.metadataProviderDirty = data.providers_repaired === true;
+  state.metadataProvidersLoaded = true;
+  renderMetadataProviders();
+  updateMetadataProviderDirtyStatus();
+  updateMetadataSettingsOverview();
+}
+// One fixed probe song instead of three free-text inputs.  Every run has to ask
+// the same question before two providers can be compared, and the inputs used to
+// push the list itself below the fold on a phone (R494).
+const METADATA_PROBE_TRACK = Object.freeze({ title: "双截棍", artist: "周杰伦", album: "" });
+function metadataProviderProbePayload() {
+  return { ...METADATA_PROBE_TRACK };
+}
+async function testMetadataProvider(providerId) {
+  const row = $("metadataProviderList")?.querySelector?.(`[data-provider-id="${providerId}"]`);
+  if (!row || state.metadataProviderTestInFlight) return null;
+  let query;
+  try {
+    query = metadataProviderProbePayload();
+  } catch (error) {
+    $("metadataProviderStatusText").textContent = error.message;
+    return null;
+  }
+  state.metadataProviderTestInFlight = providerId;
+  renderMetadataProviders();
+  try {
+    const response = await apiFetch("api/metadata/provider-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: providerId, ...query }),
+    });
+    const data = metadataProviderProbeResponse(await readResponseJsonBounded(response));
+    if (!response.ok || data.ok !== true) throw new Error(data.message || data.error || "数据源测试失败");
+    state.metadataProviderResults[providerId] = data.result || {};
+    const outcome = data.result?.ok === true ? "info" : "warn";
+    pushMetadataLog(outcome, "数据源", `${metadataProviderDisplayName(providerId)} 测试：${metadataProviderResultText(data.result || {})}`);
+    return data.result || {};
+  } catch (error) {
+    state.metadataProviderResults[providerId] = metadataProviderUnavailableResult(providerId, error.message);
+    pushMetadataLog("error", "数据源", `${metadataProviderDisplayName(providerId)} 测试失败：${error.message || "请求未完成"}`);
+    return state.metadataProviderResults[providerId];
+  } finally {
+    state.metadataProviderTestInFlight = "";
+    renderMetadataProviders();
+  }
+}
+function libraryCursorQueryKey() {
+  return libraryLoadRequestKey(0);
+}
+function browseCursorQueryKey(kind) {
+  const source = { ...state, page: 1, folderPage: 1 };
+  const key = globalThis.fnAudioLibraryLoadKey.buildLibraryLoadKey(
+    source, 1, currentCreatorName, isCreatorAllTracksView, currentQueryText,
+  );
+  return `${kind}:${key}`;
+}
+function rememberBrowsePageCursor(kind, page, data) {
+  if (kind !== "group" && kind !== "folder") return;
+  const token = typeof data?.next_cursor === "string" ? data.next_cursor.trim() : "";
+  const key = browseCursorQueryKey(kind);
+  if (!key) return;
+  globalThis.fnAudioLibraryPageCursorPolicy?.remember(state.libraryPageCursors, key, page, token);
+}
+function browseCursorForPage(kind, page) {
+  if (page <= 1 || (kind !== "group" && kind !== "folder")) return "";
+  return globalThis.fnAudioLibraryPageCursorPolicy?.get(state.libraryPageCursors, browseCursorQueryKey(kind), page) || "";
+}
+function rememberLibraryPageCursor(page, data) {
+  if (!isPagedTrackListing() || state.view === "random100") return;
+  const token = typeof data?.next_cursor === "string" ? data.next_cursor.trim() : "";
+  const key = libraryCursorQueryKey();
+  if (!key) return;
+  globalThis.fnAudioLibraryPageCursorPolicy?.remember(state.libraryPageCursors, key, page, token);
+}
+function cursorForLibraryPage(page) {
+  if (page <= 1 || !isPagedTrackListing() || state.view === "random100") return "";
+  return globalThis.fnAudioLibraryPageCursorPolicy?.get(state.libraryPageCursors, libraryCursorQueryKey(), page) || "";
+}
+function ensureMetadataStatusUi() {
+  const statusNode = $("metadataStatusText");
+  if (!statusNode) return {};
+  let list = $("metadataTagJobs");
+  if (!list) {
+    list = document.createElement("div");
+    list.id = "metadataTagJobs";
+    list.className = "metadata-tag-jobs";
+    list.hidden = true;
+    statusNode.after(list);
+  }
+  let retryButton = $("retryTagWritesBtn");
+  if (!retryButton) {
+    retryButton = document.createElement("button");
+    retryButton.id = "retryTagWritesBtn";
+    retryButton.type = "button";
+    retryButton.className = "secondary-button";
+    retryButton.textContent = "重试失败写回";
+    retryButton.hidden = true;
+    retryButton.onclick = retryFailedTagWrites;
+    $("metadataTagWriteActions")?.append(retryButton);
+    if (!$("metadataTagWriteActions")) $("refreshMetadataBtn")?.after(retryButton);
+  }
+  return { list, retryButton };
+}
+function renderMetadataTagJobs(data = {}) {
+  const { list, retryButton } = ensureMetadataStatusUi();
+  if (!list || !retryButton) return;
+  const jobs = Array.isArray(data.tag_jobs) ? data.tag_jobs : [];
+  const failed = Number((data.jobs || {}).failed || 0);
+  retryButton.hidden = failed === 0 || data.tag_write_enabled !== true;
+  list.replaceChildren();
+  list.hidden = jobs.length === 0;
+  jobs.forEach(job => {
+    const row = document.createElement("div");
+    row.className = `metadata-tag-job is-${String(job.status || "pending")}`;
+    const name = document.createElement("strong");
+    name.textContent = [job.title, job.artist].filter(Boolean).join(" - ");
+    const detail = document.createElement("span");
+    const labels = { done: "已写入", skipped: "无需写入", pending: "等待写入", running: "正在写入", retry: "将重试", failed: "写入失败", no_match: "无可写入信息" };
+    detail.textContent = labels[job.status] || job.status || "等待处理";
+    if (job.error) detail.textContent += `：${job.error}`;
+    row.append(name, detail);
+    list.append(row);
+  });
+}
+function metadataTagWriteConfirmation(input, confirmFn = confirm) {
+  if (!input || input.checked !== true || input.dataset?.savedEnabled === "true") return true;
+  return typeof confirmFn === "function" && confirmFn("启用 Tag 写回后，补全结果可能修改原始歌曲文件。确定继续吗？") === true;
+}
+function metadataTaskCounts(status = {}) {
+  const jobs = status.jobs || {};
+  const types = status.job_types || {};
+  const fetching = ["lyrics", "track", "album", "artist", "composer"]
+    .reduce((total, type) => total + Number(types[type]?.pending || 0), 0);
+  return {
+    pending: Number(jobs.pending || 0) + Number(jobs.retry || 0) + Number(jobs.running || 0),
+    fetching,
+    writing: Number(types.tag_write?.pending || 0),
+    failed: Number(jobs.failed || 0),
+    noMatch: Number(jobs.no_match || 0),
+    workers: Number(status.fetch_workers || 0),
+  };
+}
+// A count on its own ("失败 2 · 未匹配 155") never tells the operator what to
+// fix; the status payload now samples the terminal jobs, so every counter can
+// name its job type and, in the log dialog, the track itself (R519).
+const METADATA_JOB_TYPE_LABELS = Object.freeze({
+  lyrics: "歌词",
+  track: "歌曲信息",
+  track_artwork: "封面",
+  tag_write: "Tag 写回",
+  album: "专辑",
+  artist: "艺术家",
+  composer: "作曲者",
+});
+function metadataJobTypeLabel(type) {
+  const key = String(type || "").trim();
+  return METADATA_JOB_TYPE_LABELS[key] || (key ? key : "任务");
+}
+function metadataIssueTypes(issueCounts, stateKey) {
+  const rows = [];
+  Object.entries(issueCounts && typeof issueCounts === "object" ? issueCounts : {}).forEach(([type, value]) => {
+    const count = Number(value?.[stateKey] || 0);
+    if (!Number.isFinite(count) || count <= 0) return;
+    rows.push({ type, label: metadataJobTypeLabel(type), count });
+  });
+  rows.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
+  return rows;
+}
+function metadataIssueTypeText(issueCounts, stateKey) {
+  return metadataIssueTypes(issueCounts, stateKey).map(row => `${row.label} ${row.count}`).join("、");
+}
+function metadataIssueCountersText(status = {}) {
+  const counts = metadataTaskCounts(status);
+  const failed = metadataIssueTypeText(status.issue_counts, "failed");
+  const noMatch = metadataIssueTypeText(status.issue_counts, "no_match");
+  return `失败 ${counts.failed}${failed ? `（${failed}）` : ""} · 未匹配 ${counts.noMatch}${noMatch ? `（${noMatch}）` : ""}`;
+}
+function metadataIssueSampleText(status = {}, limit = 3) {
+  const jobs = Array.isArray(status.issue_jobs) ? status.issue_jobs : [];
+  return jobs.slice(0, limit).map(job => {
+    const name = [job.title, job.artist].filter(Boolean).join(" - ") || "未知歌曲";
+    const kind = `${metadataJobTypeLabel(job.job_type)}${job.status === "failed" ? "失败" : "未匹配"}`;
+    const error = job.status === "failed" && job.error ? String(job.error) : "";
+    const reason = error ? `：${error.length > 40 ? `${error.slice(0, 40)}…` : error}` : "";
+    return `${name}（${kind}${reason}）`;
+  }).join("、");
+}
+// A provider that is cooling down is the only explanation for a run of failures,
+// so the reason stays on the pane next to the counters instead of hiding in a
+// single summary sentence (R494).
+function metadataProviderFailureText(status = {}) {
+  const failures = status.provider_failures && typeof status.provider_failures === "object"
+    ? Object.entries(status.provider_failures).filter(([, value]) => Number(value?.count || 0) > 0).slice(0, 2)
+    : [];
+  return failures.map(([name, value]) => {
+    const cooldown = Math.max(0, Math.min(60, Number(value?.cooldown_seconds || 0)));
+    const error = typeof value?.last_error === "string"
+      ? value.last_error.replace(/[\r\n]+/g, " ").trim().slice(0, 60)
+      : "";
+    return `${name}×${Number(value?.count || 0)}${cooldown ? `（冷却${cooldown}s）` : ""}${error ? `：${error}` : ""}`;
+  }).join("、");
+}
+function renderMetadataTaskState(status = {}) {
+  state.metadataStatus = status && typeof status === "object" ? status : {};
+  const counts = metadataTaskCounts(state.metadataStatus);
+  const enabled = state.metadataStatus.enabled === true;
+  const headline = $("metadataTaskHeadline");
+  const detail = $("metadataTaskDetail");
+  const dot = $("metadataTaskDot");
+  const stats = $("metadataTaskStats");
+  if (headline) {
+    headline.textContent = !enabled ? "后台补全已关闭" : (counts.pending ? "正在补全" : "队列已完成");
+  }
+  if (detail) {
+    // Tag 写回 runs as its own lane, so a busy writer is worth a word even when the
+    // fetch queue is empty.  The flag is compared strictly: the service sends a
+    // real boolean and a truthy string must not be read as "writing" (R494).
+    const writingTags = state.metadataStatus.tag_write_in_progress === true;
+    const lane = counts.pending
+      ? `剩余 ${counts.pending} 项 · ${counts.workers || 0} 并发`
+      : "没有待处理项目";
+    detail.textContent = !enabled
+      ? "播放与歌词页仍会按需获取"
+      : (writingTags ? `${lane} · Tag 写入中` : lane);
+  }
+  if (dot) {
+    dot.className = `metadata-task-dot${!enabled ? " is-off" : (counts.pending ? " is-busy" : " is-done")}`;
+  }
+  if (stats) {
+    stats.replaceChildren();
+    const rows = [["待抓取", counts.fetching], ["待写入", counts.writing], ["失败", counts.failed], ["未匹配", counts.noMatch]];
+    rows.forEach(([label, value]) => {
+      const item = document.createElement("span");
+      item.dataset.metadataStat = label;
+      const name = document.createElement("i");
+      name.textContent = label;
+      const count = document.createElement("b");
+      count.textContent = String(value);
+      if (label === "失败" && value > 0) count.classList.add("is-bad");
+      // The counters are the entry point now: a non-zero failure or no-match
+      // value opens the log dialog on its issue detail instead of leaving the
+      // number unexplained on the pane (R519).
+      if ((label === "失败" || label === "未匹配") && value > 0) {
+        item.dataset.metadataStatIssues = label === "失败" ? "failed" : "no_match";
+        item.tabIndex = 0;
+        item.title = "查看失败与未匹配明细";
+      }
+      item.append(name, count);
+      stats.append(item);
+    });
+  }
+  const alert = $("metadataTaskAlert");
+  if (alert) {
+    const failureText = metadataProviderFailureText(state.metadataStatus);
+    alert.hidden = !failureText;
+    alert.textContent = failureText ? `数据源异常：${failureText}` : "";
+  }
+}
+function metadataLogStamp(at) {
+  return new Date(at).toLocaleTimeString("zh-CN", { hour12: false });
+}
+function pushMetadataLog(level, scope, text) {
+  const message = displayText(text);
+  if (!message) return;
+  if (!Array.isArray(state.metadataLog)) state.metadataLog = [];
+  state.metadataLog.push({ at: Date.now(), level, scope, text: message });
+  if (state.metadataLog.length > 200) state.metadataLog.splice(0, state.metadataLog.length - 200);
+  if ($("metadataLogDialog")?.open) renderMetadataLog();
+}
+function metadataLogFilterMatches(entry) {
+  const filter = state.metadataLogFilter || "all";
+  if (filter === "issue") return entry.level === "error" || entry.level === "warn";
+  if (filter === "done") return entry.level === "info";
+  return true;
+}
+function renderMetadataLogIssues(status = {}) {
+  const section = $("metadataLogIssues");
+  if (!section) return;
+  const jobs = Array.isArray(status.issue_jobs) ? status.issue_jobs : [];
+  const counts = metadataTaskCounts(status);
+  const total = counts.failed + counts.noMatch;
+  // "已完成" is a positive view; the issue block belongs to the other two.
+  section.hidden = (state.metadataLogFilter || "all") === "done" || total === 0;
+  if (section.hidden) return;
+  const summary = $("metadataLogIssuesSummary");
+  if (summary) summary.textContent = metadataIssueCountersText(status);
+  const list = $("metadataLogIssuesList");
+  if (list) {
+    list.replaceChildren();
+    jobs.forEach(job => {
+      const failed = job.status === "failed";
+      const attempts = Number(job.attempts || 0);
+      const row = document.createElement("div");
+      row.className = `metadata-log-issue ${failed ? "is-failed" : "is-no-match"}`;
+      // Only a track the current page can resolve becomes actionable; a row
+      // that cannot open anything must not look clickable.
+      const track = job.track_id ? itemById(job.track_id) : null;
+      if (track) {
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+        row.dataset.metadataIssueTrack = String(job.track_id);
+        row.title = "打开这首歌的元数据补全";
+      }
+      const badge = document.createElement("span");
+      badge.className = "metadata-log-issue-badge";
+      badge.textContent = failed ? "失败" : "未匹配";
+      const name = document.createElement("strong");
+      name.textContent = [job.title, job.artist].filter(Boolean).join(" · ") || "未知歌曲";
+      const type = document.createElement("span");
+      type.className = "metadata-log-issue-type";
+      type.textContent = metadataJobTypeLabel(job.job_type);
+      const reason = document.createElement("span");
+      reason.className = "metadata-log-issue-reason";
+      reason.textContent = failed
+        ? (job.error ? `尝试 ${attempts} 次：${job.error}` : `尝试 ${attempts} 次后失败`)
+        : "数据源没有返回可用结果";
+      row.append(badge, name, type, reason);
+      list.append(row);
+    });
+  }
+  const note = $("metadataLogIssuesNote");
+  if (note) {
+    const hidden = Math.max(0, total - jobs.length);
+    note.textContent = !jobs.length
+      ? "服务端没有返回明细，只能看到计数；刷新一次状态或升级到带明细的版本后再看。"
+      : (hidden > 0
+        ? `按最近更新排序，这里列出 ${jobs.length} 条，另有 ${hidden} 条未展开；复制日志会带上这 ${jobs.length} 条。`
+        : "按最近更新排序；复制日志会带上这些明细。");
+  }
+}
+function renderMetadataLog() {
+  const list = $("metadataLogList");
+  if (!list) return;
+  const counts = metadataTaskCounts(state.metadataStatus);
+  const summary = $("metadataLogSummary");
+  if (summary) {
+    summary.textContent = `队列 ${counts.pending} 项 · ${metadataIssueCountersText(state.metadataStatus)} · 待写入 ${counts.writing}`;
+  }
+  document.querySelectorAll("[data-metadata-log-filter]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.metadataLogFilter === (state.metadataLogFilter || "all")));
+  });
+  renderMetadataLogIssues(state.metadataStatus);
+  const entries = (Array.isArray(state.metadataLog) ? state.metadataLog : []).filter(metadataLogFilterMatches);
+  list.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "dialog-help";
+    // Opening from a counter lands on the issue filter, which may legitimately
+    // have no session events; the rows above are the queue's current state, so
+    // say that instead of a bare "no records" (R519).
+    const issuesVisible = (state.metadataLogFilter || "all") === "issue"
+      && ((state.metadataStatus?.issue_jobs || []).length > 0);
+    empty.textContent = issuesVisible
+      ? "本次会话没有新的失败或未匹配事件；上面的明细是后台队列的当前状态。"
+      : (state.metadataLog?.length ? "当前筛选下没有记录。" : "还没有记录；补全、重试或测试数据源后会出现在这里。");
+    list.append(empty);
+    return;
+  }
+  entries.slice().reverse().forEach(entry => {
+    const row = document.createElement("div");
+    row.className = `metadata-log-row is-${entry.level || "info"}`;
+    const time = document.createElement("time");
+    time.textContent = metadataLogStamp(entry.at);
+    const scope = document.createElement("span");
+    scope.className = "metadata-log-scope";
+    scope.textContent = entry.scope || "任务";
+    const text = document.createElement("p");
+    text.textContent = entry.text;
+    row.append(time, scope, text);
+    list.append(row);
+  });
+}
+function metadataLogText() {
+  const lines = (Array.isArray(state.metadataLog) ? state.metadataLog : [])
+    .map(entry => `${metadataLogStamp(entry.at)}\t${entry.scope || "任务"}\t${entry.text}`);
+  // The copied log has to answer the same question as the dialog: a count
+  // that cannot name its tracks is what made the old log useless (R519).
+  const jobs = Array.isArray(state.metadataStatus?.issue_jobs) ? state.metadataStatus.issue_jobs : [];
+  if (jobs.length) {
+    lines.push("", `失败与未匹配明细（${metadataIssueCountersText(state.metadataStatus)}）：`);
+    jobs.forEach(job => {
+      const name = [job.title, job.artist].filter(Boolean).join(" - ") || "未知歌曲";
+      const failed = job.status === "failed";
+      const error = failed && job.error ? `：${job.error}` : "";
+      lines.push(`${failed ? "失败" : "未匹配"}\t${metadataJobTypeLabel(job.job_type)}\t${name}${error}`);
+    });
+  }
+  return lines.join("\n");
+}
+function openMetadataIssueLog() {
+  state.metadataLogFilter = "issue";
+  renderMetadataLog();
+  $("metadataLogDialog")?.showModal();
+}
+async function copyMetadataLog() {
+  const note = $("metadataLogNote");
+  try {
+    await navigator.clipboard.writeText(metadataLogText());
+    if (note) note.textContent = "已复制到剪贴板。";
+  } catch (_) {
+    if (note) note.textContent = "复制失败，可长按选择日志内容。";
+  }
+}
+async function loadMetadataStatus() {
+  const statusNode = $("metadataStatusText");
+  if (!statusNode) return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const statusController = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const request = fetch("api/config/metadata", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const statusRequest = fetch("api/metadata/status", {
+      cache: "no-store",
+      ...(statusController ? { signal: statusController.signal } : {}),
+    });
+    const [result, statusResult] = await Promise.all([
+      globalThis.fnAudioResponseJsonLoader.read({
+        request,
+        timeoutMs: 6000,
+        onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+        fallback: {},
+      }),
+      globalThis.fnAudioResponseJsonLoader.read({
+        request: statusRequest,
+        timeoutMs: 6000,
+        onTimeout: () => { try { statusController?.abort(); } catch (_) {} },
+        fallback: {},
+      }),
+    ]);
+    const response = result.response;
+    const data = unwrapMetadataResponsePayload(result.data || {});
+    if (!response.ok || data.ok !== true) throw new Error();
+    applyMetadataProviderSettings(data);
+    $("metadataEnabledInput").checked = data.enabled === true;
+    const tagWriteInput = $("metadataTagWriteEnabledInput");
+    tagWriteInput.checked = data.tag_write_enabled === true;
+    tagWriteInput.dataset.savedEnabled = String(tagWriteInput.checked);
+    $("metadataGraceDaysInput").value = Number(data.orphan_grace_days ?? 7);
+    const liveStatus = statusResult.response?.ok
+      ? unwrapMetadataResponsePayload(statusResult.data || {})
+      : data.status || {};
+    renderMetadataTaskState(liveStatus);
+    renderMetadataTagJobs(liveStatus);
+    // The pane renders its own counters now, so this line only carries action
+    // feedback such as "已请求…"; a successful read clears the placeholder (R494).
+    statusNode.textContent = "";
+    if (!state.metadataLog.length) {
+      const counts = metadataTaskCounts(liveStatus);
+      const sample = metadataIssueSampleText(liveStatus);
+      pushMetadataLog("info", "任务", `读取后台状态：队列 ${counts.pending} 项，${metadataIssueCountersText(liveStatus)}${sample ? `；例如 ${sample}` : ""}`);
+    }
+    const providerAlert = metadataProviderFailureText(liveStatus);
+    if (providerAlert && providerAlert !== state.metadataProviderAlert) {
+      state.metadataProviderAlert = providerAlert;
+      pushMetadataLog("warn", "数据源", providerAlert);
+    }
+    return data;
+  } catch (error) {
+    statusNode.textContent = "无法读取后台元数据状态";
+    const list = $("metadataProviderList");
+    if (list && !state.metadataProvidersLoaded) {
+      list.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "dialog-help";
+      message.textContent = "无法读取数据源配置；当前未覆盖已有配置。";
+      list.append(message);
+    }
+    return null;
+  }
+}
+async function saveMetadataOverviewSettings() {
+  const enabledInput = $("metadataEnabledInput");
+  const graceInput = $("metadataGraceDaysInput");
+  if (!enabledInput || !graceInput) throw new Error("元数据概览控件不可用");
+  const graceDays = Number(graceInput.value || 7);
+  if (!Number.isInteger(graceDays) || graceDays < 0 || graceDays > 90) throw new Error("元数据概览控件不可用");
+  const response = await apiFetch("api/config/metadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: enabledInput.checked === true, orphan_grace_days: graceDays }),
+  });
+  const data = unwrapMetadataResponsePayload(await readResponseJsonBounded(response));
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存概览设置失败");
+  $("metadataEnabledInput").checked = data.enabled === true;
+  $("metadataGraceDaysInput").value = Number(data.orphan_grace_days ?? graceDays);
+  renderMetadataTaskState(data.status || {});
+  renderMetadataTagJobs(data.status || {});
+  updateMetadataSettingsOverview();
+  return data;
+}
+async function saveMetadataTagSettings() {
+  const tagWriteInput = $("metadataTagWriteEnabledInput");
+  if (!tagWriteInput) throw new Error("Tag 写回控件不可用");
+  if (!metadataTagWriteConfirmation(tagWriteInput, confirm)) throw new Error("已取消启用 Tag 写回");
+  const response = await apiFetch("api/config/metadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag_write_enabled: tagWriteInput.checked === true }),
+  });
+  const data = unwrapMetadataResponsePayload(await readResponseJsonBounded(response));
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存 Tag 写回设置失败");
+  tagWriteInput.checked = data.tag_write_enabled === true;
+  tagWriteInput.dataset.savedEnabled = String(data.tag_write_enabled === true);
+  renderMetadataTaskState(data.status || {});
+  renderMetadataTagJobs(data.status || {});
+  updateMetadataSettingsOverview();
+  return data;
+}
+async function retryFailedTagWrites() {
+  const { retryButton } = ensureMetadataStatusUi();
+  if (!retryButton) return;
+  retryButton.disabled = true;
+  try {
+    const response = await apiFetch("api/metadata/retry-tag-writes", { method: "POST" });
+    const data = unwrapMetadataResponsePayload(await readResponseJsonBounded(response));
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "重试失败");
+    const retried = Number(data.retried || 0);
+    $("metadataStatusText").textContent = retried ? `已将 ${retried} 项失败写回重新加入队列。` : "没有可重试的失败写回。";
+    pushMetadataLog(retried ? "info" : "warn", "Tag", retried ? `${retried} 项失败写回已重新排队` : "没有可重试的失败写回");
+    renderMetadataTagJobs(data.status || {});
+  } catch (error) {
+    $("metadataStatusText").textContent = error.message || "重试失败";
+  } finally {
+    retryButton.disabled = false;
+  }
+}
+async function refreshMetadataLibrary() {
+  const button = $("refreshMetadataBtn");
+  button.disabled = true;
+  try {
+    const response = await apiFetch("api/metadata/refresh", { method: "POST" });
+    const data = unwrapMetadataResponsePayload(await readResponseJsonBounded(response));
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "启动后台补全失败");
+    $("metadataStatusText").textContent = "已请求后台元数据补全并加入队列，页面可以正常关闭或继续播放。";
+    pushMetadataLog("info", "任务", "已请求重新补全，任务已加入后台队列");
+  } catch (error) {
+    $("metadataStatusText").textContent = error.message || "启动后台补全失败";
+    pushMetadataLog("error", "任务", `启动后台补全失败：${error.message || "未知原因"}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+function dlnaDiagnosticTime(value) {
+  const timestamp = Number(value || 0) * 1000;
+  return Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toLocaleString("zh-CN", { hour12: false }) : "刚刚";
+}
+function dlnaDiagnosticDetail(entry) {
+  const detail = [entry.action, entry.format, entry.mime, entry.mode, entry.range].filter(Boolean).map(displayText).join(" · ");
+  return detail || "设备查询";
+}
+async function loadDlnaDiagnostics() {
+  const list = $("dlnaDiagnosticsList");
+  const summary = $("dlnaDiagnosticsSummary");
+  list.innerHTML = `<p class="dialog-help">正在读取记录...</p>`;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const request = fetch("api/dlna/diagnostics", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: {},
+    });
+    const response = result.response;
+    const data = result.data || {};
+    if (!response.ok || data.available !== true) throw new Error(data.message || "DLNA 服务不可用");
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const clients = Object.keys(data.clients || {}).length;
+    summary.textContent = entries.length ? `已记录 ${entries.length} 条请求，来自 ${clients} 个设备。` : "暂无设备访问记录。";
+    list.innerHTML = entries.length ? entries.map(entry => `
+      <article class="diagnostic-entry">
+        <div><strong>${escapeHtml(displayText(entry.event || "请求"))}</strong><span>${escapeHtml(dlnaDiagnosticTime(entry.time))}</span></div>
+        <p>${escapeHtml(displayText(entry.user_agent || entry.client_ip || "未知设备"))}</p>
+        <small>${escapeHtml(dlnaDiagnosticDetail(entry))}</small>
+      </article>
+    `).join("") : `<p class="dialog-help">让 DLNA 播放器浏览或播放一次音乐后，这里会显示其请求记录。</p>`;
+  } catch (error) {
+    summary.textContent = "无法读取 DLNA 兼容性记录";
+    list.innerHTML = `<p class="dialog-help">请确认 fnAudio 服务正在运行。</p>`;
+  }
+}
+function openDlnaDiagnostics() {
+  $("dlnaDiagnosticsDialog").showModal();
+  loadDlnaDiagnostics();
+}
+function renderLibraryPathInputs(paths = [""]) {
+  const values = (Array.isArray(paths) ? paths : [paths]).map(x => String(x || "").trim()).filter(Boolean);
+  if (!values.length) values.push("");
+  $("libraryPathList").innerHTML = values.map(value => `
+    <div class="library-path-row">
+      <input class="library-path-input" value="${escapeHtml(value)}" placeholder="请选择音乐目录" readonly>
+      ${value ? `<button class="library-path-remove" type="button" title="删除此目录" aria-label="删除此目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>` : ""}
+    </div>
+  `).join("");
+  $("libraryPathList").querySelectorAll(".library-path-remove").forEach(button => {
+    button.onclick = () => {
+      button.closest(".library-path-row")?.remove();
+      if (!$("libraryPathList").querySelector(".library-path-input")) renderLibraryPathInputs([""]);
+      markSettingsDirty("library");
+    };
+  });
+}
+function collectLibraryPaths() {
+  return [...$("libraryPathList").querySelectorAll(".library-path-input")].map(input => input.value.trim()).filter(Boolean);
+}
+function hostUnavailable(message) {
+  // Marks the failures that mean "this environment has no fnOS host at all"
+  // rather than "the host was reached and refused".  Only the former may fall
+  // back to another UI; a denial or a timeout must keep reporting itself,
+  // otherwise the user never learns why the official picker did nothing.
+  const error = new Error(message);
+  error.hostUnavailable = true;
+  return error;
+}
+async function runTrimHostAction(method, args = [], { dialog = null, timeoutMs = 10000 } = {}) {
+  let active = true;
+  let restoreDialog = false;
+  const bounded = async (work, duration) => {
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(work),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("飞牛宿主响应超时，请重试或从飞牛应用入口重新打开 fnAudio")), duration);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const sdk = await bounded(async () => {
+      const host = await getTrimSdk();
+      if (!host) throw hostUnavailable("无法连接飞牛宿主，请从飞牛应用入口打开 fnAudio");
+      if (typeof host.ready === "function") await host.ready();
+      return host;
+    }, 10000);
+    if (sdk.isStandaloneWeb) throw hostUnavailable("请从飞牛桌面或飞牛 App 的 fnAudio 应用入口打开");
+    if (!method) return sdk;
+    if (typeof sdk[method] !== "function") throw hostUnavailable("当前飞牛宿主不支持此操作，请更新系统或 App 后重试");
+    // A native modal makes host-injected UI in this document inert. Keep the
+    // settings DOM (including unsaved values), and restore it after the picker.
+    restoreDialog = dialog?.open === true;
+    if (restoreDialog) dialog.close();
+    return await bounded(() => active ? sdk[method](...args) : undefined, timeoutMs);
+  } finally {
+    active = false;
+    if (restoreDialog && !dialog.open) dialog.showModal();
+  }
+}
+function openLibraryDirBrowser(path = "") {
+  const dialog = $("libraryDirDialog");
+  if (!dialog) return false;
+  try { $("folderDialog")?.close(); } catch (_) {}
+  if (!dialog.open) dialog.showModal();
+  state.libraryDirPath = "";
+  state.libraryDirParent = "";
+  void loadLibraryDir(path);
+  return true;
+}
+
+async function loadLibraryDir(path = "") {
+  const list = $("libraryDirList");
+  const pathText = $("libraryDirPath");
+  const status = $("libraryDirStatus");
+  const addButton = $("libraryDirAddBtn");
+  const upButton = $("libraryDirUpBtn");
+  if (status) status.textContent = "";
+  if (pathText) pathText.textContent = path || "选择一个磁盘或共享目录";
+  if (list) list.innerHTML = '<p class="dialog-help">正在读取目录...</p>';
+  if (addButton) addButton.disabled = !path;
+  if (upButton) upButton.disabled = true;
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const response = await apiFetch(`api/library/dirs${query}`);
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "无法读取目录");
+    renderLibraryDirListing(data);
+  } catch (error) {
+    if (list) list.innerHTML = "";
+    if (status) status.textContent = error.message || "无法读取目录";
+  }
+}
+
+function renderLibraryDirListing(data = {}) {
+  const list = $("libraryDirList");
+  const pathText = $("libraryDirPath");
+  const status = $("libraryDirStatus");
+  const addButton = $("libraryDirAddBtn");
+  const upButton = $("libraryDirUpBtn");
+  const current = typeof data.path === "string" ? data.path : "";
+  const parent = typeof data.parent === "string" ? data.parent : "";
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  state.libraryDirPath = current;
+  state.libraryDirParent = parent;
+  if (pathText) pathText.textContent = current || "选择一个磁盘或共享目录";
+  if (addButton) addButton.disabled = !current;
+  // A browse root ("我的文件") has no parent on purpose, so walking up can never
+  // reach the volume root with its @appdata/docker/thumb.  The button still has
+  // to work there: it goes back to the root list, which is the only way to pick
+  // another storage space once the first one is open.
+  if (upButton) upButton.disabled = !parent && !current;
+  if (status) status.textContent = "";
+  if (!list) return;
+  const rows = (current ? entries : roots).map(item => {
+    const name = typeof item?.name === "string" ? item.name : "";
+    const value = typeof item?.path === "string" ? item.path : "";
+    if (!value) return "";
+    return `<button class="library-dir-row" type="button" data-dir-path="${escapeHtml(value)}">${escapeHtml(name || value)}</button>`;
+  }).filter(Boolean);
+  const truncated = data.truncated === true ? '<p class="dialog-help">目录过多，只显示前 200 个。</p>' : "";
+  list.innerHTML = rows.length
+    ? rows.join("") + truncated
+    : `<p class="dialog-help">${current ? "这里没有子目录，可以直接添加当前目录。" : "服务器上没有可浏览的音乐目录。"}</p>`;
+  list.querySelectorAll("[data-dir-path]").forEach(row => {
+    row.onclick = () => { void loadLibraryDir(row.dataset.dirPath || ""); };
+  });
+}
+
+function addCurrentLibraryDir() {
+  const path = state.libraryDirPath || "";
+  const status = $("libraryDirStatus");
+  if (!path) {
+    if (status) status.textContent = "请先进入一个目录。";
+    return false;
+  }
+  const current = collectLibraryPaths();
+  if (current.includes(path)) {
+    if (status) status.textContent = "这个目录已经在列表里了。";
+    return false;
+  }
+  renderLibraryPathInputs([...current, path]);
+  try { $("libraryDirDialog")?.close(); } catch (_) {}
+  const dialog = $("folderDialog");
+  if (dialog && !dialog.open) dialog.showModal();
+  ensureSettingsStatusNodes();
+  setSettingsTab("library");
+  markSettingsDirty("library");
+  const libraryStatus = $("librarySettingsStatus");
+  if (libraryStatus) libraryStatus.textContent = "已添加目录，点击底部“保存更改”写入。";
+  return true;
+}
+async function saveSettingsPane(button, statusNode, saveAction, successMessage = "已保存。") {
+  if (!button || typeof saveAction !== "function") return false;
+  button.disabled = true;
+  button.textContent = "正在保存...";
+  const setStatusClass = (name, enabled) => {
+    if (statusNode?.classList && typeof statusNode.classList.toggle === "function") {
+      statusNode.classList.toggle(name, enabled);
+    }
+  };
+  if (statusNode) {
+    statusNode.textContent = "";
+    setStatusClass("is-success", false);
+    setStatusClass("is-error", false);
+  }
+  try {
+    const result = await saveAction();
+    if (result !== false) {
+      if (statusNode) {
+        setStatusClass("is-success", true);
+        statusNode.textContent = successMessage;
+      }
+      return true;
+    }
+    return false;
+  } catch (error) {
+    if (statusNode) {
+      setStatusClass("is-error", true);
+      statusNode.textContent = error.message || "保存失败，请确认应用服务正在运行";
+    }
+    return false;
+  } finally {
+    button.disabled = false;
+    button.textContent = button.dataset?.saveLabel || "保存";
+  }
+}
+function saveLibrarySettings() {
+  return saveSettingsPane($("saveLibrarySettingsBtn"), $("librarySettingsStatus"), () => saveLibraryPathsFromDialog(), "音乐库设置已保存。");
+}
+function saveRuntimePaneSettings() {
+  return saveSettingsPane($("saveRuntimeSettingsBtn"), $("runtimeSettingsStatus"), () => saveRuntimeSettings(), "运行设置已保存。");
+}
+async function saveDlnaSettings() {
+  const input = dlnaTypeDetectionInput();
+  if (!input) throw new Error("DLNA 设置控件不可用");
+  const response = await apiFetch("api/config/runtime", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ [DLNA_TYPE_DETECTION_SETTING_KEY]: input.checked === true }),
+  });
+  const data = await readResponseJsonBounded(response);
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存 DLNA 设置失败");
+  if (typeof data?.config?.[DLNA_TYPE_DETECTION_SETTING_KEY] === "boolean") {
+    input.checked = data.config[DLNA_TYPE_DETECTION_SETTING_KEY];
+  }
+  return data;
+}
+function saveDlnaPaneSettings() {
+  return saveSettingsPane($("saveDlnaSettingsBtn"), $("dlnaSettingsStatus"), saveDlnaSettings, "DLNA 设置已保存。");
+}
+function saveMetadataOverviewPaneSettings() {
+  return saveSettingsPane($("saveMetadataSettingsBtn"), $("metadataOverviewSettingsStatus"), saveMetadataOverviewSettings, "概览设置已保存。");
+}
+function saveMetadataTagPaneSettings() {
+  return saveSettingsPane($("saveMetadataTagSettingsBtn"), $("metadataTagSettingsStatus"), saveMetadataTagSettings, "Tag 写回设置已保存。");
+}
+async function saveMetadataProvidersOnly() {
+  const response = await apiFetch("api/config/metadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ providers: metadataProviderPayload() }),
+  });
+  const data = unwrapMetadataResponsePayload(await readResponseJsonBounded(response));
+  if (!response.ok || data.ok !== true) throw new Error(data.message || "保存数据源设置失败");
+  applyMetadataProviderSettings(data);
+  return data;
+}
+function saveMetadataProviderPaneSettings() {
+  return saveSettingsPane($("saveMetadataProvidersBtn"), $("metadataProviderStatusText"), saveMetadataProvidersOnly, "数据源设置已保存。");
+}
+function savePlaybackPaneSettings() {
+  return saveSettingsPane($("savePlaybackSettingsBtn"), $("playbackSettingsStatus"), () => savePlaybackSettings(), "播放与设备设置已保存。");
+}
+function openPlaylistDialog(trackId = "") {
+  openPlaylistDialogForTracks(trackId ? [trackId] : []);
+}
+function playlistTrackIds(values = []) {
+  // Rows already resolved by a caller are authoritative; a bare id still has to
+  // exist in the item cache.  That distinction is the whole point: a group action
+  // on a 13,000-song folder evicts its own tail from the 12,000-entry cache while
+  // it runs, so re-validating its rows by id dropped exactly those songs and still
+  // reported success (R501).
+  const list = Array.isArray(values) ? values : [values];
+  const ids = [];
+  const seen = new Set();
+  list.forEach(value => {
+    const isRow = Boolean(value) && typeof value === "object";
+    const id = String((isRow ? value.id : value) || "");
+    if (!id || seen.has(id)) return;
+    if (!isRow && !itemById(id)) return;
+    seen.add(id);
+    ids.push(id);
+  });
+  return ids;
+}
+function openPlaylistDialogForTracks(values = []) {
+  const list = Array.isArray(values) ? values : [values];
+  const ids = playlistTrackIds(list);
+  state.pendingPlaylistTrack = ids[0] || "";
+  state.pendingPlaylistTrackIds = ids;
+  // The rows travel with the dialog: the id list cannot be re-validated later
+  // without losing whatever the cache has forgotten in the meantime.
+  state.pendingPlaylistTracks = list.slice();
+  $("playlistStatus").textContent = "";
+  $("playlistNameInput").value = "";
+  if (ids.length) {
+    $("playlistDialogTitle").textContent = "加入播放列表";
+    $("playlistDialogHelp").textContent = ids.length > 1 ? `选择一个已有播放列表，或输入名称创建新列表并加入所选 ${ids.length} 首歌曲。` : "选择一个已有播放列表，或输入名称创建新列表并加入当前歌曲。";
+    $("savePlaylistBtn").textContent = "新建并加入";
+    renderPlaylistChoices(list);
+  } else {
+    $("playlistDialogTitle").textContent = "新建播放列表";
+    $("playlistDialogHelp").textContent = "输入一个名字，创建后可从曲目旁边加入歌曲。";
+    $("savePlaylistBtn").textContent = "保存";
+    $("playlistChoices").innerHTML = "";
+  }
+  $("playlistDialog").showModal();
+  $("playlistNameInput").focus();
+}
+function renderPlaylistChoices(values = []) {
+  const list = Array.isArray(values) ? values : [values];
+  const ids = playlistTrackIds(list);
+  const choices = $("playlistChoices");
+  if (!state.playlists.length) {
+    choices.innerHTML = `<p class="dialog-help">还没有自建播放列表。</p>`;
+    return;
+  }
+  choices.innerHTML = state.playlists.map(list => {
+    const exists = ids.length > 0 && ids.every(id => list.trackIds.includes(id));
+  return `<button type="button" class="playlist-choice" data-add-to-list="${escapeHtml(list.id)}" ${exists ? "disabled" : ""}><span>${escapeHtml(list.name)}</span><small>${exists ? "已加入" : `${list.trackIds.length} 首`}</small></button>`;
+  }).join("");
+  // Hand the same rows on: re-deriving them from ids here is where the tail used
+  // to fall off a second time.
+  choices.querySelectorAll("[data-add-to-list]").forEach(button => button.onclick = () => addTracksToPlaylist(button.dataset.addToList, list));
+}
+function createPlaylist(name, values = []) {
+  const cleanName = String(name || "").trim();
+  if (!cleanName) {
+    $("playlistStatus").textContent = "请输入播放列表名称";
+    return null;
+  }
+  const playlist = { id: makePlaylistId(), name: cleanName, trackIds: [] };
+  playlist.trackIds.push(...playlistTrackIds(values));
+  state.playlists.push(playlist);
+  savePlaylists();
+  renderPlaylistNav();
+  return playlist;
+}
+function addTracksToPlaylist(playlistId, values = []) {
+  const playlist = state.playlists.find(x => x.id === playlistId);
+  const ids = playlistTrackIds(values);
+  if (!playlist || !ids.length) return;
+  ids.forEach(id => { if (!playlist.trackIds.includes(id)) playlist.trackIds.push(id); });
+  savePlaylists();
+  $("playlistStatus").textContent = "已加入播放列表";
+  setTimeout(() => {
+    if ($("playlistDialog").open) $("playlistDialog").close();
+    render();
+  }, 260);
+}
+function closeTrackActionDialog() {
+  state.metadataCandidateRequestToken += 1;
+  try { state.metadataCandidateController?.abort(); } catch (_) {}
+  state.metadataCandidateSearchToken += 1;
+  try { state.metadataCandidateSearchController?.abort(); } catch (_) {}
+  state.metadataCandidateController = null;
+  state.metadataCandidateSearchController = null;
+  if ($("trackActionDialog").open) $("trackActionDialog").close();
+  if ($("metadataCandidateDialog")?.open) $("metadataCandidateDialog").close();
+}
+function closeTrackContextMenu() {
+  const menu = $("trackContextMenu");
+  if (!menu) return;
+  menu.hidden = true;
+  menu.innerHTML = "";
+}
+function cancelTrackLongPress() {
+  if (!activeTrackLongPress) return;
+  window.clearTimeout(activeTrackLongPress.timer);
+  activeTrackLongPress = null;
+}
+function suppressTrackClick(rowKey) {
+  suppressedTrackClick = { rowKey: String(rowKey || ""), until: Date.now() + 900 };
+}
+function shouldSuppressTrackClick(rowKey) {
+  return suppressedTrackClick.rowKey === String(rowKey || "") && Date.now() < suppressedTrackClick.until;
+}
+function openTrackMenuForRow(row, x, y, mobile = false) {
+  const id = String(row?.dataset.trackId || "");
+  const rowKey = String(row?.dataset.trackRowKey || "");
+  if (!id) return;
+  if (mobile) {
+    setTrackSelection([]);
+    suppressTrackClick(rowKey);
+  } else if (!state.selectedTrackRowKeys.has(rowKey)) {
+    setTrackSelection([rowKey]);
+  }
+  openTrackContextMenu(id, x, y);
+}
+function trackRowFromTarget(target, list = $("trackList")) {
+  const row = target?.closest?.("[data-track-row-key]");
+  return row && list?.contains(row) ? row : null;
+}
+function groupRowFromTarget(target, list = $("trackList")) {
+  // The two row families are siblings inside #trackList, so every pointer handler
+  // has to say which one it is looking at before it starts a hold (R504).
+  const row = target?.closest?.("[data-group-row]");
+  return row && list?.contains(row) ? row : null;
+}
+function startTrackLongPress(row, event) {
+  if (!window.matchMedia("(max-width: 760px)").matches || event.pointerType === "mouse" || event.button !== 0) return;
+  cancelTrackLongPress();
+  const gesture = {
+    row,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    timer: 0,
+    triggered: false,
+  };
+  gesture.timer = window.setTimeout(() => {
+    if (activeTrackLongPress !== gesture) return;
+    gesture.triggered = true;
+    openTrackMenuForRow(gesture.row, gesture.startX, gesture.startY, true);
+  }, TRACK_LONG_PRESS_DURATION_MS);
+  activeTrackLongPress = gesture;
+}
+function moveTrackLongPress(event) {
+  const gesture = activeTrackLongPress;
+  if (!gesture || gesture.pointerId !== event.pointerId || gesture.triggered) return;
+  const moved = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+  if (moved > TRACK_LONG_PRESS_MOVE_THRESHOLD_PX) cancelTrackLongPress();
+}
+function finishTrackLongPress(event) {
+  const gesture = activeTrackLongPress;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  const triggered = gesture.triggered;
+  cancelTrackLongPress();
+  if (!triggered) return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+function cancelGroupLongPress() {
+  if (!activeGroupLongPress) return;
+  window.clearTimeout(activeGroupLongPress.timer);
+  activeGroupLongPress = null;
+}
+function suppressGroupClick(groupKey) {
+  suppressedGroupClick = { groupKey: String(groupKey || ""), until: Date.now() + 900 };
+}
+function shouldSuppressGroupClick(groupKey) {
+  return suppressedGroupClick.groupKey === String(groupKey || "") && Date.now() < suppressedGroupClick.until;
+}
+function startGroupLongPress(row, event) {
+  // Same gesture as the song rows, same gate: phone width, a finger, primary
+  // button.  A mouse never holds -- desktop already has right-click (R504).
+  if (!window.matchMedia("(max-width: 760px)").matches || event.pointerType === "mouse" || event.button !== 0) return;
+  cancelGroupLongPress();
+  const gesture = {
+    row,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    timer: 0,
+    triggered: false,
+  };
+  gesture.timer = window.setTimeout(() => {
+    if (activeGroupLongPress !== gesture) return;
+    if (!gesture.row?.isConnected) return;
+    const key = String(gesture.row.dataset.groupKey || "");
+    if (!key) return;
+    gesture.triggered = true;
+    setGroupSelection([key]);
+    // The finger is still down.  Lifting it fires a click on the row, and a click
+    // on an album row opens that album -- which would close the menu the hold just
+    // opened and look like the hold did nothing (R504).
+    suppressGroupClick(key);
+    openGroupContextMenu(key, gesture.startX, gesture.startY);
+  }, GROUP_LONG_PRESS_DURATION_MS);
+  activeGroupLongPress = gesture;
+}
+function moveGroupLongPress(event) {
+  const gesture = activeGroupLongPress;
+  if (!gesture || gesture.pointerId !== event.pointerId || gesture.triggered) return;
+  const moved = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+  if (moved > GROUP_LONG_PRESS_MOVE_THRESHOLD_PX) cancelGroupLongPress();
+}
+function finishGroupLongPress(event) {
+  const gesture = activeGroupLongPress;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  const triggered = gesture.triggered;
+  cancelGroupLongPress();
+  if (!triggered) return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+function bindTrackListInteractions() {
+  const list = $("trackList");
+  if (!list || list.dataset.trackInteractionsBound === "1") return;
+  list.dataset.trackInteractionsBound = "1";
+  list.addEventListener("click", event => {
+    if (!libraryInteractionBlockedFor(event.target, list)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  list.addEventListener("click", event => {
+    const row = trackRowFromTarget(event.target, list);
+    if (!row) return;
+    const rowKey = String(row.dataset.trackRowKey || "");
+    if (shouldSuppressTrackClick(rowKey)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const mobile = window.matchMedia("(max-width: 760px)").matches;
+    const button = event.target.closest?.("[data-play]");
+    if (button && list.contains(button)) {
+      if (event.ctrlKey && !mobile) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleTrackSelection(rowKey);
+      } else if (!mobile) {
+        event.preventDefault();
+        event.stopPropagation();
+        setTrackSelection([rowKey]);
+      } else if (state.selectedTrackRowKeys.size) {
+        event.preventDefault();
+        event.stopPropagation();
+        setTrackSelection([]);
+      } else {
+        playById(button.dataset.play);
+      }
+      return;
+    }
+    if (event.ctrlKey && !mobile) {
+      event.preventDefault();
+      toggleTrackSelection(rowKey);
+    } else if (!mobile && state.selectedTrackRowKeys.size) {
+      event.preventDefault();
+      setTrackSelection([]);
+    }
+  });
+  list.addEventListener("contextmenu", event => {
+    if (libraryInteractionBlockedFor(event.target, list)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    const row = trackRowFromTarget(event.target, list);
+    if (!row) return;
+    event.preventDefault();
+    const mobile = window.matchMedia("(max-width: 760px)").matches;
+    if (mobile && shouldSuppressTrackClick(String(row.dataset.trackRowKey || ""))) return;
+    cancelTrackLongPress();
+    openTrackMenuForRow(row, event.clientX, event.clientY, mobile);
+  });
+  list.addEventListener("pointerdown", event => {
+    if (libraryInteractionBlockedFor(event.target, list)) {
+      cancelTrackLongPress();
+      event.preventDefault();
+      return;
+    }
+    const row = trackRowFromTarget(event.target, list);
+    if (row) startTrackLongPress(row, event);
+  });
+  list.addEventListener("pointerdown", event => {
+    if (libraryInteractionBlockedFor(event.target, list)) {
+      cancelGroupLongPress();
+      return;
+    }
+    const row = groupRowFromTarget(event.target, list);
+    if (row) startGroupLongPress(row, event);
+  });
+  list.addEventListener("pointerdown", event => { speculateLibraryNavigation(event, list); });
+  list.addEventListener("pointermove", event => { armLibraryNavigationHover(event, list); });
+  list.addEventListener("pointerleave", () => cancelLibraryNavigationHoverDwell());
+  list.addEventListener("click", event => {
+    if (isConsumedNavigationClick(event, list)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+  list.addEventListener("pointercancel", () => clearLibraryNavigationSpeculation());
+  list.addEventListener("pointermove", moveTrackLongPress);
+  list.addEventListener("pointerup", finishTrackLongPress);
+  list.addEventListener("pointercancel", finishTrackLongPress);
+  list.addEventListener("pointermove", moveGroupLongPress);
+  list.addEventListener("pointerup", finishGroupLongPress);
+  list.addEventListener("pointercancel", finishGroupLongPress);
+}
+const TRACK_ACTION_ICONS = {
+  play: '<path d="m9 6 9 6-9 6Z"/>',
+  "play-from-current": '<path d="m9 6 9 6-9 6Z"/><path d="M4 5v14"/>',
+  queue: '<path d="M4 6h9M4 12h9M4 18h9"/><path d="m16 15 4 3-4 3Z"/>',
+  favorite: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/>',
+  "favorite-add": '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/>',
+  playlist: '<path d="M4 6h10M4 12h10M4 18h7"/><path d="M17 14v6M14 17h6"/>',
+  insert: '<path d="M4 6h10M4 12h7M4 18h10"/><path d="m17 14 3 3-3 3"/><path d="M20 17h-7"/>',
+  open: '<path d="M3 7.5h6.2l2 2H21v8.7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 7.5V6a2 2 0 0 1 2-2h4.4l2 2H19a2 2 0 0 1 2 2v1.5"/>',
+  info: '<circle cx="12" cy="12" r="8"/><path d="M12 11v5M12 8.5v.1"/>',
+  "metadata-candidate": '<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z"/><path d="m19 16 .7 1.8L21.5 18l-1.8.7L19 20.5l-.7-1.8-1.8-.7 1.8-.7Z"/>',
+  "open-folder": '<path d="M3 7.5h6.2l2 2H21v8.7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 7.5V6a2 2 0 0 1 2-2h4.4l2 2H19a2 2 0 0 1 2 2v1.5"/>',
+  share: '<path d="M14 5h5v5"/><path d="m19 5-8 8"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/>',
+  "delete-file": '<path d="M5 7h14M10 4h4l1 3H9Z"/><path d="M7 7v13h10V7M10 11v5M14 11v5"/>',
+  "remove-queue": '<path d="M4 6h9M4 12h9M4 18h9"/><path d="m17 15 4 4M21 15l-4 4"/>',
+  "remove-favorite": '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/><path d="M9 12h6"/>',
+  "remove-playlist": '<path d="M4 6h10M4 12h10M4 18h7"/><path d="m17 15 4 4M21 15l-4 4"/>',
+};
+function trackActionIcon(action) {
+  return `<svg class="track-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${TRACK_ACTION_ICONS[action] || '<circle cx="12" cy="12" r="8"/>'}</svg>`;
+}
+function groupActionButton(label, action, disabled = false) {
+  return `<button class="track-action-choice" type="button" data-group-action="${action}"${disabled ? " disabled" : ""}>${trackActionIcon(action)}<span>${label}</span></button>`;
+}
+function groupActionButtons(groupKey) {
+  const selected = selectedGroupDescriptors(groupKey);
+  const multiple = selected.length > 1;
+  // 0.1.172 removed both 播放 and 插播所选项目 from the group menu while the
+  // handler kept its `case "play"` branch alive, so for two years the menu could
+  // not reach it.  播放 is back by owner request (R499): a folder / album /
+  // artist row now starts playing everything under it in one click.  插播所选项目
+  // stays out -- nothing asked for it, and it means "insert after the current
+  // track", which is a different action from 播放 rather than a second way to
+  // reach the same one.  R511 then removed the last three 播放全部 buttons (album
+  // and genre detail breadcrumbs, category detail header), so this menu entry is
+  // now the only one-click way to play a whole set.
+  return [
+    groupActionButton("播放", "play"),
+    groupActionButton("加入当前队列", "queue"),
+    groupActionButton("加入播放列表", "playlist"),
+    groupActionButton("打开", "open", multiple),
+  ];
+}
+function bindGroupActionButtons(container) {
+  container.querySelectorAll("[data-group-action]").forEach(button => button.onclick = () => runGroupAction(button.dataset.groupAction));
+}
+function openGroupContextMenu(groupKey, x, y) {
+  const groups = selectedGroupDescriptors(groupKey);
+  const menu = $("trackContextMenu");
+  if (!groups.length || !menu) return;
+  state.actionGroupKey = String(groupKey || "");
+  const title = groups.length > 1 ? `已选择 ${groups.length} 个项目` : (groups[0].name || "文件夹");
+  menu.innerHTML = `<strong class="track-context-title">${escapeHtml(title)}</strong><div class="track-context-actions">${groupActionButtons(groupKey).join("")}</div>`;
+  menu.hidden = false;
+  menu.style.left = `${Math.max(8, x)}px`;
+  menu.style.top = `${Math.max(8, y)}px`;
+  bindGroupActionButtons(menu);
+  requestAnimationFrame(() => {
+    const margin = 8;
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(margin, Math.min(x, window.innerWidth - bounds.width - margin))}px`;
+    menu.style.top = `${Math.max(margin, Math.min(y, window.innerHeight - bounds.height - margin))}px`;
+  });
+}
+async function runGroupAction(action) {
+  const groupKey = state.actionGroupKey;
+  const selected = selectedGroupDescriptors(groupKey);
+  closeTrackContextMenu();
+  if (action === "open") {
+    if (selected.length === 1) openGroupRow([...document.querySelectorAll("[data-group-row]")].find(row => String(row.dataset.groupKey || "") === selected[0].key));
+    return;
+  }
+  let tracks = [];
+  try {
+    tracks = await resolveSelectedGroupTracks(groupKey);
+  } catch (error) {
+    alert("读取所选项目的歌曲失败");
+    return;
+  }
+  if (!tracks.length) {
+    // A folder with no audio file, or a row whose tracks went away while the menu
+    // was open: a 播放 click that returns silently reads as a dead button (R499).
+    if (action === "play") alert("所选项目下没有可播放的歌曲");
+    return;
+  }
+  const ids = tracks.map(item => String(item.id));
+  if (action === "play") playTracks(tracks);
+  else if (action === "queue") addTracksToQueue(tracks);
+  else if (action === "insert") insertSelectedTracks(ids);
+  else if (action === "playlist") openPlaylistDialogForTracks(tracks);
+}
+function actionButton(label, action, danger = false, disabled = false) {
+  return `<button type="button" class="track-action-choice ${danger ? "danger" : ""}" data-track-action="${action}" ${disabled ? "disabled" : ""}>${trackActionIcon(action)}<span>${label}</span></button>`;
+}
+function metadataSourceText(item) {
+  const source = item.metadata_source || {};
+  const label = value => value === "tag" ? "Tag" : value === "filename" ? "文件名" : value === "folder" ? "文件夹" : "未知";
+  return `来源：歌名 ${label(source.title)} · 歌手 ${label(source.artist)} · 专辑 ${label(source.album)}`;
+}
+function metadataCandidateDialogNode() {
+  return $("metadataCandidateDialog") || $("trackActionDialog");
+}
+function metadataCandidateResultsNode() {
+  return $("metadataCandidateSearchResults") || $("metadataCandidateResults") || $("trackActionList");
+}
+function metadataCandidateStatusNode() {
+  return $("metadataCandidateStatus") || $("trackActionTitle");
+}
+function openMetadataCandidateDialog(trackId) {
+  const item = itemById(trackId);
+  const dialog = metadataCandidateDialogNode();
+  if (!item || !dialog) return;
+  state.actionTrackId = String(trackId);
+  state.metadataCandidateProviderId = "";
+  renderMetadataCandidateProviderPicker();
+  const summary = $("metadataCandidateTrackSummary");
+  if (summary) summary.textContent = [displayTrackTitle(item), item.artist, item.album].filter(Boolean).join(" · ");
+  const input = $("metadataCandidateSearchInput");
+  if (input) input.value = displayTrackTitle(item);
+  const searchStatus = $("metadataCandidateSearchStatus");
+  if (searchStatus) searchStatus.textContent = "识别失败时可修改关键词重新搜索。";
+  // Nothing is selected until a query answers, so the footer cannot promise a
+  // write before there is anything to write (R494).
+  state.metadataCandidateSelection = null;
+  renderMetadataCandidatePreview(item, null);
+  const apply = $("applyMetadataCandidateBtn");
+  if (apply) { apply.disabled = true; apply.textContent = "确认并写入"; }
+  const status = metadataCandidateStatusNode();
+  if (status) status.textContent = "正在查询候选结果...";
+  dialog.showModal();
+  searchTrackMetadataManually();
+}
+// The service writes a candidate field when the local value is empty **or** when
+// the local value came from the filename rather than a real tag.  The preview has
+// to say exactly that: the old dialog promised "只补全空白" while filename-derived
+// values were silently replaced (R494).
+const METADATA_CANDIDATE_FIELDS = [
+  ["title", "歌名"],
+  ["artist", "歌手"],
+  ["album", "专辑"],
+  ["album_artist", "专辑艺人"],
+  ["date", "年份"],
+  ["track_no", "音轨号"],
+  ["disc_no", "碟号"],
+  ["genre", "风格"],
+];
+// Mirrors `PLACEHOLDER_NAMES` in metadata_service.py.
+const METADATA_CANDIDATE_PLACEHOLDERS = new Set([
+  "", "未分类", "未知专辑", "未知歌手", "未知艺术家", "未知作曲者",
+  "unknown album", "unknown artist", "unknown composer",
+]);
+function metadataCandidateConfidenceValue(candidate) {
+  const raw = candidate?.confidence;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.min(1, value) : 0;
+}
+function metadataCandidateConfidenceLabel(candidate) {
+  const percent = globalThis.fnAudioMetadataCandidatePresentationPolicy?.confidencePercent;
+  return typeof percent === "function" ? percent(candidate?.confidence) : `${Math.round(metadataCandidateConfidenceValue(candidate) * 100)}%`;
+}
+function metadataCandidateFieldChange(item, candidate, field) {
+  const next = String(candidate?.[field] ?? "").trim();
+  if (!next) return null;
+  const current = String(item?.[field] ?? "").trim();
+  // Same text is not a change worth showing, whatever it came from.
+  if (current && current.toLowerCase() === next.toLowerCase()) return {state: "keep", current, next};
+  if (!current || METADATA_CANDIDATE_PLACEHOLDERS.has(current.toLowerCase())) {
+    return {state: "fill", current, next};
+  }
+  // A value the scanner took from the file name is not a user tag, so the
+  // service is free to replace it.
+  if (item?.metadata_source?.[field] !== "tag") return {state: "replace", current, next};
+  return {state: "keep", current, next};
+}
+function metadataCandidateChanges(item, candidate) {
+  const changes = [];
+  if (!candidate) return changes;
+  METADATA_CANDIDATE_FIELDS.forEach(([field, label]) => {
+    const change = metadataCandidateFieldChange(item, candidate, field);
+    if (change) changes.push({field, label, ...change});
+  });
+  if (String(candidate.image_url || "").trim()) {
+    const hasArtwork = Boolean(item?.metadata_artwork_id || item?.artwork_id);
+    changes.push({
+      field: "artwork",
+      label: "封面",
+      state: hasArtwork ? "keep" : "fill",
+      current: hasArtwork ? "已有封面" : "缺失",
+      next: hasArtwork ? "保留" : "将下载 1 张",
+    });
+  }
+  return changes;
+}
+function renderMetadataCandidatePreview(item, candidate) {
+  const list = $("metadataCandidatePreview");
+  const note = $("metadataCandidatePreviewNote");
+  const changes = metadataCandidateChanges(item, candidate);
+  const writing = changes.filter(change => change.state !== "keep").length;
+  const keeping = changes.length - writing;
+  if (list) {
+    list.replaceChildren();
+    changes.forEach(change => {
+      const row = document.createElement("div");
+      row.className = `metadata-candidate-change is-${change.state}`;
+      row.dataset.field = change.field;
+      const term = document.createElement("dt");
+      term.textContent = change.label;
+      const detail = document.createElement("dd");
+      if (change.state === "keep") {
+        const keep = document.createElement("span");
+        keep.className = "metadata-candidate-keep";
+        keep.textContent = `${change.current} · 保留`;
+        detail.append(keep);
+      } else {
+        if (change.state === "replace" && change.current) {
+          const current = document.createElement("s");
+          current.className = "metadata-candidate-current";
+          current.textContent = change.current;
+          // A struck "1" on its own reads like a plus sign, so the arrow carries
+          // the meaning of the replacement (R494).
+          const arrow = document.createElement("span");
+          arrow.className = "metadata-candidate-arrow";
+          arrow.setAttribute("aria-hidden", "true");
+          arrow.textContent = "→";
+          detail.append(current, arrow);
+        }
+        const next = document.createElement("span");
+        next.className = "metadata-candidate-next";
+        next.textContent = change.next;
+        detail.append(next);
+      }
+      row.append(term, detail);
+      list.append(row);
+    });
+  }
+  if (note) {
+    note.classList.toggle("is-idle", !writing);
+    note.textContent = !candidate
+      ? "选择左侧候选后，这里会列出每个字段的去向。"
+      : (changes.length
+        ? `共 ${writing} 项将写入，${keeping} 项保留。只改空白与文件名推断值，已有 Tag 不动。`
+        : "候选没有带来本曲缺少的字段，确认后只记录这次匹配。");
+  }
+  return {writing, keeping, changes};
+}
+function syncMetadataCandidateSelection() {
+  const selection = state.metadataCandidateSelection;
+  if (!selection) return;
+  const item = itemById(selection.trackId) || {};
+  const candidate = selection.candidates[selection.index] || null;
+  const {writing} = renderMetadataCandidatePreview(item, candidate);
+  const apply = $("applyMetadataCandidateBtn");
+  if (apply) {
+    apply.disabled = !candidate;
+    apply.textContent = writing ? `确认并写入 ${writing} 项` : "确认匹配";
+  }
+}
+function renderMetadataCandidateChoices(list, candidates, trackId, status = "review", searchId = "") {
+  const rows = candidates.map((candidate, index) => {
+    const subtitle = [candidate.artist, candidate.album, candidate.date, metadataCandidateSourceLabel(candidate)]
+      .filter(Boolean).map(String).join(" · ");
+    const value = metadataCandidateConfidenceValue(candidate);
+    const tier = value >= 0.9 ? "is-high" : (value >= 0.7 ? "is-mid" : "is-low");
+    const percent = metadataCandidateConfidenceLabel(candidate);
+    return `<label class="metadata-candidate-choice${index === 0 ? " is-selected" : ""}"><input type="radio" name="metadataCandidate" value="${index}" ${index === 0 ? "checked" : ""}><span class="metadata-candidate-row"><strong>${escapeHtml(String(candidate.title))}</strong><small>${escapeHtml(subtitle)}</small></span><span class="metadata-candidate-conf ${tier}"><b>${escapeHtml(percent)}</b><span class="metadata-candidate-bar"><i style="width:${escapeHtml(percent)}"></i></span></span></label>`;
+  }).join("");
+  list.innerHTML = `<div class="metadata-candidate-list">${rows}</div>`;
+  state.metadataCandidateSelection = {trackId: String(trackId), candidates, searchId, index: 0};
+  list.querySelectorAll('input[name="metadataCandidate"]').forEach(input => {
+    input.onchange = () => {
+      const index = Number(input.value);
+      if (!Number.isInteger(index) || !state.metadataCandidateSelection) return;
+      state.metadataCandidateSelection.index = index;
+      list.querySelectorAll(".metadata-candidate-choice").forEach(choice => {
+        choice.classList.toggle("is-selected", choice.contains(input));
+      });
+      syncMetadataCandidateSelection();
+    };
+  });
+  syncMetadataCandidateSelection();
+}
+async function applySelectedMetadataCandidate() {
+  const selection = state.metadataCandidateSelection;
+  const apply = $("applyMetadataCandidateBtn");
+  if (!selection || !apply || apply.disabled) return;
+  const trackId = selection.trackId;
+  const candidateIndex = Number(selection.index || 0);
+  const searchId = selection.searchId || "";
+  if (!Number.isInteger(candidateIndex) || candidateIndex < 0 || !selection.candidates[candidateIndex]) return;
+  apply.disabled = true;
+  const applyController = typeof AbortController === "function" ? new AbortController() : null;
+  state.metadataCandidateController = applyController;
+  const requestToken = state.metadataCandidateRequestToken;
+  const searchToken = state.metadataCandidateSearchToken;
+  const isCurrentRequest = () => state.metadataCandidateController === applyController
+    && state.actionTrackId === String(trackId)
+    && state.metadataCandidateRequestToken === requestToken
+    && state.metadataCandidateSearchToken === searchToken;
+  try {
+    const response = await apiFetch("api/metadata/track/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: trackId, candidate_index: candidateIndex, search_id: searchId }),
+      ...(applyController ? { signal: applyController.signal } : {}),
+    });
+    const result = await readResponseJsonBounded(response);
+    if (!response.ok || result.ok !== true) throw new Error(result.message || "确认失败");
+    if (!isCurrentRequest()) return;
+    const list = metadataCandidateResultsNode();
+    if (list) list.textContent = "已确认，后台将只写入空白与文件名推断字段。";
+    const status = metadataCandidateStatusNode();
+    if (status) status.textContent = "已确认，写回会在后台完成。";
+    apply.textContent = "已确认";
+    clearLibraryResponseCaches();
+    if (state.pageItems?.length && !state.libraryLoading) await loadLibrary(false);
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (!isCurrentRequest()) return;
+    apply.disabled = false;
+    const status = metadataCandidateStatusNode();
+    if (status) status.textContent = error.message || "确认失败";
+    else metadataCandidateResultsNode()?.insertAdjacentHTML("afterbegin", `<div class="track-action-info">${escapeHtml(error.message || "确认失败")}</div>`);
+  } finally {
+    if (state.metadataCandidateController === applyController) state.metadataCandidateController = null;
+  }
+}
+function renderMetadataCandidateSearchResults(list, candidates, trackId, searchId = "") {
+  const valid = Array.isArray(candidates) ? candidates.filter(candidate => candidate && candidate.title) : [];
+  if (!valid.length) {
+    list.innerHTML = `<div class="track-action-info">没有找到匹配结果，请修改关键词后重试。</div>`;
+    return;
+  }
+  renderMetadataCandidateChoices(list, valid, trackId, "review", searchId);
+}
+function trackActionButtons(trackId) {
+  const selected = selectedTrackIds(trackId);
+  const multiple = selected.length > 1;
+  const actions = [
+    actionButton("播放", "play"),
+    actionButton("从当前开始播放所有歌曲", "play-from-current", false, multiple),
+    actionButton("加入当前队列", "queue"),
+    actionButton(multiple || !isFavorite(trackId) ? "收藏歌曲" : "取消收藏", "favorite"),
+    actionButton("加入播放列表", "playlist"),
+    actionButton("插播所选项目", "insert"),
+    actionButton("歌曲信息", "info", false, multiple),
+    actionButton("元数据补全候选", "metadata-candidate", false, multiple),
+    actionButton("打开包含的文件夹", "open-folder", false, multiple),
+    actionButton("分享外部链接", "share", false, multiple),
+    actionButton(multiple ? `删除所选 ${selected.length} 首歌曲` : "删除歌曲", "delete-file", true),
+  ];
+  if (state.view === "queue") actions.push(actionButton("从当前队列移除", "remove-queue", true));
+  if (state.view === "favorites") actions.push(actionButton("从收藏移除", "remove-favorite", true));
+  if (isPlaylistView()) actions.push(actionButton("从此播放列表移除", "remove-playlist", true));
+  // R505（负责人要求）: 手机上不再提供「打开包含的文件夹」「分享外部链接」「删除歌曲」。
+  // R500 曾把这三项发到手机，理由是 fnOS App 的 WebView 也给同一套宿主桥；用起来则不然：
+  // 前两项都是文件管理器的代理动作（手机上弹出另一个 App 的面板，或落回 showFileDetails
+  // 的死胡同），删除是唯一一枚 danger 项却紧挨着播放类动作，误触代价最大。桌面保持原样。
+  // 判定沿用菜单本来的分界线 760px，与右键/长按、分页、选择态同一口径；过滤放在这里而不是
+  // trackContextActionButtons，是为了让菜单与「歌曲操作」对话框永远一致（R500 的初衷）。
+  const hidden = isMobileActionLayout() ? MOBILE_HIDDEN_TRACK_ACTIONS : null;
+  return hidden
+    ? actions.filter(button => !hidden.has(/data-track-action="([^"]+)"/.exec(button)?.[1] || ""))
+    : actions;
+}
+function isMobileActionLayout() {
+  return Boolean(window.matchMedia?.("(max-width: 760px)")?.matches);
+}
+function trackContextActionButtons(trackId) {
+  // The row itself already plays on tap and on double click, so 播放 and 插播所选
+  // 项目 are not repeated in the menu. Everything else is shared with the 歌曲操作
+  // dialog, including the mobile opt-outs (they live in trackActionButtons so the
+  // two surfaces cannot disagree again — that disagreement is what R500 set out to
+  // fix, and R505 re-splits it deliberately, by width rather than by surface).
+  return trackActionButtons(trackId).filter(button =>
+    !/data-track-action="(?:play|insert)"/.test(button)
+  );
+}
+function bindTrackActionButtons(container) {
+  container.querySelectorAll("[data-track-action]").forEach(button => button.onclick = () => runTrackAction(button.dataset.trackAction));
+}
+function showTrackInformation(trackId) {
+  const item = itemById(trackId);
+  if (!item) return;
+  $("trackActionTitle").textContent = "歌曲信息";
+  const details = [
+    ["歌手", displayText(item.artist) || "未填写"],
+    ["专辑", displayText(item.album) || "未填写"],
+    ["作曲者", displayText(item.composer) || "未填写"],
+    ["类型", displayText(item.genre) || "未分类"],
+    ["格式", item.format || "未知"],
+    ["音质", trackQuality(item)],
+    ["时长", Number(item.duration || 0) ? clock(Number(item.duration)) : "未知"],
+    ["文件", item.path || "未知"],
+  ];
+  $("trackActionList").innerHTML = `<div class="track-info-detail">${details.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join("")}</div>`;
+  $("trackActionDialog").showModal();
+}
+function cancelMetadataCandidateLookup() {
+  state.metadataCandidateRequestToken += 1;
+  try { state.metadataCandidateController?.abort(); } catch (_) {}
+  state.metadataCandidateController = null;
+}
+async function searchTrackMetadataManually() {
+  const trackId = String(state.actionTrackId || "");
+  const item = itemById(trackId);
+  const input = $("metadataCandidateSearchInput");
+  const status = $("metadataCandidateSearchStatus");
+  const list = metadataCandidateResultsNode();
+  if (!item || !input || !status || !list) return;
+  const query = input.value.trim();
+  if (!query) {
+    status.textContent = "请输入歌名、歌手或专辑关键词。";
+    return;
+  }
+  cancelMetadataCandidateLookup();
+  try { state.metadataCandidateSearchController?.abort(); } catch (_) {}
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const token = ++state.metadataCandidateSearchToken;
+  state.metadataCandidateSearchController = controller;
+  status.textContent = "正在搜索候选...";
+  const queryStatus = metadataCandidateStatusNode();
+  if (queryStatus) queryStatus.textContent = "正在查询候选结果...";
+  list.textContent = "正在搜索候选...";
+  try {
+    const result = await fetchJsonResponseBounded("api/metadata/track/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_id: trackId,
+        title: query,
+        artist: "",
+        album: "",
+        provider_id: $("metadataCandidateProviderSelect")?.value || "",
+      }),
+      ...(controller ? { signal: controller.signal } : {}),
+    }, 25000);
+    const response = result.response;
+    const data = unwrapMetadataResponsePayload(result.data);
+    if (token !== state.metadataCandidateSearchToken || state.actionTrackId !== trackId || !metadataCandidateDialogNode().open) return;
+    if (!response.ok || data.ok !== true) throw new Error(data.message || `手动搜索失败（HTTP ${response.status || "未知"}）`);
+    if (data.candidates?.length && !data.search_id) throw new Error("服务端版本不支持安全确认候选，请先升级 fnAudio 服务端。");
+    renderMetadataCandidateSearchResults(list, data.candidates, trackId, data.search_id || "");
+    if (queryStatus) queryStatus.textContent = data.candidates?.length ? `查询完成：找到 ${data.candidates.length} 条候选结果。` : "没有找到匹配结果。";
+    status.textContent = data.candidates?.length ? "请选择一个结果并确认补全。" : "没有找到匹配结果。";
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (token !== state.metadataCandidateSearchToken || state.actionTrackId !== trackId || !metadataCandidateDialogNode().open) return;
+    list.innerHTML = `<div class="track-action-info">${escapeHtml(error.message || "手动搜索失败")}</div>`;
+    status.textContent = "搜索失败，请修改关键词后重试。";
+    if (queryStatus) queryStatus.textContent = "搜索失败，可修改关键词或切换数据源后重试。";
+  } finally {
+    if (state.metadataCandidateSearchController === controller) state.metadataCandidateSearchController = null;
+  }
+}
+async function resolveTrackLocation(trackId) {
+  const result = await fetchJsonResponseBounded(
+    `api/library/location?id=${encodeURIComponent(String(trackId || ""))}`,
+    { cache: "no-store" },
+    10000,
+  );
+  const response = result.response;
+  const data = result.data || {};
+  if (!response.ok || data.ok !== true || !data.path) throw new Error(data.message || "无法获取歌曲文件路径");
+  return data;
+}
+async function openContainingFolder(trackId) {
+  let location;
+  try {
+    location = await resolveTrackLocation(trackId);
+    const folder = String(location.folder || "");
+    if (!folder) throw new Error("无法获取歌曲所在文件夹");
+    // fnOS 的文件管理入口接收目录路径；传入完整文件路径会被宿主当作“打开文件”处理。
+    await runTrimHostAction("openFileManager", [folder]);
+  } catch (error) {
+    console.warn("openFileManager failed", error);
+    alert(error.message || "飞牛文件管理打开失败，请确认 fnAudio 是从飞牛应用入口启动的");
+    return false;
+  }
+  // The host only navigates to the directory, so landing there still leaves the
+  // song to be hunted down among hundreds of files. Locating it is ours, and a
+  // shell this player cannot read (the phone file manager, a plain browser tab)
+  // must not turn a folder that did open into an alert.
+  await locateNativeFile(location).catch(() => false);
+  return true;
+}
+function externalShareDateValue(date) {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+function generateExternalSharePassword() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  // 256 is not a multiple of the alphabet size.  Reducing a raw byte modulo it
+  // therefore hands the first 256 % alphabet.length characters a fifth byte
+  // value while the rest get four, which is a real skew in an outward-facing
+  // credential.  Draw until the buffer fills instead of reusing that tail.
+  const limit = Math.floor(256 / alphabet.length) * alphabet.length;
+  const characters = [];
+  while (characters.length < 10) {
+    const bytes = new Uint8Array(10);
+    crypto.getRandomValues(bytes);
+    for (const value of bytes) {
+      if (value < limit) characters.push(alphabet[value % alphabet.length]);
+      if (characters.length === 10) break;
+    }
+  }
+  return characters.join("");
+}
+function syncExternalShareOptions() {
+  const expiryEnabled = $("shareExpiryEnabled").checked;
+  const passwordEnabled = $("sharePasswordEnabled").checked;
+  const accessEnabled = $("shareAccessEnabled").checked;
+  $("shareExpiryDetail").hidden = !expiryEnabled;
+  $("sharePasswordDetail").hidden = !passwordEnabled;
+  $("shareAccessDetail").hidden = !accessEnabled;
+  $("shareExpirySummary").textContent = expiryEnabled ? "按设定时间到期" : "链接永久有效";
+  $("sharePasswordSummary").textContent = passwordEnabled ? "需要访问密码" : "不使用密码";
+  $("shareAccessSummary").textContent = accessEnabled ? "限制访问次数" : "不限制次数";
+  if (passwordEnabled && !$("sharePasswordInput").value) $("sharePasswordInput").value = generateExternalSharePassword();
+}
+function resetExternalShareDialog(location) {
+  state.externalShareLocation = location;
+  $("externalShareFileName").textContent = String(location.path || "").split("/").pop() || "歌曲文件";
+  $("shareExpiryEnabled").checked = false;
+  $("sharePasswordEnabled").checked = false;
+  $("shareAccessEnabled").checked = false;
+  $("shareExpiryInput").value = externalShareDateValue(new Date(Date.now() + 7 * 86400000));
+  $("sharePasswordInput").value = "";
+  $("shareAccessInput").value = "100";
+  $("externalShareStatus").textContent = "";
+  $("externalShareForm").hidden = false;
+  $("externalShareResult").hidden = true;
+  $("externalShareUrl").value = "";
+  $("externalSharePasswordResult").hidden = true;
+  $("externalSharePasswordResult").textContent = "";
+  $("createExternalShare").disabled = false;
+  syncExternalShareOptions();
+}
+async function openExternalShareDetails() {
+  const location = state.externalShareLocation;
+  if (!location?.path) return;
+  try {
+    await runTrimHostAction("showFileDetails", [[location.path]], { dialog: $("externalShareDialog") });
+    return true;
+  } catch (error) {
+    console.warn("showFileDetails failed", error);
+    $("externalShareStatus").textContent = error.message || "无法打开飞牛文件详情，请从飞牛应用入口重试";
+    return false;
+  }
+}
+async function shareTrack(trackId) {
+  let location;
+  try {
+    location = await resolveTrackLocation(trackId);
+    await runTrimHostAction(null);
+  } catch (error) {
+    console.warn("fnOS file sharing handoff failed", error);
+    alert(error.message || "无法调用飞牛外链服务，请从飞牛应用入口打开 fnAudio 后重试");
+    return;
+  }
+  // Right-click share goes straight to fnOS's own panel. The built-in panel stays
+  // as the fallback for the cases where that hand-off cannot land (no desktop
+  // shell, an fnOS build whose file manager markup differs), and it creates the
+  // same link through the same share service.
+  resetExternalShareDialog(location);
+  if (await openNativeExternalShare(location)) return;
+  // The failed attempt left the file manager in front of us.
+  raiseHostWindow();
+  $("externalShareDialog").showModal();
+}
+async function createExternalShareLink() {
+  const location = state.externalShareLocation;
+  if (!location?.path) return;
+  const button = $("createExternalShare");
+  if (button.disabled) return;
+  const expiryEnabled = $("shareExpiryEnabled").checked;
+  const passwordEnabled = $("sharePasswordEnabled").checked;
+  const accessEnabled = $("shareAccessEnabled").checked;
+  const password = passwordEnabled ? $("sharePasswordInput").value.trim() : "";
+  const maxAccess = accessEnabled ? Number($("shareAccessInput").value || 0) : 0;
+  const validTo = expiryEnabled ? Math.floor(new Date($("shareExpiryInput").value).getTime() / 1000) : 0;
+  if (passwordEnabled && (password.length < 4 || password.length > 128)) return void ($("externalShareStatus").textContent = "密码长度需要为 4 到 128 个字符");
+  if (accessEnabled && (!Number.isInteger(maxAccess) || maxAccess < 1 || maxAccess > 9999)) return void ($("externalShareStatus").textContent = "可访问次数需要为 1 到 9999");
+  if (expiryEnabled && (!Number.isFinite(validTo) || validTo <= Math.floor(Date.now() / 1000))) return void ($("externalShareStatus").textContent = "到期时间必须晚于当前时间");
+  button.disabled = true;
+  $("externalShareStatus").textContent = "正在创建...";
+  try {
+    const defaultResponse = await runTrimHostAction("query", [{ req: "appcgi.sharesvr.share.link.default" }]);
+    let defaultLink = String(defaultResponse?.data?.defaultLink || "").replace(/\/$/, "");
+    if (defaultResponse?.result !== "succ" || !defaultLink) {
+      // The host answers this on the desktop shell; a phone that only carries the
+      // Flutter bridge may not route it. The page already sits on the NAS origin,
+      // which is where /s/<id> is served, so its origin is the same link.
+      const origin = String(globalThis.location?.origin || "");
+      defaultLink = /^https?:\/\//.test(origin) ? origin.replace(/\/$/, "") : "";
+    }
+    if (!defaultLink) throw new Error(defaultResponse?.errmsg || "无法读取飞牛外链地址");
+    const payload = {
+      name: String(location.path || "").split("/").pop() || "fnAudio",
+      files: [String(location.path)],
+      maxAccess,
+    };
+    if (passwordEnabled) payload.passwd = password;
+    if (expiryEnabled) payload.validTo = validTo;
+    // share.link.create is not shaped like file.rm: the file manager puts every
+    // argument under `data` (`{req, data:{name, files, maxAccess, passwd,
+    // validTo}}`), and a flat body comes back as errno 3000001 "Invalid Params"
+    // with all the field names still correct. Reading the request off the shell's
+    // own WebSocket is what settled this — the flat form had never worked, on the
+    // desktop either, which is why the phone (no native file manager to right-click
+    // in) was the only place anyone noticed.
+    const created = await runTrimHostAction("query", [{
+      req: "appcgi.sharesvr.share.link.create",
+      data: payload,
+    }]);
+    const id = String(created?.data?.id || "");
+    if (created?.result !== "succ" || !id || !defaultLink) throw new Error(created?.errmsg || "create failed");
+    $("externalShareUrl").value = `${defaultLink}/s/${id}`;
+    $("externalSharePasswordResult").hidden = !passwordEnabled;
+    $("externalSharePasswordResult").textContent = passwordEnabled ? `密码：${password}` : "";
+    // A link built from the NAS's LAN address cannot be opened from cellular data.
+    // Saying so beats letting someone send it to a friend and hear "it doesn't
+    // open" — the address is the NAS's own choice, not something this panel set.
+    // The host is read with a regex rather than `new URL` so the check does not
+    // depend on a global that some embedded webviews do not expose.
+    const shareHost = String(defaultLink).replace(/^[a-z]+:\/\//i, "").split("/")[0].split(":")[0].toLowerCase();
+    const localOnlyAddress = /^(?:10\.|127\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(shareHost) || shareHost === "localhost";
+    const hint = $("externalShareHint");
+    if (hint) {
+      hint.hidden = !localOnlyAddress;
+      hint.textContent = localOnlyAddress
+        ? "这是局域网地址，只有连在同一网络的设备能打开。要发给外网的人，请先在飞牛系统中配置远程访问。"
+        : "";
+    }
+    $("externalShareStatus").textContent = "";
+    $("externalShareForm").hidden = true;
+    $("externalShareResult").hidden = false;
+  } catch (error) {
+    console.warn("create external share failed", error);
+    if (error?.hostUnavailable) {
+      // A phone webview that does not route sharesvr requests cannot reach the
+      // file manager's menu either, so the details fallback below would only
+      // replace one dead end with another. Say what works instead.
+      $("externalShareStatus").textContent = `${error.message || "当前飞牛宿主不提供外链服务"}，请在飞牛「文件管理」里右键该文件创建分享链接`;
+      return;
+    }
+    $("externalShareStatus").textContent = error.message || "创建失败，正在尝试打开飞牛文件详情";
+    if (await openExternalShareDetails()) {
+      $("externalShareStatus").textContent = "创建未完成，已请求打开飞牛文件详情，请在文件管理中检查或创建外部链接";
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+function parentShellDocument() {
+  // The player runs in an iframe of the fnOS desktop, on the desktop's own origin
+  // (/cgi/ThirdParty/fnaudio/index.cgi/), so the document that hosts the file
+  // manager is readable. In a plain browser tab there is no parent to read and
+  // this returns null instead of throwing a SecurityError.
+  try {
+    const shell = window.parent;
+    if (!shell || shell === window) return null;
+    const doc = shell.document;
+    return doc && doc.documentElement ? doc : null;
+  } catch (error) {
+    return null;
+  }
+}
+function raiseHostWindow() {
+  // fnOS stacks app windows and raises one on press. The native hand-off opens
+  // the file manager first, so when it fails the built-in panel would open behind
+  // the window we just brought up — visible as "nothing happened". A press on our
+  // own frame raises us exactly the way a click on the player would.
+  const frame = typeof window === "undefined" ? null : window.frameElement;
+  if (!frame) return false;
+  const view = (frame.ownerDocument && frame.ownerDocument.defaultView) || window;
+  if (typeof view.MouseEvent !== "function") return false;
+  const init = { bubbles: true, cancelable: true, button: 0, buttons: 1 };
+  frame.dispatchEvent(new view.MouseEvent("mousedown", init));
+  frame.dispatchEvent(new view.MouseEvent("mouseup", init));
+  return true;
+}
+async function waitForElement(probe, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = probe();
+    if (found) return found;
+    if (Date.now() >= deadline) return null;
+    await new Promise(resolve => setTimeout(resolve, 120));
+  }
+}
+// How many list boxes the locate step pages through before handing over to the
+// file manager's own search. Eight boxes cover a few hundred rows, which is
+// roughly where typing into the search field becomes the cheaper way to a row.
+const NATIVE_FILE_SCAN_PAGES = 8;
+async function findNativeFileRow(shell, location) {
+  const bridge = globalThis.fnAudioNativeShare;
+  const path = String(location?.path || "");
+  const folder = String(location?.folder || "");
+  const fileName = path.split("/").pop();
+  if (!bridge || !shell || !path || !folder || !fileName) return null;
+  // Nothing is read until the window lists that folder. The previous listing can
+  // still be on screen while the host switches folders, and scanning it would page
+  // the wrong directory around and then read rows that belong to another place.
+  const listed = await waitForElement(() => bridge.hasTable(shell) && bridge.isFolderListing(shell, folder) ? true : null, 8000);
+  if (!listed) return null;
+  const rendered = bridge.findFileRow(shell, path);
+  if (rendered) return rendered;
+  const scroller = bridge.findListScroller(shell);
+  if (scroller) {
+    for (let page = 0; page < NATIVE_FILE_SCAN_PAGES; page += 1) {
+      if (!bridge.scrollListBy(scroller, Math.round(scroller.clientHeight * 0.8))) break;
+      const found = await waitForElement(() => bridge.findFileRow(shell, path), 400);
+      if (found) return found;
+    }
+  }
+  // Column sorting and paging belong to the user, so paging is a shortcut rather
+  // than a guarantee. The search field filters inside the open folder and reaches
+  // the row whatever the list is ordered by.
+  const input = bridge.findSearchInput(shell);
+  if (!input) return null;
+  bridge.typeInto(input, bridge.searchTerm(fileName));
+  return await waitForElement(() => bridge.findFileRow(shell, path), 8000);
+}
+async function selectNativeFileRow(shell, location) {
+  // True only once the row is on screen *and* selected, so "the folder opened" and
+  // "the song was located" stay distinguishable — to the caller and to a test.
+  const bridge = globalThis.fnAudioNativeShare;
+  if (!bridge || !shell) return false;
+  const row = await findNativeFileRow(shell, location);
+  if (!row) return false;
+  const scroller = bridge.findListScroller(shell);
+  if (scroller) bridge.revealRow(row, scroller);
+  bridge.selectRow(row);
+  return await waitForElement(() => bridge.isRowSelected(bridge.findFileRow(shell, location)) ? true : null, 2000) === true;
+}
+async function locateNativeFile(location) {
+  const shell = parentShellDocument();
+  if (!shell) return false;
+  return selectNativeFileRow(shell, location);
+}
+async function openNativeExternalShare(location) {
+  // The panel the user asked for is the file manager's own 「分享外部链接」, and it
+  // has no entry point: its bundle has no message listener, no global and no
+  // route, `openFileManager` only navigates to a folder, and a file path leaves the
+  // list where it was. So the player drives that menu itself — open the folder,
+  // find the song's row, right-click it, click the item. Every step is a bounded
+  // wait; any step that does not land returns false and the caller falls back to
+  // the built-in panel, which creates the same link through the same share service.
+  const shell = parentShellDocument();
+  const bridge = globalThis.fnAudioNativeShare;
+  const fileName = String(location?.path || "").split("/").pop();
+  const folder = String(location?.folder || "");
+  if (!shell || !bridge || !fileName || !folder) return false;
+  try {
+    await runTrimHostAction("openFileManager", [folder]);
+  } catch (error) {
+    console.warn("openFileManager failed", error);
+    return false;
+  }
+  const row = await findNativeFileRow(shell, location);
+  if (!row) return false;
+  bridge.openContextMenu(bridge.nameCellOf(row) || row);
+  const menuItem = await waitForElement(() => bridge.findMenuItem(shell, "分享外部链接"), 5000);
+  if (!menuItem) return false;
+  return bridge.activate(menuItem);
+}
+async function openExternalShareInFileManager() {
+  const location = state.externalShareLocation;
+  if (!location?.folder) {
+    $("externalShareStatus").textContent = "无法获取歌曲所在文件夹";
+    return false;
+  }
+  if (await openNativeExternalShare(location)) {
+    $("externalShareDialog").close();
+    return true;
+  }
+  try {
+    await runTrimHostAction("openFileManager", [String(location.folder)]);
+    $("externalShareStatus").textContent = "已打开飞牛文件管理，右键该文件可选择「分享外部链接」";
+    return true;
+  } catch (error) {
+    console.warn("openFileManager failed", error);
+    $("externalShareStatus").textContent = error.message || "无法打开飞牛文件管理，请从飞牛应用入口打开 fnAudio 后重试";
+    return false;
+  }
+}
+async function copyExternalShareLink() {
+  const url = $("externalShareUrl").value.trim();
+  if (!url) return;
+  const password = $("sharePasswordEnabled").checked ? $("sharePasswordInput").value.trim() : "";
+  const text = password ? `${url}\n密码：${password}` : url;
+  try {
+    await navigator.clipboard.writeText(text);
+    $("copyExternalShare").textContent = "已复制";
+    setTimeout(() => { $("copyExternalShare").textContent = "复制链接"; }, 1200);
+  } catch (error) {
+    $("externalShareUrl").select();
+    document.execCommand("copy");
+  }
+}
+function closeDeleteTrackDialog() {
+  const dialog = $("deleteTrackDialog");
+  if (dialog?.open) dialog.close();
+  state.pendingDeleteTrackIds = [];
+}
+function setDeleteTrackBusy(busy) {
+  [$("deleteTrackPermanently"), $("cancelDeleteTrack"), $("moveTrackToTrash")].forEach(button => {
+    if (button) button.disabled = Boolean(busy);
+  });
+}
+function openDeleteTrackDialog(trackIds = []) {
+  const ids = [...new Set((trackIds || []).map(String).filter(id => itemById(id)))];
+  if (!ids.length) return;
+  state.pendingDeleteTrackIds = ids;
+  const first = itemById(ids[0]);
+  const name = displayTrackTitle(first) || "歌曲文件";
+  $("deleteTrackTitle").textContent = ids.length > 1 ? `确定删除这 ${ids.length} 首歌曲吗？` : `确定删除“${name}”吗？`;
+  $("deleteTrackDescription").textContent = "删除后，可在飞牛文件管理的回收站中恢复。";
+  $("deleteTrackStatus").textContent = "";
+  setDeleteTrackBusy(false);
+  $("deleteTrackDialog").showModal();
+  $("moveTrackToTrash").focus();
+}
+function removeDeletedTracksFromClientState(trackIds) {
+  const deleted = new Set(trackIds.map(String));
+  state.items = state.items.filter(item => !deleted.has(String(item.id)));
+  state.pageItems = state.pageItems.filter(item => !deleted.has(String(item.id)));
+  deleted.forEach(id => state.itemCache.delete(id));
+  state.favorites = state.favorites.filter(id => !deleted.has(String(id)));
+  state.playlists.forEach(playlist => {
+    playlist.trackIds = playlist.trackIds.filter(id => !deleted.has(String(id)));
+  });
+  saveFavorites();
+  savePlaylists();
+}
+async function deleteTrackFiles(moveToTrashbin = true) {
+  const ids = [...state.pendingDeleteTrackIds];
+  if (!ids.length) return;
+  setDeleteTrackBusy(true);
+  $("deleteTrackStatus").textContent = moveToTrashbin ? "正在移入回收站..." : "正在彻底删除...";
+  try {
+    const locationPool = fnAudioBatchRequestPool(ids, fnAudioBatchRequestPool.DEFAULT_CONCURRENCY, resolveTrackLocation);
+    const locations = [];
+    try {
+      for (let index = 0; index < ids.length; index += 1) locations.push(await locationPool.get(index));
+    } finally {
+      locationPool.cancel("deletion locations resolved");
+    }
+    const paths = [...new Set(locations.map(location => String(location.path || "")).filter(Boolean))];
+    if (!paths.length) throw new Error("无法获取歌曲文件路径");
+    const sdk = await getTrimSdk();
+    if (!sdk || typeof sdk.query !== "function") throw new Error("当前环境不支持飞牛文件服务");
+    if (typeof sdk.ready === "function") await sdk.ready();
+    if (sdk.isStandaloneWeb) throw new Error("请从飞牛桌面的 fnAudio 应用入口执行删除");
+    const currentId = String(currentItem()?.id || "");
+    if (ids.includes(currentId)) await stopPlayback();
+    const response = await sdk.query({
+      req: "file.rm",
+      files: paths,
+      moveToTrashbin: Boolean(moveToTrashbin),
+      details: { name: paths[0].split("/").pop() || "歌曲文件", count: paths.length, dir: false },
+    }, { timeout: -1 });
+    if (response?.result && response.result !== "succ") throw new Error(response.errmsg || "删除失败");
+    const deleted = new Set(ids);
+    const remainingQueue = state.queue.filter(item => !deleted.has(String(item.id)));
+    const nextIndex = Math.min(Math.max(state.index, 0), Math.max(remainingQueue.length - 1, 0));
+    const nextCurrent = remainingQueue[nextIndex]?.id || "";
+    try {
+      await commitQueue(remainingQueue, nextCurrent);
+    } catch (error) {
+      console.warn("Queue refresh after file deletion failed", error);
+    }
+    removeDeletedTracksFromClientState(ids);
+    closeDeleteTrackDialog();
+    clearLibraryResponseCaches();
+    state.pageTotal = Math.max(0, Number(state.pageTotal || 0) - ids.length);
+    state.libraryStatus = {
+      ...(state.libraryStatus || {}),
+      count: Math.max(0, Number(state.libraryStatus?.count || 0) - ids.length),
+      scanning: true,
+    };
+    render();
+    refreshLibraryStatus(true);
+  } catch (error) {
+    console.warn("fnOS recycle-bin delete failed", error);
+    $("deleteTrackStatus").textContent = error?.errmsg || error?.message || "删除失败";
+    setDeleteTrackBusy(false);
+  }
+}
+function openTrackActionDialog(trackId) {
+  const item = itemById(trackId);
+  if (!item) return;
+  state.actionTrackId = String(trackId);
+  $("trackActionTitle").textContent = displayTrackTitle(item) || "歌曲操作";
+  const list = $("trackActionList");
+  list.innerHTML = `<div class="track-action-info">${escapeHtml(metadataSourceText(item))}</div>` + trackActionButtons(trackId).join("");
+  bindTrackActionButtons(list);
+  $("trackActionDialog").showModal();
+}
+function openTrackContextMenu(trackId, x, y) {
+  const item = itemById(trackId);
+  const menu = $("trackContextMenu");
+  if (!item || !menu) return;
+  state.actionTrackId = String(trackId);
+  const actions = trackContextActionButtons(trackId);
+  menu.innerHTML = `<strong class="track-context-title">${escapeHtml(displayTrackTitle(item) || "歌曲操作")}</strong><div class="track-context-actions">${actions.join("")}</div>`;
+  menu.hidden = false;
+  menu.style.left = `${Math.max(8, x)}px`;
+  menu.style.top = `${Math.max(8, y)}px`;
+  bindTrackActionButtons(menu);
+  requestAnimationFrame(() => {
+    const margin = 8;
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(margin, Math.min(x, window.innerWidth - bounds.width - margin))}px`;
+    menu.style.top = `${Math.max(margin, Math.min(y, window.innerHeight - bounds.height - margin))}px`;
+  });
+}
+function runTrackAction(action) {
+  const trackId = state.actionTrackId;
+  const selected = selectedTrackIds(trackId);
+  closeTrackActionDialog();
+  closeTrackContextMenu();
+  if (action === "play") playSelectedTracks(selected);
+  else if (action === "play-from-current") playFromCurrentTrack(trackId);
+  else if (action === "queue") addSelectedToQueue(selected);
+  else if (action === "favorite") toggleSelectedFavorites(selected);
+  else if (action === "favorite-add") addSelectedFavorites(selected);
+  else if (action === "playlist") openPlaylistDialogForTracks(selected);
+  else if (action === "insert") insertSelectedTracks(selected);
+  else if (action === "info") showTrackInformation(trackId);
+  else if (action === "metadata-candidate") openMetadataCandidateDialog(trackId);
+  else if (action === "open-folder") openContainingFolder(trackId);
+  else if (action === "share") shareTrack(trackId);
+  else if (action === "delete-file") openDeleteTrackDialog(selected);
+  else if (action === "remove-queue") removeTrackFromQueue(trackId);
+  else if (action === "remove-favorite") removeFavorite(trackId);
+  else if (action === "remove-playlist") removeTrackFromCurrentPlaylist(trackId);
+}
+function normalizedRepeatMode(repeat) {
+  return globalThis.fnAudioRepeatModePolicy.normalize(repeat);
+}
+function nextRepeatMode(repeat) {
+  return globalThis.fnAudioRepeatModePolicy.next(repeat);
+}
+function repeatModeLabel(repeat) {
+  return globalThis.fnAudioRepeatModePolicy.label(repeat);
+}
+function repeatNextAction(repeat) {
+  return globalThis.fnAudioRepeatModePolicy.action(repeat);
+}
+function repeatIconMarkup(repeat) {
+  return globalThis.fnAudioRepeatModePolicy.iconMarkup(repeat);
+}
+function updateRepeatShuffleButtons() {
+  const repeat = normalizedRepeatMode(state.repeat);
+  [[$("repeatBtn"), $("repeatIcon")], [$("mobileRepeatBtn"), $("mobileRepeatIcon")]].forEach(([button, icon]) => {
+    if (!button || !icon) return;
+    const active = repeat !== "off";
+    const title = `${repeatModeLabel(repeat)}，点击${repeatNextAction(repeat)}`;
+    const ariaLabel = `循环模式：${repeatModeLabel(repeat)}，点击${repeatNextAction(repeat)}`;
+    if (button.dataset.repeat !== repeat) {
+      button.dataset.repeat = repeat;
+      icon.innerHTML = repeatIconMarkup(repeat);
+    }
+    if (button.classList.contains("active-control") !== active) button.classList.toggle("active-control", active);
+    if (button.title !== title) button.title = title;
+    if (button.getAttribute("aria-label") !== ariaLabel) button.setAttribute("aria-label", ariaLabel);
+  });
+  [$("shuffleBtn"), $("mobileShuffleBtn")].forEach(button => {
+    if (!button) return;
+    const active = state.shuffle === true;
+    const pressed = String(active);
+    const label = active ? "关闭随机播放" : "随机播放";
+    if (button.classList.contains("active-control") !== active) button.classList.toggle("active-control", active);
+    if (button.getAttribute("aria-pressed") !== pressed) button.setAttribute("aria-pressed", pressed);
+    if (button.title !== label) button.title = label;
+    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+  });
+}
+async function toggleRepeat() {
+  const nextRepeat = nextRepeatMode(state.repeat);
+  const data = await coreControl("repeat", null, { repeat: nextRepeat });
+  if (data?.core) state.repeat = data.core.repeat || state.repeat;
+  else if (data) state.repeat = nextRepeat;
+  if (nativePlaybackAvailable()) nativePlaybackCall("setRepeat", state.repeat);
+  updateRepeatShuffleButtons();
+  syncState();
+}
+async function toggleShuffle() {
+  const data = await coreControl("shuffle");
+  if (data?.core && typeof data.core.shuffle === "boolean") state.shuffle = data.core.shuffle;
+  else state.shuffle = !state.shuffle;
+  if (nativePlaybackAvailable()) nativePlaybackCall("setShuffle", Boolean(state.shuffle));
+  updateRepeatShuffleButtons();
+  syncState();
+}
+function savePlaylistFromDialog() {
+  const pending = state.pendingPlaylistTracks?.length
+    ? state.pendingPlaylistTracks
+    : (state.pendingPlaylistTrackIds || (state.pendingPlaylistTrack ? [state.pendingPlaylistTrack] : []));
+  const playlist = createPlaylist($("playlistNameInput").value, pending);
+  if (!playlist) return;
+  $("playlistDialog").close();
+  setView(`playlist:${playlist.id}`);
+}
+function deletePlaylist(playlistId) {
+  const playlist = state.playlists.find(x => x.id === playlistId);
+  if (!playlist) return;
+  if (!confirm(`删除播放列表“${playlist.name}”？歌曲文件不会被删除。`)) return;
+  state.playlists = state.playlists.filter(x => x.id !== playlistId);
+  savePlaylists();
+  if (state.view === `playlist:${playlistId}`) {
+    setView("all");
+    return;
+  }
+  render();
+}
+function metadataProjectionIsDue(force = false) {
+  if (force === true) return true;
+  const last = Number(state.metadataProjectionLastFetchAt) || 0;
+  return Date.now() - last >= METADATA_PROJECTION_MIN_INTERVAL_MS;
+}
+async function fetchMetadataProjectionStatus(externalSignal = undefined) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let removeExternalAbort = null;
+  if (controller && externalSignal && typeof externalSignal.addEventListener === "function") {
+    const abortFromOwner = () => { try { controller.abort(); } catch (_) {} };
+    if (externalSignal.aborted) abortFromOwner();
+    else {
+      externalSignal.addEventListener("abort", abortFromOwner, { once: true });
+      removeExternalAbort = () => {
+        try { externalSignal.removeEventListener("abort", abortFromOwner); } catch (_) {}
+      };
+    }
+  }
+  try {
+    const request = fetch("api/metadata/status", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request,
+      timeoutMs: 1500,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: null,
+    });
+    const response = result.response;
+    if (!response?.ok) return null;
+    const data = unwrapMetadataResponsePayload(result.data);
+    return data?.ok === true ? data : null;
+  } catch (_) {
+    return null;
+  } finally {
+    removeExternalAbort?.();
+  }
+}
+async function refreshLibraryStatus(refresh = false) {
+  // Scanning and the normal 30-second refresh can overlap on slow NAS
+  // connections. Share one bounded status request so an older response cannot
+  // race a newer one and trigger duplicate cache invalidation/reloads.
+  const refreshPlan = globalThis.fnAudioLibraryStatusRefreshPolicy?.plan(
+    Boolean(state.libraryStatusPromise),
+    refresh,
+  ) || { reuse: Boolean(state.libraryStatusPromise), queueRefresh: Boolean(state.libraryStatusPromise && refresh) };
+  if (refreshPlan.reuse) {
+    if (refreshPlan.queueRefresh) state.libraryStatusRefreshQueued = true;
+    return state.libraryStatusPromise;
+  }
+  const token = ++state.libraryStatusRequestToken;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const request = (async () => {
+  try {
+    const wasScanning = state.libraryStatus?.scanning === true;
+    // Library and metadata status are independent snapshots. Fetch them in
+    // parallel so a slow metadata SQLite aggregation/provider observation
+    // cannot delay the library progress paint (or make the next poll appear
+    // to stall) on large collections.
+    const responsePromise = fetch(`api/library/status${refresh ? "?refresh=1" : ""}`, {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const metadataProjectionDue = metadataProjectionIsDue(Boolean(refresh));
+    if (metadataProjectionDue) state.metadataProjectionLastFetchAt = Date.now();
+    const metadataPromise = metadataProjectionDue
+      ? fetchMetadataProjectionStatus(controller?.signal)
+      : Promise.resolve(null);
+    const result = await globalThis.fnAudioResponseJsonLoader.read({
+      request: responsePromise,
+      timeoutMs: 6000,
+      onTimeout: () => { try { controller?.abort(); } catch (_) {} },
+      fallback: null,
+    });
+    const response = result.response;
+    if (token !== state.libraryStatusRequestToken || state.libraryStatusController !== controller) return;
+    const payload = response?.ok ? result.data : null;
+    const data = payload
+      ? (globalThis.fnAudioMetadataResponsePolicy?.unwrapTransport(payload, 4) || {})
+      : null;
+    if (!data) return;
+    // Commit the cheap library snapshot immediately. Metadata status has its
+    // own bounded timeout and is merged below, so provider/SQLite latency can
+    // never hold the scan counter or first-paint decorations hostage.
+    state.libraryStatus = data;
+    updateLibraryStatusDecorations();
+    const metadata = await metadataPromise;
+    // The library request and metadata projection request run in parallel.
+    // A view/page switch can invalidate this status operation while the
+    // metadata side is still waiting; do not let its late result mutate the
+    // new page or restart a load that belongs to the old view.
+    if (token !== state.libraryStatusRequestToken || state.libraryStatusController !== controller) return;
+    let metadataChanged = false;
+    let nextMetadataSignature = "";
+    if (metadata) {
+      const signature = metadataProjectionSignature(metadata);
+      metadataChanged = Boolean(state.metadataProjectionSignature && signature !== state.metadataProjectionSignature);
+      nextMetadataSignature = signature;
+      if (!metadataChanged) state.metadataProjectionSignature = signature;
+      retryCurrentTrackMetadataAfterRecovery(metadata);
+    }
+    if (wasScanning && data.scanning !== true) {
+      clearLibraryResponseCaches();
+      await loadLibrary(false);
+      return;
+    }
+    // Metadata workers update SQLite independently of the library scanner.
+    // A global projection revision does not identify which track changed. A
+    // full reload here therefore replaced the visible page even when an
+    // unrelated background job completed, producing the familiar second
+    // list/cover flash just after startup. Current and visible rows already
+    // receive targeted updates through their own metadata lanes; retire only
+    // cached future pages so navigation sees fresh SQLite data without
+    // disturbing the settled DOM.
+    if (metadataChanged && state.pageItems?.length && !state.libraryLoading) {
+      invalidateLibraryResponseCacheForMetadataRevision();
+      // A confirmed cover can finish after the dialog's immediate refresh.
+      // Patch only changed rows; complete title/artist/album fields otherwise
+      // exclude that WAV from the optional candidate-prefetch lane forever.
+      const projectionRefreshed = await refreshVisibleMetadataProjection();
+      if (token !== state.libraryStatusRequestToken || state.libraryStatusController !== controller) return;
+      // Consume a changed revision only after its row projection was read.
+      // A timeout leaves the old signature so the next bounded poll retries.
+      if (projectionRefreshed) state.metadataProjectionSignature = nextMetadataSignature;
+      // A failed/no-match visible lookup releases its dedupe key. Re-arm the
+      // small cancellable lane when the backend publishes a new projection,
+      // so worker recovery or provider cooldown expiry can repair the row
+      // without requiring a manual page switch or application restart.
+      scheduleVisibleMetadataPrefetch(state.pageItems, state.libraryRequestSeq);
+    }
+    // A scan can begin before the first paged response arrives. Keep the
+    // empty-state panel suppressed while that request (or the scanner itself)
+    // is still establishing the authoritative page; ending loading here made
+    // older WebViews briefly flash “没有音乐” between status polls.
+    if (data.scanning === true && !hasVisibleLibraryPresentation()) state.libraryLoading = true;
+    updateLibraryStatusDecorations();
+  } catch (error) {
+  } finally {
+    if (token === state.libraryStatusRequestToken
+      && state.libraryStatusController === controller
+      && state.libraryStatusPromise === request) {
+      state.libraryStatusPromise = null;
+      state.libraryStatusController = null;
+      const queuedRefresh = state.libraryStatusRefreshQueued;
+      state.libraryStatusRefreshQueued = false;
+      if (queuedRefresh) refreshLibraryStatus(true);
+    }
+  }
+  })();
+  state.libraryStatusPromise = request;
+  state.libraryStatusController = controller;
+  return request;
+}
+function invalidateLibraryResponseCacheForMetadataRevision() {
+  // Do not abort an active authoritative page: a metadata revision is
+  // auxiliary to the immutable library row snapshot. Bump the cache epoch so
+  // an older in-flight response cannot repopulate the cache after the clear.
+  state.libraryResponseEpoch += 1;
+  state.libraryResponseCache.clear?.();
+  state.albumMetadata.clear?.();
+}
+function toggleFavorite(trackId) {
+  const id = String(trackId);
+  if (!itemById(id)) return;
+  if (isFavorite(id)) state.favorites = state.favorites.filter(x => x !== id);
+  else state.favorites.unshift(id);
+  saveFavorites();
+  refreshFavoritePresentation();
+}
+function toggleSelectedFavorites(ids = []) {
+  const valid = (ids || []).map(String).filter(id => itemById(id));
+  if (!valid.length) return;
+  const allFavorite = valid.every(isFavorite);
+  if (allFavorite) state.favorites = state.favorites.filter(id => !valid.includes(String(id)));
+  else {
+    const additions = valid.filter(id => !isFavorite(id));
+    state.favorites = [...additions, ...state.favorites];
+  }
+  saveFavorites();
+  refreshFavoritePresentation();
+}
+function addSelectedFavorites(ids = []) {
+  const valid = (ids || []).map(String).filter(id => itemById(id));
+  if (!valid.length) return;
+  const existing = new Set(state.favorites.map(String));
+  const additions = valid.filter(id => !existing.has(id));
+  if (!additions.length) return;
+  state.favorites = [...additions, ...state.favorites];
+  saveFavorites();
+  refreshFavoritePresentation();
+}
+function removeFavorite(trackId) {
+  state.favorites = state.favorites.filter(x => x !== String(trackId));
+  saveFavorites();
+  refreshFavoritePresentation();
+}
+function toggleCurrentFavorite() {
+  const item = currentItem();
+  if (item) toggleFavorite(item.id);
+}
+function removeTrackFromCurrentPlaylist(trackId) {
+  const playlist = currentPlaylist();
+  if (!playlist) return;
+  playlist.trackIds = playlist.trackIds.filter(id => id !== String(trackId));
+  savePlaylists();
+  render();
+}
+async function selectPlaybackTarget(id, name) {
+  const nextTarget = id || "local";
+  const previousTarget = state.playTarget || "local";
+  if (state.deviceSwitchInFlight || previousTarget === nextTarget) return;
+  cancelDeviceLoad();
+  cancelRemoteLoad();
+  cancelRemoteStatusRequest();
+  state.deviceSwitchInFlight = true;
+  state.deviceTargetRevision += 1;
+  try {
+    const response = await apiFetch("api/playback/target", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({target_id: nextTarget})
+    });
+    const data = await readResponseJsonBounded(response);
+    if (!response.ok || data.ok !== true) throw new Error(data.message || "播放设备切换失败");
+    if (userStateRevision(data.revision, -1) >= 0) state.userStateRevision = userStateRevision(data.revision);
+    // The target endpoint performs the authoritative transition and closes the
+    // previous output inside `set_target()`. Do not issue a second *request* here:
+    // a follow-up control call can race with the new target and move the server
+    // back to the old renderer. Local element teardown below sends nothing.
+    state.playTarget = nextTarget;
+    state.playTargetName = name || "当前设备";
+    state.deviceTargetsSignature = "";
+    markCurrentDeviceTarget(nextTarget, true);
+    updateDeviceLabel();
+  } catch (error) {
+    markCurrentDeviceTarget(previousTarget);
+    updateDeviceLabel();
+    if (previousTarget === "local") nativeRemoteExit();
+    else nativeRemoteEnter(true);
+    alert(error.message || "播放设备切换失败");
+    return;
+  } finally {
+    state.deviceSwitchInFlight = false;
+    markCurrentDeviceTarget(state.playTarget);
+  }
+  state.remoteStatus = null;
+  state.remoteStateVersion = 0;
+  state.remoteCueSegment = false;
+  if (nextTarget === "local") {
+    stopRemoteEventStream();
+    nativeRemoteExit();
+  } else {
+    stopRemoteEventStream();
+    // Ruling D-1 stops local playback once the audible output moves elsewhere.  The
+    // transaction above only hands the *server* a new target, so when that target is
+    // a device this browser keeps decoding while every control (play, stop, media
+    // session) has already been routed to the device: the local element is deaf but
+    // still running.  Tear it down here.  This touches the element only and issues
+    // no follow-up control request, so it cannot race the new target the way a second
+    // api/playback/control call would.
+    if (localIsPlayingNow()) stopLocalAudio();
+    startRemoteEventStream();
+    nativeRemoteEnter(true);
+  }
+  updateDeviceLabel();
+  render();
+  scheduleUserStateSave();
+  if ($("deviceDialog").open) loadDevices().catch(() => {});
+}
+function cancelRemoteLoad() {
+  try { state.remoteLoadController?.abort(); } catch (_) {}
+  state.remoteLoadController = null;
+  state.remoteLoadPromise = null;
+  state.remoteLoadedKey = "";
+  state.remoteLoadedAt = 0;
+}
+async function pushToDevice(deviceId, item = currentItem()) {
+  if (state.deviceSwitchInFlight) return false;
+  if (!item) return alert("请先选择一首歌曲");
+  if (!state.remoteGeneration) state.remoteGeneration = Date.now() & 0x7fffffff;
+  if (!state.remoteEngineEpoch) state.remoteEngineEpoch = 1;
+  const loadKey = `${deviceId}:${item.id}`;
+  if (state.remoteLoadPromise && state.remoteLoadedKey === loadKey) return state.remoteLoadPromise;
+  if (state.remoteLoadedKey === loadKey && Date.now() - state.remoteLoadedAt < 2500) return true;
+  try { state.remoteLoadController?.abort(); } catch (_) {}
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  state.remoteLoadedKey = loadKey;
+  state.remoteLoadedAt = Date.now();
+  let loadPromise;
+  let loadSucceeded = false;
+  loadPromise = (async () => {
+    const response = await apiFetch("api/playback/load", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        target_id: deviceId,
+        track_id: item.id,
+        command_id: playbackCommandId(),
+        generation: Number(state.remoteGeneration || 0),
+        engine_epoch: Number(state.remoteEngineEpoch || 0),
+      }),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const data = await readResponseJsonBounded(response);
+    const ownsLoad = () => state.remoteLoadPromise === loadPromise
+      && state.remoteLoadController === controller
+      && state.remoteLoadedKey === loadKey;
+    if (!ownsLoad()) return false;
+    if (!response.ok || data.ok !== true) {
+      state.remoteLoadedKey = "";
+      alert(data.message || data.error || "播放设备接收失败");
+      return false;
+    }
+    // Same authority rule as the status snapshot: a declaration from the server
+    // wins, and only an undeclared reply may fall back to local queue metadata.
+    state.remoteCueSegment = data.cue_segment === true
+      || (data.cue_segment !== false && item?.cue_track === true && !isDacTarget(deviceId));
+    if (state.remoteCueSegment) {
+      state.remoteStatus = {
+        ...(state.remoteStatus || {}),
+        transport: { ...(state.remoteStatus?.transport || {}), state: "PLAYING" },
+        position: { ...(state.remoteStatus?.position || {}), rel_seconds: 0, duration_seconds: playbackSeconds(item.duration, playbackSeconds(state.remoteStatus?.position?.duration_seconds)) },
+      };
+      state.remoteBaseSeconds = 0;
+      state.remoteSnapshotAt = Date.now();
+      updateRemoteUi();
+    } else if (data.core) {
+      // The load reply already carries the authoritative core snapshot, and by
+      // then core holds position 0 plus *this* track's duration. Projecting it
+      // here is what makes the time readout land with the click. Without it a
+      // DAC load repainted only the artist line and the rail kept the previous
+      // track's duration until an SSE frame or the 5s status poll corrected it -
+      // measured at 2.4s to 5.2s, which is exactly the "DAC feels slower than
+      // Volumio" complaint.
+      applyRemotePlaybackSnapshot(remoteSnapshotFromCore(data.core, deviceId));
+    }
+    state.dacStrategy = data.strategy || null;
+    if (isDacTarget(deviceId) && item) {
+      setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)} · ${state.playTargetName}`);
+      syncPlayerProgress();
+      updateNowMarquee();
+    }
+    updateDeviceLabel();
+    $("deviceDialog").close();
+    loadSucceeded = true;
+    return true;
+  })();
+  state.remoteLoadPromise = loadPromise;
+  state.remoteLoadController = controller;
+  try {
+    return await loadPromise;
+  } finally {
+    if (state.remoteLoadPromise === loadPromise) {
+      state.remoteLoadPromise = null;
+      if (state.remoteLoadController === controller) state.remoteLoadController = null;
+      // The short dedupe window is only valid after a confirmed load. A
+      // transport error or cancellation must leave the same track retryable.
+      if (!loadSucceeded && state.remoteLoadedKey === loadKey) {
+        state.remoteLoadedKey = "";
+        state.remoteLoadedAt = 0;
+      }
+    }
+  }
+}
+document.querySelectorAll(".nav-item[data-view]").forEach(button => {
+  button.onclick = () => {
+    if (button.dataset.view === "queue") openCurrentQueue();
+    else setView(button.dataset.view);
+  };
+  if (button.dataset.view === "folders") {
+    button.addEventListener("pointerenter", scheduleFolderNavigationPrefetch);
+    button.addEventListener("pointerleave", cancelFolderNavigationPrefetch);
+    button.addEventListener("pointerdown", () => {
+      cancelFolderNavigationPrefetch();
+      prefetchFolderNavigationEntry();
+    });
+  }
+});
+function setMobileNavigation(open) {
+  const sidebar = document.querySelector(".sidebar");
+  const backdrop = $("mobileNavBackdrop");
+  const button = $("mobileNavBtn");
+  if (!sidebar || !backdrop || !button) return;
+  sidebar.classList.toggle("mobile-open", open);
+  backdrop.hidden = !open;
+  button.setAttribute("aria-expanded", String(open));
+}
+$("mobileNavBtn").onclick = () => setMobileNavigation(!document.querySelector(".sidebar")?.classList.contains("mobile-open"));
+$("mobileNavBackdrop").onclick = () => setMobileNavigation(false);
+$("mobileNavCloseBtn").onclick = () => setMobileNavigation(false);
+const mobileLogoutButton = $("mobileLogoutBtn");
+if (mobileLogoutButton && nativeBridgeAvailable()) {
+  mobileLogoutButton.hidden = false;
+  mobileLogoutButton.closest(".sidebar-settings")?.classList.add("android-session-actions");
+  mobileLogoutButton.onclick = () => {
+    setMobileNavigation(false);
+    try { window.FnAudioNative.logout(); } catch (ignore) {}
+  };
+} else {
+  mobileLogoutButton?.remove();
+}
+$("mobileSettingsNavBtn").onclick = () => {
+  setMobileNavigation(false);
+  openFolderBrowser();
+};
+document.querySelectorAll(".nav-item[data-view]").forEach(button => {
+  button.addEventListener("click", () => setMobileNavigation(false));
+});
+function handleSearchInput(source) {
+  const value = source?.value || "";
+  [$("searchInput"), $("mobileSearchInput")].forEach(input => {
+    if (input && input !== source) input.value = value;
+  });
+  updateSearchClearButtons();
+  if (state.searchTimer) clearTimeout(state.searchTimer);
+  state.searchTimer = setTimeout(() => {
+    state.searchTimer = null;
+    state.folderPage = 1;
+    state.page = 1;
+    if (isPagedLibraryView()) requestLibraryLoad(1, false);
+    else render();
+  }, 240);
+}
+function updateSearchClearButtons() {
+  const hasValue = Boolean($("searchInput")?.value || $("mobileSearchInput")?.value);
+  ["searchClearBtn", "mobileSearchClearBtn"].forEach(id => {
+    const button = $(id);
+    if (button) button.hidden = !hasValue;
+  });
+}
+function clearSearchInput(inputId) {
+  const input = $(inputId);
+  if (!input) return;
+  input.value = "";
+  handleSearchInput(input);
+  input.focus();
+}
+$("searchInput").oninput = event => handleSearchInput(event.currentTarget);
+const mobileSearchInput = $("mobileSearchInput");
+function configureMobileKeyboardOverlay() {
+  if (!window.matchMedia("(max-width: 760px)").matches) return;
+  const virtualKeyboard = navigator.virtualKeyboard;
+  if (!virtualKeyboard || !("overlaysContent" in virtualKeyboard)) return;
+  try {
+    virtualKeyboard.overlaysContent = true;
+  } catch (_) {
+    // Some embedded WebViews expose the property but reject writes.
+  }
+}
+function setMobileSearchFocusState(active) {
+  const enabled = Boolean(active) && window.matchMedia("(max-width: 760px)").matches;
+  document.body.classList.toggle("mobile-search-active", enabled);
+  if (enabled) configureMobileKeyboardOverlay();
+  requestAnimationFrame(() => {
+    updateMobilePagerVisibility();
+    if (!enabled) updateNowMarquee();
+  });
+}
+configureMobileKeyboardOverlay();
+if (mobileSearchInput) {
+  mobileSearchInput.oninput = event => handleSearchInput(event.currentTarget);
+  mobileSearchInput.addEventListener("focus", () => setMobileSearchFocusState(true));
+  mobileSearchInput.addEventListener("blur", () => setMobileSearchFocusState(false));
+}
+$("searchClearBtn")?.addEventListener("click", () => clearSearchInput("searchInput"));
+$("mobileSearchClearBtn")?.addEventListener("click", () => clearSearchInput("mobileSearchInput"));
+updateSearchClearButtons();
+normalizeDialogCloseControls();
+normalizeButtonTypes();
+installDialogFocusManagement();
+$("closeColumnsDialog").onclick = () => $("columnsDialog").close();
+$("cancelDeleteTrack").onclick = closeDeleteTrackDialog;
+$("moveTrackToTrash").onclick = () => deleteTrackFiles(true);
+$("deleteTrackPermanently").onclick = () => deleteTrackFiles(false);
+$("deleteTrackDialog").addEventListener("cancel", event => {
+  if ($("moveTrackToTrash").disabled) event.preventDefault();
+  else closeDeleteTrackDialog();
+});
+$("columnsDialog").addEventListener("close", () => { state.columnDialogColumns = null; });
+$("resetColumnsBtn").onclick = () => { state.columnDialogColumns = defaultTrackColumnsForScope(); renderColumnChoices(); };
+$("saveColumnsBtn").onclick = saveColumnChoices;
+document.addEventListener("pointerdown", event => {
+  const menu = $("trackContextMenu");
+  if (!menu?.hidden && !menu.contains(event.target)) closeTrackContextMenu();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    closeTrackContextMenu();
+    const sidebar = document.querySelector(".sidebar");
+    if (sidebar?.classList.contains("mobile-open")) {
+      setMobileNavigation(false);
+      $("mobileNavBtn").focus();
+    }
+  }
+});
+window.addEventListener("focus", clearTransientListSelection);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    cancelVisibleMetadataPrefetch({ releaseKeys: true });
+    return;
+  }
+  clearTransientListSelection();
+  if (state.pageItems?.length && !state.libraryLoading) {
+    scheduleVisibleMetadataPrefetch(state.pageItems, state.libraryRequestSeq);
+  }
+});
+$("libraryScroll").addEventListener("scroll", () => {
+  cancelTrackLongPress();
+  closeTrackContextMenu();
+}, { passive: true });
+$("trackList").addEventListener("scroll", () => {
+  cancelTrackLongPress();
+  closeTrackContextMenu();
+  updateMobilePagerVisibility();
+}, { passive: true });
+function toggleMp3Transcode() {
+  state.mp3Transcode = !state.mp3Transcode;
+  writeStoredPreference("fnaudio.mp3Transcode", state.mp3Transcode ? "1" : "0");
+  updateModeButton();
+  if (currentItem() && !isRemoteTarget()) loadCurrent();
+}
+function openDeviceDialog() {
+  $("deviceDialog").showModal();
+  loadDevices();
+}
+$("deviceBtn").onclick = openDeviceDialog;
+function closeLyrics() {
+  $("lyricsView").hidden = true;
+  // Closing the lyrics surface is a user cancellation boundary. Keep the
+  // playback-level metadata lane intact, but stop the view-owned poll and
+  // request so a slow provider cannot consume a connection after the user
+  // has returned to the library.
+  cancelLyricsPoll();
+  cancelLyricsRequest();
+  state.lyricsRequestToken += 1;
+  state.lyricsLoadingTrackId = "";
+}
+function closeTopDialog() {
+  const dialogs = [...document.querySelectorAll("dialog[open]")];
+  const dialog = dialogs[dialogs.length - 1];
+  if (!dialog) return false;
+  dialog.close();
+  return true;
+}
+function goBackFromNestedLibraryView() {
+  if (state.view === "folders" && state.folderPath) {
+    const parts = String(state.folderPath).split("/").filter(Boolean);
+    parts.pop();
+    state.folderPath = parts.join("/");
+    state.folderPage = 1;
+  }
+  else if (state.view === "folders" && state.folderRoot && !hasSingleFolderRoot()) {
+    state.folderRoot = "";
+    state.folderPath = "";
+    state.folderPage = 1;
+  }
+  else if (isCreatorAllTracksView()) setCurrentCreatorAllTracks(false);
+  else if (isCreatorView() && state.groupName) state.groupName = "";
+  else if (isCreatorView() && currentCreatorName()) clearCurrentCreator();
+  else if (state.groupName) state.groupName = "";
+  else return false;
+  state.page = 1;
+  state.pageItems = [];
+  resetLibraryScrollPosition();
+  requestLibraryLoad(1, false).finally(() => requestAnimationFrame(resetLibraryScrollPosition));
+  return true;
+}
+window.fnAudioHandleAndroidBack = () => {
+  if (closeTopDialog()) return true;
+  const contextMenu = $("trackContextMenu");
+  if (contextMenu && !contextMenu.hidden) {
+    closeTrackContextMenu();
+    return true;
+  }
+  const sidebar = document.querySelector(".sidebar");
+  if (sidebar?.classList.contains("mobile-open")) {
+    setMobileNavigation(false);
+    return true;
+  }
+  if (!$("lyricsView").hidden) {
+    closeLyrics();
+    return true;
+  }
+  return goBackFromNestedLibraryView();
+};
+function toggleLyrics() {
+  if (!$("lyricsView").hidden) {
+    closeLyrics();
+    return;
+  }
+  openLyrics();
+}
+$("lyricsBtn").onclick = toggleLyrics;
+$("nowPlayingSummary").onclick = toggleLyrics;
+$("nowPlayingSummary").onkeydown = event => {
+  if (!["Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  toggleLyrics();
+};
+$("queueBtn").onclick = openCurrentQueue;
+$("closeDialog").onclick = () => $("deviceDialog").close();
+$("deviceDialog").addEventListener("close", () => {
+  clearTimeout(state.deviceRefreshTimer);
+  state.deviceRefreshTimer = null;
+});
+$("closeFolderDialog").onclick = closeSettingsDialog;
+bindSettingsTabs();
+bindSettingsFooter();
+$("dlnaDiagnosticsBtn").onclick = openDlnaDiagnostics;
+$("closeDlnaDiagnosticsDialog").onclick = () => $("dlnaDiagnosticsDialog").close();
+$("refreshDlnaDiagnosticsBtn").onclick = loadDlnaDiagnostics;
+$("newPlaylistBtn").onclick = () => openPlaylistDialog();
+$("closePlaylistDialog").onclick = () => $("playlistDialog").close();
+$("closeTrackActionDialog").onclick = closeTrackActionDialog;
+$("closeMetadataCandidateDialog").onclick = closeTrackActionDialog;
+$("cancelMetadataCandidateBtn").onclick = closeTrackActionDialog;
+$("applyMetadataCandidateBtn").onclick = applySelectedMetadataCandidate;
+$("metadataCandidateSearchForm").addEventListener("submit", event => {
+  event.preventDefault();
+  searchTrackMetadataManually();
+});
+$("metadataEnabledInput").addEventListener("change", updateMetadataSettingsOverview);
+$("metadataTagWriteEnabledInput").addEventListener("change", updateMetadataSettingsOverview);
+$("closeExternalShareDialog").onclick = () => $("externalShareDialog").close();
+$("cancelExternalShare").onclick = () => $("externalShareDialog").close();
+$("shareExpiryEnabled").onchange = syncExternalShareOptions;
+$("sharePasswordEnabled").onchange = syncExternalShareOptions;
+$("shareAccessEnabled").onchange = syncExternalShareOptions;
+$("createExternalShare").onclick = createExternalShareLink;
+$("openExternalShareInFileManager").onclick = openExternalShareInFileManager;
+$("copyExternalShare").onclick = copyExternalShareLink;
+$("openExternalShareDetails").onclick = openExternalShareDetails;
+$("favoriteCurrentBtn").onclick = toggleCurrentFavorite;
+$("savePlaylistBtn").onclick = savePlaylistFromDialog;
+$("playlistNameInput").onkeydown = event => { if (event.key === "Enter") savePlaylistFromDialog(); };
+$("saveLibrarySettingsBtn").onclick = saveLibrarySettings;
+$("libraryScanNowBtn").onclick = () => requestLibraryLoad(1, true);
+$("retryLibraryLoadBtn").onclick = () => requestLibraryLoad(state.page || 1, false);
+$("saveRuntimeSettingsBtn").onclick = saveRuntimePaneSettings;
+$("saveDlnaSettingsBtn").onclick = saveDlnaPaneSettings;
+$("saveMetadataSettingsBtn").onclick = saveMetadataOverviewPaneSettings;
+$("saveMetadataProvidersBtn").onclick = saveMetadataProviderPaneSettings;
+$("saveMetadataTagSettingsBtn").onclick = saveMetadataTagPaneSettings;
+$("savePlaybackSettingsBtn").onclick = savePlaybackPaneSettings;
+// One entry, not two.  The fnOS host picker could not see fnOS 远程挂载
+// (it only lists the sidebar groups it is asked for, and shares live under
+// /vol1/@mountmgr/...), so adding a mounted folder required the server-side
+// browser anyway.  The browser is a superset - it lists the volume roots
+// and every mount point - so the picker is gone and this button opens it.
+$("chooseLibraryPathBtn").onclick = () => openLibraryDirBrowser("");
+$("closeLibraryDirDialog").onclick = () => $("libraryDirDialog").close();
+$("libraryDirUpBtn").onclick = () => { void loadLibraryDir(state.libraryDirParent || ""); };
+$("libraryDirAddBtn").onclick = addCurrentLibraryDir;
+$("metadataLogBtn").onclick = () => { renderMetadataLog(); $("metadataLogDialog").showModal(); };
+$("closeMetadataLogDialog").onclick = () => $("metadataLogDialog").close();
+$("closeMetadataLogBtn").onclick = () => $("metadataLogDialog").close();
+$("copyMetadataLogBtn").onclick = () => { void copyMetadataLog(); };
+$("metadataLogFilters").addEventListener("click", event => {
+  const button = event.target.closest?.("[data-metadata-log-filter]");
+  if (!button) return;
+  state.metadataLogFilter = button.dataset.metadataLogFilter || "all";
+  renderMetadataLog();
+});
+// Both counters and detail rows open the same dialog the button does, so the
+// question "失败的是哪些" is one tap away from the number (R519).
+$("metadataTaskStats").addEventListener("click", event => {
+  if (event.target.closest?.("[data-metadata-stat-issues]")) openMetadataIssueLog();
+});
+$("metadataTaskStats").addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  if (!event.target.closest?.("[data-metadata-stat-issues]")) return;
+  event.preventDefault();
+  openMetadataIssueLog();
+});
+function openMetadataIssueTrack(row) {
+  const trackId = row?.dataset?.metadataIssueTrack || "";
+  if (!trackId) return;
+  $("metadataLogDialog")?.close();
+  openMetadataCandidateDialog(trackId);
+}
+$("metadataLogIssuesList").addEventListener("click", event => {
+  const row = event.target.closest?.("[data-metadata-issue-track]");
+  if (row) openMetadataIssueTrack(row);
+});
+$("metadataLogIssuesList").addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target.closest?.("[data-metadata-issue-track]");
+  if (!row) return;
+  event.preventDefault();
+  openMetadataIssueTrack(row);
+});
+$("refreshMetadataBtn").onclick = refreshMetadataLibrary;
+$("deviceSearchInput").addEventListener("input", event => {
+  state.deviceSearchQuery = event.target.value || "";
+  // Signature caching would swallow a filter-only change, so clear it first.
+  state.deviceTargetsSignature = "";
+  renderDeviceTargets(state.deviceTargetsRendered, resolvedDeviceTarget(state.deviceTargetsRendered, state.playTarget || "local"));
+});
+$("scanDevices").onclick = () => loadDevices(true);
+$("playBtn").onclick = () => {
+  if (state.deviceSwitchInFlight) return;
+  if (isIncomingRendererSession()) {
+    const transport = String(state.rendererSession.transport || "").toUpperCase();
+    controlIncomingRenderer(transport === "PLAYING" ? "pause" : "play");
+    return;
+  }
+  if (isRemoteTarget()) {
+    if (!currentItem() && state.queue.length) {
+      const previousIndex = state.index;
+      state.index = 0;
+      syncCurrentQueuePresentation(previousIndex);
+      loadCurrent();
+      return;
+    }
+    if (!currentItem()) return;
+    const transport = state.remoteStatus?.transport?.state || "";
+    if (transport === "PLAYING") remoteControl("pause");
+    else remoteControl("play");
+    return;
+  }
+  if (nativePlaybackAvailable()) {
+    if (!currentItem() && state.queue.length) {
+      const previousIndex = state.index;
+      state.index = 0;
+      syncCurrentQueuePresentation(previousIndex);
+      loadCurrent();
+    } else if (!currentItem()) return;
+    else if (state.nativePlayback.playing) nativePlaybackCall("pause");
+    // A restored WebView can have the persisted fnAudio queue while Android's
+    // process was recreated with an empty ExoPlayer timeline. Rehydrate before
+    // playing instead of issuing a no-op native play command.
+    else if (nativeQueueNeedsRestore()) nativeLoadQueue(true, 0, true);
+    else nativePlaybackCall("play");
+    return;
+  }
+  if (!audio.src && state.queue.length) loadCurrent(); else if (audio.paused) audio.play(); else audio.pause();
+};
+$("prevBtn").onclick = () => playPreviousTrack();
+$("nextBtn").onclick = () => playNextTrack();
+$("repeatBtn").onclick = toggleRepeat;
+$("shuffleBtn").onclick = toggleShuffle;
+$("mobileRepeatBtn").onclick = toggleRepeat;
+$("mobileShuffleBtn").onclick = toggleShuffle;
+function updateVolumeRail(value = Number($("volume")?.value || 0)) {
+  // The rail's fill is a gradient stop, so the value has to reach CSS as a
+  // custom property.  It is written on the input rather than on the panel: the
+  // track is a pseudo-element of the input and inherits from it, and nothing
+  // else reads the number.  Clamped because the caller can be a restored value
+  // rather than the slider itself (R488).
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  setStyleVarIfChanged($("volume"), "--volume-fill", `${percent}%`);
+}
+$("volume").oninput = e => {
+  const value = Number(e.target.value);
+  audio.volume = value;
+  if (nativePlaybackAvailable()) nativePlaybackCall("setVolume", value);
+  updateVolumeRail(value);
+};
+$("volumeBtn").onclick = event => {
+  event.stopPropagation();
+  $("volumePanel").hidden = !$("volumePanel").hidden;
+};
+$("volumePanel").onclick = event => event.stopPropagation();
+document.addEventListener("click", () => {
+  const panel = $("volumePanel");
+  if (panel) panel.hidden = true;
+});
+audio.volume = 1;
+if ($("volume")) $("volume").value = "1";
+// The rail is a gradient, so it starts empty unless the boot value is pushed
+// into CSS once.  Without this the popover opens with a grey rail and a handle
+// parked at the top (R488).
+updateVolumeRail();
+audio.onplay = () => { setPlayButton(true); updateMediaSessionPlaybackState(); syncState(); };
+audio.onpause = () => { setPlayButton(false); updateMediaSessionPlaybackState(); syncState(); };
+audio.onerror = () => {
+  if (currentItem()?.is_dsd === true) {
+    alert("DSD 兼容流不可用，已停止本机播放。");
+    stopLocalAudio();
+  }
+};
+audio.onended = async () => {
+  state.streamOffset = 0;
+  state.pendingSeekTime = null;
+  state.transcodeCacheReady = false;
+  state.playSourceKind = "";
+  const moved = await coreControl("next");
+  if (!moved) updateMediaSessionPlaybackState();
+};
+// Buffer growth is the one rail change that does not come with a position tick:
+// a paused element keeps filling, and an emptied one loses its ranges.
+audio.onprogress = () => updateSeekRail();
+audio.onemptied = () => updateSeekRail();
+audio.ontimeupdate = () => {
+  if (isRemoteTarget()) return;
+  const item = currentItem();
+  const duration = seekDuration();
+  // The cue tail check is a decision about *local* playback, so it has to read
+  // the local pair.  With an incoming render session active, ``currentSeconds``
+  // and ``seekDuration`` answer about the caster's stream (which is exactly what
+  // the transport row must show), and a cast reaching its end would advance this
+  // browser's own queue.  Painting below keeps using the shared getters.
+  const localSeconds = localPlaybackSeconds();
+  const localDuration = localPlaybackDuration();
+  // Ruling D-1 stops the element as soon as a cast takes over, so on the ordinary path
+  // this handler is not even ticking during a cast. The host player is the case that
+  // still can, because its reported position lags one state callback behind the stop.
+  // Walking the queue on our own is not a local play intent either, so it must never
+  // preempt the caster: the tail simply does not fire while a render session owns the
+  // output.
+  if (item?.cue_track === true && !isIncomingRendererSession()
+    && localDuration > 0 && localSeconds >= Math.max(0, localDuration - 0.25)) {
+    const next = nextIndex();
+    if (next >= 0) {
+      state.streamOffset = 0;
+      state.pendingSeekTime = null;
+      state.transcodeCacheReady = false;
+      state.playSourceKind = "";
+      const previousIndex = state.index;
+      state.index = next;
+      syncCurrentQueuePresentation(previousIndex);
+      loadCurrent();
+    } else {
+      audio.pause();
+      updateMediaSessionPlaybackState();
+    }
+    return;
+  }
+  setTextContentIfChanged($("elapsed"), clock(currentSeconds()));
+  if (!state.seeking) {
+    $("seek").value = duration ? currentSeconds() / duration * 100 : 0;
+  }
+  syncPlayerProgress();
+  updateLyricHighlight();
+  updateMediaSessionPosition();
+};
+audio.onloadedmetadata = () => {
+  const item = currentItem();
+  const canUseNativeDuration = state.playSourceKind !== "stream";
+  if (item?.cue_track === true && state.playSourceKind === "cue_segment" && canUseNativeDuration && !item.duration && Number.isFinite(audio.duration) && audio.duration > 0) {
+    item.duration = audio.duration;
+  } else if (item?.cue_track === true && canUseNativeDuration && !item.duration && Number.isFinite(audio.duration) && audio.duration > 0) {
+    item.duration = Math.max(0, audio.duration - playbackSeconds(item.cue_start));
+  } else if (item && canUseNativeDuration && !item.duration && Number.isFinite(audio.duration) && audio.duration > 0) {
+    item.duration = audio.duration;
+  }
+  if (state.pendingSeekTime != null && Number.isFinite(audio.duration) && audio.duration > 0) {
+    const target = Math.min(Math.max(0, state.pendingSeekTime), Math.max(0, audio.duration - 0.1));
+    state.pendingSeekTime = null;
+    try { audio.currentTime = target; } catch (error) {}
+  }
+  setTextContentIfChanged($("duration"), clock(seekDuration()));
+  syncPlayerProgress();
+  updateMediaSessionPosition();
+};
+$("seek").oninput = e => {
+  state.seeking = true;
+  previewSeek(e.target.value);
+};
+$("seek").onchange = e => commitSeek(e.target.value);
+$("seek").onpointerup = e => commitSeek(e.target.value);
+$("seek").ontouchend = e => commitSeek(e.target.value);
+document.addEventListener("dblclick", event => {
+  if (state.libraryInteractionBlocked && event.target.closest?.("#trackList")) {
+    event.preventDefault();
+    return;
+  }
+  const row = event.target.closest(".track");
+  if (!row || event.target.closest("button")) return;
+  const play = row.querySelector("[data-play]");
+  if (play) playById(play.dataset.play);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !$("lyricsView").hidden && !document.querySelector("dialog[open]")) closeLyrics();
+});
+setupMediaSession();
+// fnOS stops waiting for the child handshake after a minute. Start the bridge
+// at boot, so opening settings later can still use the existing connection.
+void getTrimSdk();
+// Paint a recent, bounded page immediately when available. The network
+// response still remains authoritative and replaces it only when its content
+// differs, avoiding the blank-first-paint/cover-flash pattern on large libs.
+if (restoreLibraryPageSnapshot(1)) render();
+requestLibraryLoad(1, false);
+loadServerUserState();
+const uiSyncScheduler = globalThis.fnAudioUiSyncScheduler.create({
+  document,
+  isInteractionBlocked: uiBackgroundWorkBlocked,
+  isLibraryScanning: () => state.libraryStatus?.scanning === true,
+  isRemoteTarget,
+  isRemoteEventConnected: () => state.remoteEventConnected,
+  refreshLibraryStatus,
+  refreshCurrentTranscodeStatus,
+  refreshRendererSession,
+  refreshServerUserState,
+  startRemoteEventStream,
+  stopRemoteEventStream,
+  refreshRemoteStatus,
+  updateRemoteUi,
+});
+window.addEventListener("pagehide", stopRemoteOnUnload);
+window.addEventListener("beforeunload", stopRemoteOnUnload);
+window.addEventListener("pageshow", () => { if (isRemoteTarget()) startRemoteEventStream(); });
+window.addEventListener("resize", updateNowMarquee);
+window.addEventListener("resize", updateMobilePagerVisibility, { passive: true });
+updateDeviceLabel();
+updateModeButton();
+syncPlayerProgress();
+updateNowMarquee();
+refreshRendererSession();
+if (isRemoteTarget()) startRemoteEventStream();
+
+

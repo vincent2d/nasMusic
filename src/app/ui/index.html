@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=overlays-content">
+  <title>fnAudio</title>
+  <link rel="icon" href="images/icon_64.png">
+  <style id="critical-icon-sizing">.nav-item>svg{width:18px;height:18px;flex:0 0 18px}.group-icon>svg{width:24px;height:24px;flex:0 0 24px}.mobile-pagebar>button>svg{width:20px;height:20px;flex:0 0 20px}</style>
+  <link rel="stylesheet" href="app.css?v=__FNAUDIO_ASSET_BUILD__">
+  <link rel="stylesheet" href="design-tokens.css?v=__FNAUDIO_ASSET_BUILD__">
+  <link rel="stylesheet" href="fnos-theme.css?v=__FNAUDIO_ASSET_BUILD__">
+  <script id="stylesheet-retry">
+  /* A dropped stylesheet request is permanent for that page load: the browser
+   * never re-requests it, and nothing repaints the rules that were lost.  Losing
+   * all three is obvious, but losing only fnos-theme.css is the nasty case --
+   * the page still looks plausible because app.css and design-tokens.css carry
+   * the layout and the palette, so the only symptoms are the transport glyphs
+   * falling back to the SVG black default and the phone seek rail reverting to
+   * the native control.  That is why the same build looked correct on one launch
+   * and broken on the next, and it cannot be reproduced on demand.
+   * Re-request any sheet that produced no style sheet object, exactly once, with
+   * a fresh query so a cached failure cannot answer it.  The Android client
+   * inlines all three sheets as <style> elements, so there are no <link> nodes
+   * there and this script does nothing. */
+  (function () {
+    var names = ['app.css', 'design-tokens.css', 'fnos-theme.css'];
+    /* `link.sheet` is not a failure signal: Chromium hands one out as soon as the
+     * element is inserted, so it is non-null even for a request that was aborted.
+     * A sheet that never arrived stays unparsed, and an unparsed sheet refuses
+     * cssRules access exactly like a cross-origin one does -- so a throw, or an
+     * empty rule list, both mean nothing from that sheet was applied. */
+    function applied(link) {
+      if (!link.sheet) return false;
+      try {
+        return link.sheet.cssRules.length > 0;
+      } catch (error) {
+        return false;
+      }
+    }
+    function refetch() {
+      var links = document.querySelectorAll('link[rel="stylesheet"]');
+      for (var i = 0; i < links.length; i += 1) {
+        var link = links[i];
+        if (link.getAttribute('data-fnaudio-retried') || applied(link)) continue;
+        var href = link.getAttribute('href') || '';
+        var path = href.split('?')[0];
+        var base = path.substring(path.lastIndexOf('/') + 1);
+        if (names.indexOf(base) === -1) continue;
+        var fresh = link.cloneNode(false);
+        /* Keep the original path: rebuilding the URL from the bare file name
+         * would drop any directory prefix and turn the retry into a 404. */
+        fresh.setAttribute('href', path + '?retry=' + Date.now());
+        fresh.setAttribute('data-fnaudio-retried', '1');
+        link.parentNode.insertBefore(fresh, link);
+        link.parentNode.removeChild(link);
+      }
+    }
+    if (document.readyState === 'complete') refetch();
+    else window.addEventListener('load', refetch);
+  })();
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="mobile-pagebar">
+      <button class="top-icon-button" id="mobileNavBtn" type="button" title="打开更多菜单" aria-label="打开更多菜单" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg></button>
+      <div class="mobile-page-title"><strong id="mobileViewTitle">全部音乐</strong><span id="mobileViewSub">飞牛私人音乐库</span></div>
+    </div>
+    <div class="topbar-library">
+      <div class="topbar-library-main">
+        <div class="topbar-library-title">
+          <h1 id="viewTitle">全部音乐</h1>
+          <p id="viewSub">飞牛私人音乐库</p>
+        </div>
+        <div class="topbar-library-note"><span>DSD</span><strong>原始文件推送</strong><small>支持 DSF / DFF</small></div>
+      </div>
+    </div>
+  </header>
+  <div class="mobile-nav-backdrop" id="mobileNavBackdrop" hidden></div>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <strong class="sidebar-head-title">fnAudio</strong>
+        <button class="icon-button sidebar-close" id="mobileNavCloseBtn" type="button" title="关闭菜单" aria-label="关闭菜单"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button>
+      </div>
+      <div class="sidebar-scroll">
+      <label class="library-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="searchInput" placeholder="搜索音乐" aria-label="搜索音乐"><button class="search-clear" id="searchClearBtn" type="button" title="清除搜索" aria-label="清除搜索" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></label>
+      <div class="nav-title">音乐库</div>
+       <button class="nav-item active" type="button" data-view="all"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/></svg> <span>全部音乐</span><b id="allCount">0</b></button>
+       <button class="nav-item" type="button" data-view="dsd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9Z"/><path d="M8 12h8M12 8v8"/></svg> <span>DSD 音乐</span><b id="dsdCount">0</b></button>
+       <button class="nav-item" type="button" data-view="folders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z"/></svg> <span>文件夹</span></button>
+       <button class="nav-item" type="button" data-view="albums"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg> <span>专辑</span></button>
+       <button class="nav-item" type="button" data-view="artists"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7" r="4"/><path d="M4 21v-3a8 8 0 0 1 16 0v3"/></svg> <span>歌手</span></button>
+       <button class="nav-item" type="button" data-view="composers"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13M9 9l11-2"/><ellipse cx="6" cy="18" rx="3" ry="3"/><ellipse cx="17" cy="16" rx="3" ry="3"/></svg> <span>作曲者</span></button>
+       <button class="nav-item" type="button" data-view="genres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8l10 10-8 8L3 11Z"/><circle cx="7" cy="7" r="1"/></svg> <span>类型</span></button>
+       <button class="nav-item" type="button" data-view="random100"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h3c5 0 7 14 12 14h3m-4-4 4 4-4 4M3 19h3c5 0 7-14 12-14h3m-4-4 4 4-4 4"/></svg> <span>随机 100 首</span></button>
+      <div class="nav-title secondary">播放列表</div>
+       <button class="nav-item" type="button" data-view="recent"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg> <span>最近添加</span><b id="recentCount">0</b></button>
+       <button class="nav-item" type="button" data-view="favorites"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 5a5 5 0 0 0-8 1 5 5 0 0 0-8-1c-6 6 8 16 8 16S26 11 20 5Z"/></svg> <span>收藏歌曲</span><b id="favoriteCount">0</b></button>
+       <button class="nav-item" type="button" data-view="queue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M3 11h18M3 17h10m4-2 4 3-4 3Z"/></svg> <span>当前队列</span><b id="queueCount">0</b></button>
+      <div id="playlistNav"></div>
+      <button class="nav-item new-playlist" id="newPlaylistBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建播放列表</span></button>
+      </div>
+      <div class="sidebar-settings">
+        <button class="nav-item mobile-settings-nav-item" id="mobileSettingsNavBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>设置</span></button>
+        <button class="nav-item mobile-logout-nav-item" id="mobileLogoutBtn" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg><span>退出登录</span></button>
+      </div>
+    </aside>
+    <section class="content">
+      <label class="mobile-library-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input id="mobileSearchInput" type="search" placeholder="搜索歌曲、歌手或专辑" aria-label="搜索歌曲、歌手或专辑" autocomplete="off" enterkeyhint="search"><button class="search-clear" id="mobileSearchClearBtn" type="button" title="清除搜索" aria-label="清除搜索" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></label>
+      <div class="library-scroll" id="libraryScroll">
+        <div class="table-head" id="tableHead"></div>
+        <div id="trackList" class="track-list"></div>
+      </div>
+<div id="libraryLoadError" class="library-load-error" role="alert" hidden><span id="libraryLoadErrorText"></span><button id="retryLibraryLoadBtn" class="secondary-button" type="button">重试加载</button></div>
+      <div id="pager" class="pager"></div>
+    <div id="empty" class="empty" hidden><div class="empty-icon" aria-hidden="true"><svg class="record-placeholder" viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="7.5"></circle><circle class="record-placeholder-center" cx="12" cy="12" r="2.1"></circle></svg></div><h2 id="emptyTitle">还没有音乐</h2><p id="emptyText">请在应用设置里选择正确的音乐文件夹，然后刷新音乐库。</p></div>
+    </section>
+  </main>
+  <footer class="player">
+    <div class="now-playing" id="nowPlayingSummary" role="button" tabindex="0" title="显示歌词" aria-label="显示歌词"><div class="cover" id="nowCover"><svg class="record-placeholder" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7.5"></circle><circle class="record-placeholder-center" cx="12" cy="12" r="2.1"></circle></svg></div><div class="now-meta"><strong id="nowTitle">未选择曲目</strong><span id="nowArtist">从音乐库选择一首歌曲</span><small id="nowTime">0:00 / 0:00</small></div></div>
+     <div class="transport"><button class="icon-button mobile-transport-control" id="mobileShuffleBtn" type="button" title="随机播放" aria-label="随机播放"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M3 21 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M3 3l6 6"/></svg></button><button class="player-button" id="prevBtn" type="button" title="上一曲" aria-label="上一曲"><svg class="transport-icon prev-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5h3v14H5zM19 5 9 12l10 7z"/></svg></button><button class="player-button play-button" id="playBtn" type="button" title="播放/暂停" aria-label="播放/暂停"><svg class="transport-icon play-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m8 5 12 7-12 7z"/></svg></button><button class="player-button" id="nextBtn" type="button" title="下一曲" aria-label="下一曲"><svg class="transport-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 5h3v14h-3zM5 5l10 7-10 7z"/></svg></button><button class="icon-button mobile-transport-control" id="mobileRepeatBtn" type="button" data-repeat="off" title="循环关闭，点击开启列表循环" aria-label="循环模式：循环关闭，点击开启列表循环"><svg aria-hidden="true" id="mobileRepeatIcon" viewBox="0 0 24 24"><path d="M17 3l4 4-4 4"/><path d="M3 10V9a3 3 0 0 1 3-3h15"/><path d="M7 21l-4-4 4-4"/><path d="M21 14v1a3 3 0 0 1-3 3H3"/></svg></button></div>
+    <div class="progress"><span id="elapsed">0:00</span><span id="transportStateUnknown" role="status" title="状态通道未更新，位置可能不准">状态未知</span><input id="seek" type="range" min="0" max="100" value="0" aria-label="播放进度"><span id="duration">0:00</span></div>
+     <div class="player-actions"><button class="device-button" id="deviceBtn" type="button" title="播放设备" aria-label="播放设备"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3h11v18H3Z"/><path d="M6.5 7h4"/><path d="M6.5 10.5h4"/><circle cx="8.5" cy="16.5" r="2.5"/><path d="M16.5 7.5a4.5 4.5 0 0 1 0 9"/></svg></button><button class="icon-button action-button" id="lyricsBtn" type="button" title="歌词" aria-label="歌词"><svg class="lyric-symbol" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="10.9" text-anchor="middle" dominant-baseline="central">词</text></svg></button><button class="icon-button action-button favorite-current" id="favoriteCurrentBtn" type="button" title="收藏当前歌曲" aria-label="收藏当前歌曲"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 21C12 21 3 14.5 3 8.5C3 5.5 5.5 3 8.5 3C10.2 3 11.5 3.8 12 5C12.5 3.8 13.8 3 15.5 3C18.5 3 21 5.5 21 8.5C21 14.5 12 21 12 21Z"/></svg></button><button class="icon-button action-button" id="repeatBtn" type="button" data-repeat="off" title="循环关闭，点击开启列表循环" aria-label="循环模式：循环关闭，点击开启列表循环"><svg aria-hidden="true" id="repeatIcon" viewBox="0 0 24 24"><path d="M17 3l4 4-4 4"/><path d="M3 10V9a3 3 0 0 1 3-3h15"/><path d="M7 21l-4-4 4-4"/><path d="M21 14v1a3 3 0 0 1-3 3H3"/></svg></button><button class="icon-button action-button" id="shuffleBtn" type="button" title="乱序播放" aria-label="乱序播放"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M3 21 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M3 3l6 6"/></svg></button><button class="icon-button action-button" id="queueBtn" type="button" title="播放队列" aria-label="播放队列"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3h9"/><path d="M3 12h9"/><path d="M3 21h9"/><path d="m15 8 6 4-6 4Z"/></svg></button><div class="volume-control" id="volumeControl"><button class="icon-button action-button volume-button" id="volumeBtn" type="button" title="音量" aria-label="音量"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9v6h4.5l5.5 6V3L7.5 9H3Z"/><path d="M15.5 9.5a3.5 3.5 0 0 1 0 5"/><path d="M18 7.5a5.2 5.2 0 0 1 0 9"/></svg></button><div class="volume-panel" id="volumePanel" hidden><input id="volume" class="volume-slider" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="音量"></div></div></div>
+  </footer>
+  <section class="lyrics-view" id="lyricsView" hidden>
+    <div class="lyrics-bg" id="lyricsBg"></div>
+    <div class="lyrics-shade"></div>
+    <div class="lyrics-panel">
+      <!-- The artwork and its caption are one block.  They used to be two grid
+           rows of the panel, both top aligned, so on a tall window the whole
+           left column stuck to the ceiling while the lyric column ran the full
+           height (R494). -->
+      <div class="lyrics-side"><div class="lyrics-side-stack">
+        <div class="lyrics-cover" id="lyricsCover"><svg class="record-placeholder" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7.5"></circle><circle class="record-placeholder-center" cx="12" cy="12" r="2.1"></circle></svg></div>
+        <div class="lyrics-meta"><strong id="lyricsTitle">未选择曲目</strong><span class="lyrics-meta-artist" id="lyricsMetaArtist">未知歌手</span><span class="lyrics-meta-album" id="lyricsMetaAlbum">未知专辑</span></div>
+      </div></div>
+      <div class="lyrics-lines is-empty" id="lyricsLines"><p class="muted-line">请选择一首歌曲</p></div>
+    </div>
+  </section>
+  <audio id="audio" preload="metadata"></audio>
+  <dialog id="deviceDialog" aria-labelledby="deviceDialogTitle"><div class="dialog-head"><div><h2 id="deviceDialogTitle">播放设备</h2><span class="dialog-current-target" id="deviceCurrentTarget">正在读取当前输出…</span></div><button class="icon-button dialog-close-button" id="closeDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><div class="device-search" id="deviceSearchWrap" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="deviceSearchInput" type="search" maxlength="120" placeholder="搜索设备名称" aria-label="搜索设备名称" autocomplete="off"></div><div class="device-list-wrap" id="deviceList"></div><div class="device-dialog-footer"><span id="deviceRefreshStatus">正在搜索播放设备…</span><button class="secondary-button" id="scanDevices" type="button">重新扫描</button></div></dialog>
+  <dialog id="folderDialog" aria-labelledby="folderDialogTitle">
+    <div class="settings-shell">
+      <header class="settings-head">
+        <button class="icon-button settings-back" id="settingsBackBtn" type="button" title="返回" aria-label="返回"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg></button>
+        <h2 id="folderDialogTitle">设置</h2>
+        <button class="icon-button dialog-close-button" id="closeFolderDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button>
+      </header>
+      <div class="settings-body">
+        <nav class="settings-nav" role="tablist" aria-label="设置分类">
+          <button type="button" role="tab" id="settings-tab-library" aria-selected="true" aria-controls="settings-pane-library" class="active" data-settings-tab="library">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">媒体库</span><span class="settings-nav-summary" id="settingsSummaryLibrary">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button type="button" role="tab" id="settings-tab-playback" aria-selected="false" aria-controls="settings-pane-playback" data-settings-tab="playback">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2.5"/><circle cx="12" cy="15.5" r="2.8"/><circle cx="12" cy="7.5" r="1"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">播放与输出</span><span class="settings-nav-summary" id="settingsSummaryPlayback">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button type="button" role="tab" id="settings-tab-metadata" aria-selected="false" aria-controls="settings-pane-metadata" data-settings-tab="metadata">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H11l8 7-8 7H5.5A2.5 2.5 0 0 1 3 16.5Z"/><circle cx="8" cy="12" r="1.3"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">元数据</span><span class="settings-nav-summary" id="settingsSummaryMetadata">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button type="button" role="tab" id="settings-tab-network" aria-selected="false" aria-controls="settings-pane-network" data-settings-tab="network">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">服务与网络</span><span class="settings-nav-summary" id="settingsSummaryNetwork">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button type="button" role="tab" id="settings-tab-appearance" aria-selected="false" aria-controls="settings-pane-appearance" data-settings-tab="appearance">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">外观</span><span class="settings-nav-summary" id="settingsSummaryAppearance">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button type="button" role="tab" id="settings-tab-advanced" aria-selected="false" aria-controls="settings-pane-advanced" data-settings-tab="advanced">
+            <svg class="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h18M3 16h18"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>
+            <span class="settings-nav-text"><span class="settings-nav-label">高级</span><span class="settings-nav-summary" id="settingsSummaryAdvanced">--</span></span>
+            <svg class="settings-nav-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+        </nav>
+        <div class="settings-panes">
+          <section id="settings-pane-library" class="settings-pane active" role="tabpanel" aria-labelledby="settings-tab-library" data-settings-pane="library">
+            <div class="settings-group" data-settings-block="library">
+              <div class="settings-group-head"><h3>音乐目录</h3><span class="settings-badge is-save">需保存</span></div>
+              <p class="dialog-help" id="folderPathText">安装完成后，请在这里选择音乐目录。选择后 fnOS 会自动授权，返回路径后再保存设置。</p>
+              <div id="libraryPathList" class="library-path-list"></div>
+              <div class="library-path-picker"><button class="secondary-button add-path-button" id="chooseLibraryPathBtn" type="button">+ 添加目录</button><span class="settings-inline-feedback">可浏览本机盘符与已挂载的共享目录</span></div>
+              <p class="settings-pane-status" id="librarySettingsStatus" aria-live="polite"></p>
+            </div>
+            <div class="settings-group">
+              <section class="library-health" id="libraryHealth" aria-live="polite"><div class="library-health-heading"><div><h3>目录健康</h3><p id="libraryHealthStatus">正在读取目录状态...</p></div><button class="secondary-button" id="libraryScanNowBtn" type="button">立即扫描</button></div><div class="library-health-grid"><div><span>目录</span><strong id="libraryHealthPath">--</strong></div><div><span>已收录</span><strong id="libraryHealthCount">0 首</strong></div><div><span>最近扫描</span><strong id="libraryHealthLastScan">尚未扫描</strong></div></div><p class="library-health-detail" id="libraryHealthDetail"></p></section>
+            </div>
+          </section>
+          <section id="settings-pane-playback" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-playback" data-settings-pane="playback" hidden>
+            <div class="settings-group" data-settings-block="playback-output">
+              <div class="settings-group-head"><h3>播放输出</h3><span class="settings-badge is-live">立即生效</span></div>
+              <p class="dialog-help">选择输出目标与 MP3 转码方式，点击后立即生效，不需要保存。</p>
+              <div class="settings-device-controls" id="playbackDeviceControls"></div>
+            </div>
+            <div class="settings-group" data-settings-block="playback-identity">
+              <div class="settings-group-head"><h3>设备身份</h3><span class="settings-badge is-save">需保存</span></div>
+              <p class="dialog-help">给局域网中的多台 fnAudio 设置不同名称，只改变 Renderer 显示名称，不改变设备身份。</p>
+              <div class="metadata-settings-grid"><label><span>Renderer 名称</span><input id="rendererNameInput" type="text" maxlength="128" placeholder="例如：客厅播放器"></label></div>
+              <p class="dialog-help" id="playbackSettingsStatus" aria-live="polite"></p>
+            </div>
+          </section>
+          <section id="settings-pane-metadata" class="settings-pane metadata-settings-pane" role="tabpanel" aria-labelledby="settings-tab-metadata" data-settings-pane="metadata" hidden>
+            <div class="settings-group" data-settings-block="metadata-overview">
+              <div class="settings-group-head"><h3>基础与安全</h3><span class="settings-badge is-save">需保存</span></div>
+              <p class="dialog-help">后台补全只使用缓存和在线数据源，不会修改歌曲文件；写回文件是下方的独立开关，默认关闭。</p>
+              <div class="metadata-core-controls"><label class="metadata-toggle"><input id="metadataEnabledInput" type="checkbox"><span><strong>启用后台元数据补全</strong><small>允许后台任务在不阻塞播放的情况下获取歌曲、封面和歌词。</small></span></label></div>
+              <div class="metadata-settings-grid"><label><span>删除缓存宽限天数</span><input id="metadataGraceDaysInput" type="number" min="0" max="90" value="7"></label></div>
+              <p class="settings-pane-status" id="metadataOverviewSettingsStatus" aria-live="polite"></p>
+            </div>
+            <div class="settings-group metadata-provider-settings" data-settings-block="metadata-providers">
+              <div class="settings-group-head"><h3>数据源</h3><span class="settings-badge is-save">需保存</span></div>
+              <p class="dialog-help">按顺序查询歌曲、封面和歌词；靠上优先级更高，关闭的项目会被跳过。</p>
+              <!-- One fixed probe song instead of three manual inputs: the test
+                   always asks the same question, so two runs are comparable
+                   (R494). -->
+              <p class="metadata-probe-sample"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9.2v5.6l4.6-2.8z"/></svg><span>测试样本：<strong>周杰伦 · 双截棍</strong>，每次测试都用这一首</span></p>
+              <div id="metadataProviderList" class="metadata-provider-list" aria-label="可配置的元数据数据源"></div>
+              <p class="dialog-help" id="metadataProviderStatusText" aria-live="polite">正在读取数据源配置...</p>
+            </div>
+            <div class="settings-group metadata-task-section" data-settings-block="metadata-tasks">
+              <div class="settings-group-head"><h3>补全任务</h3><span class="settings-badge is-live">实时</span></div>
+              <div class="metadata-task-row">
+                <div class="metadata-task-state"><span class="metadata-task-dot" id="metadataTaskDot" aria-hidden="true"></span><strong id="metadataTaskHeadline">正在读取状态...</strong><span id="metadataTaskDetail"></span></div>
+                <div class="metadata-task-actions"><button class="secondary-button" id="metadataLogBtn" type="button">查看日志</button><button class="secondary-button" id="refreshMetadataBtn" type="button">重新补全</button></div>
+              </div>
+              <div class="metadata-task-stats" id="metadataTaskStats"></div>
+              <p class="metadata-task-alert" id="metadataTaskAlert" hidden></p>
+              <p class="dialog-help" id="metadataStatusText" aria-live="polite">正在读取后台状态...</p>
+            </div>
+            <div class="settings-group metadata-tag-section settings-danger-zone" data-settings-block="metadata-tags">
+              <div class="settings-group-head"><h3>Tag 写回</h3><span class="settings-badge is-danger">会修改文件</span></div>
+              <p class="dialog-help">仅对已确认的结果写回；启用前请确认音乐目录允许修改原始文件。写回后原标签被覆盖且无法撤销。</p>
+              <div class="metadata-core-controls"><label class="metadata-toggle"><input id="metadataTagWriteEnabledInput" type="checkbox"><span><strong>允许写入歌曲 Tag</strong><small>启用后，补全结果可能修改原始音乐文件；关闭时只保存缓存。</small></span></label></div>
+              <div id="metadataTagJobs" class="metadata-tag-jobs" hidden></div>
+              <div id="metadataTagWriteActions" class="metadata-settings-actions"></div>
+              <p class="settings-pane-status" id="metadataTagSettingsStatus" aria-live="polite"></p>
+            </div>
+          </section>
+          <section id="settings-pane-network" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-network" data-settings-pane="network" hidden>
+            <div class="settings-group" data-settings-block="network-dlna">
+              <div class="settings-group-head"><h3>DLNA 设备</h3><span class="settings-badge is-save">需保存</span></div>
+              <label class="metadata-toggle"><input id="dlnaTypeDetectionInput" type="checkbox" checked><span><strong>检测设备类型能力</strong><small>关闭后允许直接尝试推送设备未声明支持的 DSD 格式。</small></span></label>
+              <p class="dialog-help">关闭检测后，设备能否播放由设备自身决定；fnAudio 仍会发送原始 DSD 文件，不会自动转码。</p>
+              <div class="settings-inline-actions"><button class="secondary-button" id="dlnaDiagnosticsBtn" type="button">DLNA 兼容性记录</button></div>
+              <p class="dialog-help" id="dlnaSettingsStatus" aria-live="polite"></p>
+            </div>
+            <div class="settings-group" data-settings-block="network-port">
+              <div class="settings-group-head"><h3>运行端口</h3><span class="settings-badge is-live">实时</span></div>
+              <p class="dialog-help">当前运行端口：<strong id="serverPortValue">--</strong></p>
+              <p class="dialog-help">修改端口后，请停止并重新启动 fnAudio。端口被占用时应用将无法启动，请在应用中心设置中更换端口。</p>
+            </div>
+            <div class="settings-group" data-settings-block="network-pool">
+              <div class="settings-group-head"><h3>曲库连接池</h3><span class="settings-badge is-save">需保存</span></div>
+              <label class="metadata-toggle"><input id="libraryConnectionPoolInput" type="checkbox"><span><strong>启用曲库连接池</strong><small>开启时曲库查询会复用已打开的数据库句柄，翻页更快；关闭后每次查询都重新打开曲库，用于排查文件被长期占用。</small></span></label>
+              <p class="settings-pane-status" id="runtimeSettingsStatus" aria-live="polite"></p>
+            </div>
+          </section>
+          <section id="settings-pane-appearance" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-pane="appearance" hidden>
+            <div class="settings-group" data-settings-block="appearance-theme">
+              <div class="settings-group-head"><h3>主题</h3><span class="settings-badge is-live">立即生效</span></div>
+              <p class="dialog-help">浅色与深色由 fnAudio 单独显示；跟随系统时按浏览器或设备的浅深色偏好切换。</p>
+              <div class="metadata-settings-grid"><label><span>主题</span><select id="themeModeInput" data-theme-choice><option value="">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></div>
+            </div>
+          </section>
+          <section id="settings-pane-advanced" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-pane="advanced" hidden>
+            <div class="settings-group" data-settings-block="advanced-cache">
+              <div class="settings-group-head"><h3>歌词缓存</h3><span class="settings-badge is-save">需保存</span></div>
+              <p class="dialog-help">本地歌词正文的内存缓存上限，超预算时自动淘汰最旧的歌词，不改变磁盘上的歌词文件。调小缓存后保存会立刻淘汰已缓存的歌词。</p>
+              <div class="metadata-settings-grid"><label><span>歌词缓存上限</span><select id="lyricsCacheBudgetInput"><option value="65536">64 KiB</option><option value="262144">256 KiB</option><option value="1048576">1 MiB</option><option value="8388608" selected>8 MiB（默认）</option><option value="33554432">32 MiB</option><option value="67108864">64 MiB</option></select></label></div>
+            </div>
+            <div class="settings-group" data-settings-block="advanced-about">
+              <div class="settings-group-head"><h3>关于</h3><span class="settings-badge is-live">只读</span></div>
+              <p class="dialog-help">fnAudio 是飞牛 OS 上的音乐播放器：本地曲库、DLNA 推送与浏览器播放共用一套播放队列。</p>
+            </div>
+          </section>
+        </div>
+      </div>
+      <footer class="settings-foot">
+        <span class="settings-dirty" id="settingsDirtyCount" aria-live="polite"></span>
+        <span class="settings-save-status" id="settingsSaveStatus" aria-live="polite"></span>
+        <div class="settings-foot-actions">
+          <button class="secondary-button" id="settingsDiscardBtn" type="button" hidden>放弃</button>
+          <button class="secondary-button settings-save" id="settingsSaveBtn" type="button" hidden>保存更改</button>
+        </div>
+      </footer>
+      <div class="settings-legacy-actions" hidden aria-hidden="true">
+        <button id="saveLibrarySettingsBtn" type="button">保存音乐库设置</button>
+        <button id="savePlaybackSettingsBtn" type="button">保存播放与设备设置</button>
+        <button id="saveRuntimeSettingsBtn" type="button">保存运行设置</button>
+        <button id="saveMetadataSettingsBtn" type="button">保存概览设置</button>
+        <button id="saveMetadataTagSettingsBtn" type="button">保存 Tag 写回设置</button>
+        <button id="saveMetadataProvidersBtn" type="button">保存数据源设置</button>
+        <button id="saveDlnaSettingsBtn" type="button">保存 DLNA 设置</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="libraryDirDialog" aria-labelledby="libraryDirDialogTitle"><div class="dialog-head"><h2 id="libraryDirDialogTitle">选择音乐目录</h2><button class="icon-button dialog-close-button" id="closeLibraryDirDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="libraryDirPath">正在读取目录...</p><div class="library-dir-toolbar"><button class="secondary-button" id="libraryDirUpBtn" type="button">上一级</button><button class="secondary-button" id="libraryDirAddBtn" type="button">添加当前目录</button></div><div class="library-dir-list" id="libraryDirList" role="list"></div><p class="settings-pane-status" id="libraryDirStatus" aria-live="polite"></p></dialog>
+  <dialog id="dlnaDiagnosticsDialog" aria-labelledby="dlnaDiagnosticsDialogTitle"><div class="dialog-head"><h2 id="dlnaDiagnosticsDialogTitle">DLNA 兼容性记录</h2><button class="icon-button dialog-close-button" id="closeDlnaDiagnosticsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="dlnaDiagnosticsSummary"></p><div class="diagnostics-list" id="dlnaDiagnosticsList"></div><button class="secondary-button" id="refreshDlnaDiagnosticsBtn" type="button">刷新记录</button></dialog>
+  <dialog id="playlistDialog" aria-labelledby="playlistDialogTitle"><div class="dialog-head"><h2 id="playlistDialogTitle">新建播放列表</h2><button class="icon-button dialog-close-button" id="closePlaylistDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="playlistDialogHelp">输入一个名字，创建后可从曲目旁边加入歌曲。</p><div class="path-entry single"><input id="playlistNameInput" placeholder="例如：夜晚听"></div><div id="playlistChoices" class="playlist-choices"></div><p class="dialog-help" id="playlistStatus"></p><button class="secondary-button" id="savePlaylistBtn" type="button">保存</button></dialog>
+  <dialog id="trackActionDialog" aria-labelledby="trackActionTitle"><div class="dialog-head"><h2 id="trackActionTitle">歌曲操作</h2><button class="icon-button dialog-close-button" id="closeTrackActionDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><div id="trackActionList" class="track-action-list"></div></dialog>
+  <dialog id="metadataCandidateDialog" class="metadata-candidate-dialog" aria-labelledby="metadataCandidateTitle">
+    <div class="dialog-head">
+      <div><h2 id="metadataCandidateTitle">元数据补全</h2><p class="dialog-help" id="metadataCandidateTrackSummary"></p></div>
+      <button class="icon-button dialog-close-button" id="closeMetadataCandidateDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button>
+    </div>
+    <form class="metadata-candidate-search" id="metadataCandidateSearchForm">
+      <label class="metadata-candidate-query"><svg class="metadata-candidate-query-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="metadataCandidateSearchInput" type="search" maxlength="512" placeholder="输入歌名、歌手或专辑" aria-label="搜索关键词" autocomplete="off"></label>
+      <select id="metadataCandidateProviderSelect" aria-label="查询数据源"><option value="">自动匹配（按设置顺序）</option></select>
+      <button class="secondary-button" type="submit">搜索</button>
+    </form>
+    <p class="metadata-candidate-hint" id="metadataCandidateSearchStatus" aria-live="polite"></p>
+    <div class="metadata-candidate-body">
+      <div id="metadataCandidateSearchResults" class="metadata-candidate-results"></div>
+      <aside class="metadata-candidate-preview">
+        <h3>将写入的变化</h3>
+        <dl class="metadata-candidate-changes" id="metadataCandidatePreview"></dl>
+        <p class="metadata-candidate-preview-note" id="metadataCandidatePreviewNote"></p>
+      </aside>
+    </div>
+    <div class="metadata-candidate-footer">
+      <p class="dialog-help" id="metadataCandidateStatus" aria-live="polite">正在查询候选结果...</p>
+      <button class="secondary-button" id="cancelMetadataCandidateBtn" type="button">取消</button>
+      <button class="primary-button" id="applyMetadataCandidateBtn" type="button" disabled>确认并写入</button>
+    </div>
+  </dialog>
+  <dialog id="metadataLogDialog" class="metadata-log-dialog" aria-labelledby="metadataLogTitle">
+    <div class="dialog-head"><div><h2 id="metadataLogTitle">补全日志</h2><p class="dialog-help" id="metadataLogSummary"></p></div><button class="icon-button dialog-close-button" id="closeMetadataLogDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div>
+    <div class="metadata-log-filters" id="metadataLogFilters"><button type="button" data-metadata-log-filter="all" aria-pressed="true">全部</button><button type="button" data-metadata-log-filter="issue" aria-pressed="false">失败与未匹配</button><button type="button" data-metadata-log-filter="done" aria-pressed="false">已完成</button></div>
+    <section class="metadata-log-issues" id="metadataLogIssues" aria-label="失败与未匹配明细" hidden>
+      <div class="metadata-log-issues-head"><strong>失败与未匹配明细</strong><span id="metadataLogIssuesSummary"></span></div>
+      <div class="metadata-log-issues-list" id="metadataLogIssuesList" role="group" aria-label="失败与未匹配的歌曲"></div>
+      <p class="dialog-help" id="metadataLogIssuesNote"></p>
+    </section>
+    <div class="metadata-log-list" id="metadataLogList" role="log"></div>
+    <div class="metadata-log-footer"><span class="dialog-help" id="metadataLogNote">只记录本次页面会话里发生的事件，逐曲历史不会长期保存。</span><button class="secondary-button" id="copyMetadataLogBtn" type="button">复制</button><button class="secondary-button" id="closeMetadataLogBtn" type="button">关闭</button></div>
+  </dialog>
+  <dialog id="externalShareDialog" class="external-share-dialog" aria-labelledby="externalShareDialogTitle">
+    <div class="dialog-head"><h2 id="externalShareDialogTitle">创建外部链接</h2><button class="icon-button dialog-close-button" id="closeExternalShareDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button>
+    </div>
+    <div id="externalShareForm">
+      <div class="external-share-file"><span class="external-share-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7"/><path d="M9 7h8v8"/></svg></span><strong id="externalShareFileName">歌曲文件</strong><button class="external-share-native-link" id="openExternalShareInFileManager" type="button">在文件管理中打开</button></div>
+      <div class="external-share-options">
+        <div class="external-share-option"><div><strong id="shareExpiryLabel">到期时间</strong><span id="shareExpirySummary">链接永久有效</span></div><label class="switch-control"><input id="shareExpiryEnabled" type="checkbox" aria-labelledby="shareExpiryLabel"><span></span></label></div>
+        <div class="external-share-detail" id="shareExpiryDetail" hidden><input id="shareExpiryInput" type="datetime-local" aria-label="到期时间"></div>
+        <div class="external-share-option"><div><strong id="sharePasswordLabel">密码</strong><span id="sharePasswordSummary">不使用密码</span></div><label class="switch-control"><input id="sharePasswordEnabled" type="checkbox" aria-labelledby="sharePasswordLabel"><span></span></label></div>
+        <div class="external-share-detail" id="sharePasswordDetail" hidden><input id="sharePasswordInput" type="text" minlength="4" maxlength="128" autocomplete="off" aria-label="访问密码"></div>
+        <div class="external-share-option"><div><strong id="shareAccessLabel">可访问次数</strong><span id="shareAccessSummary">不限制次数</span></div><label class="switch-control"><input id="shareAccessEnabled" type="checkbox" aria-labelledby="shareAccessLabel"><span></span></label></div>
+        <div class="external-share-detail" id="shareAccessDetail" hidden><input id="shareAccessInput" type="number" min="1" max="9999" value="100" inputmode="numeric" aria-label="可访问次数"></div>
+      </div>
+      <p class="dialog-help external-share-status" id="externalShareStatus"></p>
+      <div class="external-share-footer"><button class="secondary-button" id="cancelExternalShare" type="button">取消</button><button class="primary-button" id="createExternalShare" type="button">确定</button></div>
+    </div>
+    <div class="external-share-result" id="externalShareResult" hidden><strong>外部链接已创建</strong><input id="externalShareUrl" type="text" readonly aria-label="外部链接"><p id="externalSharePasswordResult" hidden></p><p class="external-share-hint" id="externalShareHint" hidden></p><div class="external-share-footer"><button class="secondary-button" id="openExternalShareDetails" type="button">文件详情</button><button class="primary-button" id="copyExternalShare" type="button">复制链接</button></div></div>
+  </dialog>
+  <dialog id="deleteTrackDialog" class="native-delete-dialog" aria-labelledby="deleteTrackTitle" aria-describedby="deleteTrackDescription" data-dialog-initial-focus="cancelDeleteTrack">
+    <div class="native-delete-title">
+      <span class="native-delete-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg></span>
+      <h2 id="deleteTrackTitle">确定删除吗？</h2>
+    </div>
+    <p id="deleteTrackDescription" class="native-delete-description">删除后，可在回收站中恢复。</p>
+    <p id="deleteTrackStatus" class="native-delete-status" aria-live="polite"></p>
+    <div class="native-delete-footer">
+      <button id="deleteTrackPermanently" class="native-delete-outline" type="button">彻底删除</button>
+      <div class="native-delete-primary-actions">
+        <button id="cancelDeleteTrack" class="native-delete-cancel" type="button">取消</button>
+        <button id="moveTrackToTrash" class="native-delete-confirm" type="button">移入回收站</button>
+      </div>
+    </div>
+  </dialog>
+  <div id="trackContextMenu" class="track-context-menu" role="menu" hidden></div>
+  <dialog id="columnsDialog" aria-labelledby="columnsDialogTitle"><div class="dialog-head"><h2 id="columnsDialogTitle">显示列</h2><button class="icon-button dialog-close-button" id="closeColumnsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="columnDialogHelp">标题列也可以隐藏。点击表头可按支持的字段排序。</p><div class="column-choice-list" id="columnChoiceList"></div><div class="column-dialog-footer"><button class="secondary-button" id="resetColumnsBtn" type="button">恢复默认</button><button class="secondary-button" id="saveColumnsBtn" type="button">保存</button></div></dialog>
+  <script src="view_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="track_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="track_table_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="queue_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="lru_cache.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="album_metadata_cache.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="item_cache.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="item_negative_cache.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="item_lookup.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="item_hydration_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="item_hydration_request.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_item_request_loader.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="batch_request_pool.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_page_plan.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_pager_visibility.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_pager_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_page_merge.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_response_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="library_render_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="library_row_signature_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_snapshot_reuse_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_page_snapshot_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="metadata_row_patch_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_page_size_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="creator_view_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="user_media_state_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="lyrics_parse_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="metadata_response_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="response_json_loader.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="metadata_request_loader.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="playback_target_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="native_share_bridge.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+    <script src="library_track_filter_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_root_label_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_query_params.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_reference_items.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="track_search_text.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="device_target_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="device_caps_presentation.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="ui_sync_scheduler.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="cover_load_scheduler.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="shuffle_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="repeat_mode_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="track_sort_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_sort_options_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="folder_label_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="host_privacy_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="host_playback_session.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_response_loader.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_status_refresh_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="visible_metadata_prefetch_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="ui_metrics_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_metadata_merge_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_empty_response_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="metadata_projection_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="metadata_candidate_presentation_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_load_key.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_page_cursor_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="access_profile_loader.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="library_full_list_policy.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="fnos-ui.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script src="app.js?v=__FNAUDIO_ASSET_BUILD__"></script>
+  <script id="module-watchdog">
+  /* A module script that fails to load is permanent for that page load, and the
+   * symptom is not obvious: the page renders, then a single action throws
+   * "Cannot read properties of undefined (reading 'loadLibraryResponse')".
+   * Reported 2026-11-11 — one static request came back 403 (nginx, 166 bytes)
+   * while the same URL had answered 200 thirty seconds earlier, so the whole
+   * library page died although the server and the configuration were fine.
+   * Reload once, with a fresh cache key, when a required global is missing.
+   * The flag lives in sessionStorage so a genuinely broken build cannot loop. */
+  (function () {
+    var required = {
+      fnAudioLibraryResponseLoader: 'library_response_loader.js',
+      fnAudioLibraryRenderPolicy: 'library_render_policy.js',
+      fnAudioViewPresentation: 'view_presentation.js',
+    };
+    var flag = 'fnaudio.moduleReloaded';
+    function missing() {
+      var names = [];
+      for (var name in required) {
+        if (!required.hasOwnProperty(name)) continue;
+        if (typeof window[name] === 'undefined') names.push(required[name]);
+      }
+      return names;
+    }
+    if (!missing().length) {
+      try { sessionStorage.removeItem(flag); } catch (error) { }
+      return;
+    }
+    var already = '';
+    try { already = sessionStorage.getItem(flag) || ''; } catch (error) { }
+    if (already) return;
+    try { sessionStorage.setItem(flag, '1'); } catch (error) { }
+    var url = new URL(window.location.href);
+    url.searchParams.set('reload', String(Date.now()));
+    window.location.replace(url.toString());
+  })();
+  </script>
+</body>
+</html>
+

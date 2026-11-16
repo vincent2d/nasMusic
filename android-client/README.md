@@ -1,0 +1,111 @@
+# fnAudio Android 客户端
+
+这是 fnAudio `0.2.149` 的轻量混合客户端：WebView 继续承载现有界面，Android Media3 前台媒体服务持有本机播放，并在远程输出时维护不解码音频的媒体会话。当前配套服务端版本基线为 `0.2.149`。
+
+## 已实现
+
+- 输入 NAS 地址、端口、HTTPS、自签名证书兼容、账号和密码。
+- 通过 fnOS `/websocket?type=main` 执行 `user.login`；兼容 `user` / `username` 字段差异。
+- 使用 Android Keystore 加密保存多个连接的账号、密码、短令牌和长令牌；应用数据禁止系统备份。
+- 登录页通过单独按钮打开历史连接页，可在独立页面选择、编辑、删除或新增连接。修改 NAS 地址、端口、协议或账号会保存为新记录，只有明确点击“编辑”才覆盖所选记录。
+- 登录后直接加载 `/cgi/ThirdParty/fnaudio/index.cgi/`，不打开 fnOS 桌面。
+- WebView 通过 `FnAudioNative` 桥把队列、播放、暂停、切歌、seek、音量、循环和随机发送给 Media3。
+- WebView 的 fnAudio 非 GET API 通过同一桥交给原生 OkHttp，统一附加 `Authorization`、`X-Fnaudio-Trim-Token` 和同源 token Cookie；普通浏览器仍使用标准 Fetch。
+- FN Connect 先探测官方公网候选，均不可达时在原生 ARM64 设备上通过签名 `/api/v1/visit/info` 配置 Tpps V2 回环隧道；中继凭据仅驻留内存，x86/非 ARM64 自动回退直连。
+- `MediaSessionService + ExoPlayer` 负责完整队列、自动下一首、通知、媒体按键、音频焦点、耳机拔出和唤醒锁。
+- HTTP、系统 CA HTTPS 和用户明确允许的自签名 HTTPS；自签名连接首次认证前固定完整证书 SHA-256，后续 WebSocket、API、媒体、封面和 WebView 必须匹配，证书变化会明确拒绝。
+- Android 返回键优先交给网页关闭对话框、侧栏、歌词和分类详情；根页面第一次返回显示退出提示，2.2 秒内第二次返回登录界面，并禁止登录页自动恢复上次连接。
+- WebView 中长按歌曲 550ms 可打开与桌面右键一致的四项菜单；滚动会取消长按，松手不会误触歌曲播放。
+- Media3 通知小图标和无封面歌曲的媒体卡片占位图使用白色播放圆环；有真实封面时仍使用真实封面。
+
+## 构建
+
+环境：JDK 17 或更新版本、Android SDK Platform 36、Build Tools 36.0.0。Gradle Wrapper 会下载 Gradle 9.6.1。
+
+```powershell
+Set-Location C:\path\to\fnAudio\android-client
+$env:ANDROID_SDK_ROOT = 'E:\Codex\android-sdk'
+.\gradlew.bat :app:lintDebug :app:assembleDebug
+```
+
+输出：`app\build\outputs\apk\debug\app-debug.apk`。
+
+### Android 模拟器自动化
+
+首次安装本机 Emulator 与 API 35 ATD 镜像并执行 instrumented tests：
+
+```powershell
+Set-Location C:\path\to\fnAudio
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test_android_emulator.ps1 -InstallSdk
+```
+
+后续运行可省略 `-InstallSdk`。该入口覆盖加密多连接记录、登录历史界面、
+自签名 HTTPS 指纹固定以及 Media3 远程命令转发；完整范围和真机边界见
+`docs/ANDROID_EMULATOR_TESTING.md`。
+
+### Release 签名
+
+正式包不会内置仓库密钥。发布 keystore 已生成在仓库根的 `.secrets/`（被 `.gitignore` 排除），
+四项签名材料在 `.secrets/release-signing.env`，构建时由 `tools/load_signing_env.ps1` 读进进程：
+
+```powershell
+.\tools\load_signing_env.ps1 -ThenBuild -AndroidSdkRoot D:\fnAudio\tools\android-sdk
+```
+
+手工设置时同样只需四项环境变量：
+
+```powershell
+$env:FNAUDIO_RELEASE_STORE_FILE = 'D:\fnAudio\.secrets\fnaudio-release.jks'
+$env:FNAUDIO_RELEASE_STORE_PASSWORD = '...'
+$env:FNAUDIO_RELEASE_KEY_ALIAS = 'fnaudio'
+$env:FNAUDIO_RELEASE_KEY_PASSWORD = '...'
+.\gradlew.bat :app:assembleRelease
+```
+
+也可以使用 `-PfnaudioReleaseStoreFile=...` 等同名 Gradle properties。密钥文件和密码不得提交到 Git；未提供完整参数或 keystore 不存在时，`assembleRelease` 会明确失败，不能误产出未签名发布包。keystore 丢了就再也发不出能覆盖升级的包，详见 `docs/ANDROID_RELEASE.md`。
+
+## 电视端（Android TV）
+
+同一个 APK 里还有一个电视界面：清单中 `TvLoginActivity` 带 `LEANBACK_LAUNCHER` + banner，手机入口仍是 `LAUNCHER`，两者共用 `ConnectionProfile`／`SecureProfileStore`／`FnOsAuthClient`，所以手机上登录过的 NAS 可以直接在电视上点「连接」。代码在 `app/src/main/java/com/fnaudio/client/tv/`，**没有引入任何新依赖**（Gradle 离线缓存里没有 `androidx.tv`／Leanback／Compose for TV）。
+
+- 界面：左侧固定栏（首页／专辑／艺术家／曲目／队列／正在播放）+ 内容区 + 底部常驻播放条；首页是 hero + 三排横向 shelf，全屏播放页左封面右「接下来」。
+- 焦点：遥控器只有四向键，因此每个 shelf 是独立 `RecyclerView`（自身焦点搜索跨不了行），`TvShelfNavigator` 维护行注册表按列索引上下换行；侧栏上下、侧栏→内容、卡片→侧栏、hero↔首排全部显式接线，不依赖 `FocusFinder` 的几何猜测。
+- 播放：不走 `PlaybackService`（`MediaSessionService` 的后台握手对电视没有意义），`TvPlayer` 直接在 Activity 内持有 `ExoPlayer`；随机语义与服务器 `next_track()` 对齐（每次独立抽取，不预洗牌）。
+- 数据：`TvApi` 只读，复用 `HttpClientFactory`，请求头与 Cookie 规则与手机端一致；流地址 `media/<id>?transcode=original`，封面 `cover/<id>?size=`。
+
+构建与本地验收：
+
+```powershell
+.\gradlew.bat :app:assembleEmulator --offline   # 产物 app\build\outputs\apk\emulator\app-emulator.apk
+$env:ANDROID_HOME = 'D:\fnAudio\tools\android-sdk'
+& "$env:ANDROID_HOME\emulator\emulator.exe" -avd fnaudio-tv   # 1080p / 320dpi，即 960x540dp
+```
+
+没有 NAS 时用 `python tools/tv-mock/server.py`（开发用，不随产品发布）：它在本机 `127.0.0.1:18099` 起一个 fnOS 网关替身，实现 WebSocket 登录与 `library`／`groups`／`cover`／`media` 四个只读接口；模拟器里填 `10.0.2.2:18099` 即可。存档连接由 `TvMockSeedTest` 写入——`SecureProfileStore` 用 AndroidKeyStore 加密，`adb push`／`run-as` 都写不进去，只能在应用进程内落盘。
+
+## 与 fnAudio 服务端的配套要求
+
+必须安装 `fnAudio 0.2.14` 或更新版本。该版本包含 MPD/DLNA 服务端状态同步、Renderer 后台自动推进、DSD 原始推送、远程 MediaSession、启动 token 刷新、API scope 授权和播放快照契约。网页桥在选择当前设备时使用 ExoPlayer；选择 USB DAC、MPD 或 DLNA 时切换为仅镜像状态和转发控制的远程播放器。
+
+## 尚待真机确认
+
+- 不同 fnOS 固件是否都接受 WebSocket 登录令牌作为 CGI 的 Cookie/Authorization 会话。
+- 2FA、验证码、账号冻结和长令牌签名恢复流程。
+- 各手机厂商后台限制、息屏连续播放、蓝牙/有线耳机媒体按键和来电抢占。
+- Android 端自签名 HTTPS 首次固定、证书变化拒绝、外网反向代理和 IPv6 的真机行为。
+- 正式发布签名、升级密钥保管和 Play Protect/厂商安装器提示。
+
+Debug APK 使用 Android 调试证书，只适合当前开发验证，不应作为正式发布包。
+
+
+## 本地模拟器验收
+
+`emulator` 构建使用独立包名 `com.fnaudio.client.emulator`，只排除 ARM64 的 FN Connect 中继库，其余 WebView、原生 HTTP 和播放代码与 Debug 相同。它用于局域网登录、曲库与设置回显测试，不能代替 ARM64 中继、USB DAC 或手机后台策略验收。
+
+```powershell
+$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$env:TEMP/fnaudio-gradle-missing/socketdir"
+# 上述目录须保持不存在；这是当前 Windows Gradle 通信兼容参数。
+.\tools\test_android_emulator.ps1 -KeepRunning
+```
+
+令牌 Cookie 必须保留 Base64 的 `+`、`/` 和 `=`，不能使用表单编码传给 fnOS 网关。网关 HTTP 200 的 `invalid token` 正文会按认证失败报告，不作为空曲库或默认设置处理。

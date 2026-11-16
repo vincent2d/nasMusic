@@ -1,0 +1,174 @@
+plugins {
+    id "com.android.application"
+}
+
+def releaseStoreFile = project.findProperty("fnaudioReleaseStoreFile") ?: System.getenv("FNAUDIO_RELEASE_STORE_FILE")
+def releaseStorePassword = project.findProperty("fnaudioReleaseStorePassword") ?: System.getenv("FNAUDIO_RELEASE_STORE_PASSWORD")
+def releaseKeyAlias = project.findProperty("fnaudioReleaseKeyAlias") ?: System.getenv("FNAUDIO_RELEASE_KEY_ALIAS")
+def releaseKeyPassword = project.findProperty("fnaudioReleaseKeyPassword") ?: System.getenv("FNAUDIO_RELEASE_KEY_PASSWORD")
+def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+android {
+    namespace "com.fnaudio.client"
+    compileSdk 36
+    testBuildType project.findProperty("fnaudioTestBuildType") ?: "debug"
+
+    defaultConfig {
+        applicationId "com.fnaudio.client"
+        minSdk 23
+        targetSdk 36
+        versionCode 407
+        versionName "0.2.149"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        // AGP 9.3.1's ThreadConstraint detector crashes on Windows while
+        // writing its partial results for androidTest sources.
+        disable "ThreadConstraint"
+    }
+
+    sourceSets {
+        main.assets.srcDirs += ["../../src/app/ui"]
+    }
+
+    tasks.register("verifyFnaudioUiSource") {
+        doLast {
+            def uiRoot = file("../../src/app/ui")
+            def indexFile = file("../../src/app/ui/index.html")
+            if (!uiRoot.isDirectory() || !indexFile.isFile()) {
+                throw new GradleException("fnAudio UI source tree is missing: ${uiRoot}")
+            }
+            def indexText = indexFile.getText("UTF-8")
+            def requiredAssets = ["app.css", "design-tokens.css", "fnos-theme.css", "app.js", "fnos-ui.js", "view_presentation.js", "library_render_policy.js"]
+            requiredAssets.each { asset ->
+                if (!new File(uiRoot, asset).isFile() || !indexText.contains(asset)) {
+                    throw new GradleException("fnAudio UI asset is missing or not referenced: ${asset}")
+                }
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources.excludes += ["META-INF/DEPENDENCIES", "META-INF/NOTICE*", "META-INF/LICENSE*"]
+        // The official Tpps gomobile runtime is distributed as an extracted
+        // native library. Preserve that loading model for ARM64/16 KB devices.
+        jniLibs.useLegacyPackaging = true
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+        }
+        // LAN/API/WebView QA on x86_64; ARM64 FN Connect relay is excluded.
+        emulator {
+            initWith debug
+            applicationIdSuffix ".emulator"
+            versionNameSuffix "-emulator"
+            matchingFallbacks = ["debug"]
+        }
+        // Isolated build for validating the public fnOS MediaBrowser/MediaSession.
+        // It has a different application id and can be installed beside normal fnAudio.
+        mediaSession {
+            initWith debug
+            applicationIdSuffix ".mediasession"
+            versionNameSuffix "-mediasession"
+            debuggable true
+            buildConfigField "boolean", "FNOS_MEDIA_SESSION_TEST", "true"
+        }
+        // Standalone television packages. The shipped APK carries both entry
+        // points, but a vendor launcher that ignores LEANBACK_LAUNCHER opens the
+        // phone client on a TV. These two build types drop the phone entry and
+        // ship one ABI each, so an older 32-bit box also gets a matching
+        // libgojni.so. They share one manifest fragment (src/tv) so the launcher
+        // entry cannot drift between the two ABIs.
+        tvArm64 {
+            initWith release
+            applicationIdSuffix ".tv"
+            versionNameSuffix "-tv"
+            ndk { abiFilters "arm64-v8a" }
+        }
+        tvArm32 {
+            initWith release
+            applicationIdSuffix ".tv"
+            versionNameSuffix "-tv"
+            ndk { abiFilters "armeabi-v7a" }
+        }
+        // Same television package on x86_64, used to verify the launcher entry
+        // on a plain (non-Leanback) host launcher. ARM relay runtime excluded.
+        tvEmulator {
+            initWith emulator
+            versionNameSuffix "-tv-emulator"
+            ndk { abiFilters "x86_64" }
+        }
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("emulator")) { variant ->
+        variant.packaging.jniLibs.excludes.add("**/libgojni.so")
+    }
+    onVariants(selector().withBuildType("tvEmulator")) { variant ->
+        variant.packaging.jniLibs.excludes.add("**/libgojni.so")
+    }
+}
+
+tasks.register("verifyReleaseSigning") {
+    doLast {
+        if (!hasReleaseSigning) {
+            throw new GradleException("Release signing is required. Set FNAUDIO_RELEASE_STORE_FILE, FNAUDIO_RELEASE_STORE_PASSWORD, FNAUDIO_RELEASE_KEY_ALIAS and FNAUDIO_RELEASE_KEY_PASSWORD.")
+        }
+        if (!file(releaseStoreFile).isFile()) {
+            throw new GradleException("Release keystore does not exist: ${releaseStoreFile}")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "preReleaseBuild") {
+        dependsOn(tasks.named("verifyReleaseSigning"))
+    }
+}
+tasks.named("preBuild").configure {
+    dependsOn(tasks.named("verifyFnaudioUiSource"))
+}
+
+dependencies {
+    implementation "androidx.activity:activity:1.13.0"
+    implementation "androidx.appcompat:appcompat:1.7.1"
+    implementation "com.google.android.material:material:1.12.0"
+    implementation "androidx.media3:media3-exoplayer:1.10.1"
+    implementation "androidx.media3:media3-session:1.10.1"
+    implementation "androidx.media3:media3-datasource-okhttp:1.10.1"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    testImplementation "junit:junit:4.13.2"
+    androidTestImplementation "androidx.test.ext:junit:1.2.1"
+    androidTestImplementation "androidx.test:runner:1.6.2"
+    androidTestImplementation "androidx.test:rules:1.6.1"
+    androidTestImplementation "androidx.test.espresso:espresso-core:3.6.1"
+    androidTestImplementation "com.squareup.okhttp3:mockwebserver:4.12.0"
+    androidTestImplementation "com.squareup.okhttp3:okhttp-tls:4.12.0"
+}
