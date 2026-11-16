@@ -27,6 +27,7 @@ TRUSTED_LAN_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
     "172.16.0.0/12",
     "198.51.0.0/16",
     "169.254.0.0/16",
+    "192.168.0.0/16",
     "fc00::/7",
     "fe80::/10",
 ))

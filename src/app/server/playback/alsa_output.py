@@ -524,6 +524,19 @@ def _is_usb_card(card, *parts):
     return "usb" in driver
 
 
+def _is_onboard_analog(*parts):
+    """fnOS patch: keep the on-board analog line selectable as a music output.
+
+    Upstream publishes USB DACs only, so a NAS with powered speakers on the
+    on-board jack shows no device at all. An analog PCM is ordinary ALSA
+    playback; HDMI and the PC speaker remain excluded.
+    """
+    text = " ".join(str(part or "") for part in parts).lower()
+    if any(token in text for token in ("hdmi", "pcsp", "pc speaker", "pc-speaker", "pcspeaker")):
+        return False
+    return "analog" in text
+
+
 def _card_vendor_label(card, *parts):
     text = " ".join(str(part or "") for part in parts).lower()
     text_without_driver_alias = re.sub(r"\bhda[-_ ]intel\b", " ", text)
@@ -571,7 +584,7 @@ def friendly_alsa_device_name(card, device, card_info, pcm_name, dev_name, raw_l
             generic_device = dev_clean.lower() in ("usb audio", "usb-audio", "usb audio playback")
             return base if generic_device else "%s 路 %s" % (base, dev_clean)
         return base
-    if "hdmi" in lower:
+    if "hdmi" in ("%s %s" % (dev_clean, pcm_name)).lower():
         vendor = _card_vendor_label(card, raw)
         match = re.search(r"hdmi\s*(\d+)", dev_clean, re.I)
         suffix = match.group(1) if match else device
@@ -648,7 +661,7 @@ def alsa_devices_from_proc():
                 card = str(int(card))
                 device = str(int(device))
                 card_info = cards.get(card, {})
-                if not _proc_line_is_usb_card(card, line, card_info):
+                if not _proc_line_is_usb_card(card, line, card_info) and not _is_onboard_analog(line, card_info.get("name")):
                     # This enumeration publishes USB sound cards only, so an
                     # on-board HDMI or analog line is dropped a few statements
                     # later regardless of what it is named. Naming it, though,
@@ -678,7 +691,7 @@ def alsa_devices_from_proc():
 def alsa_devices():
     proc_devices = alsa_devices_from_proc()
     if proc_devices:
-        return [device for device in proc_devices if device.get("is_usb")]
+        return [device for device in proc_devices if device.get("is_usb") or _is_onboard_analog(device.get("name"), device.get("raw_name"))]
     aplay = find_aplay()
     if not aplay:
         return []
@@ -702,7 +715,7 @@ def alsa_devices():
         enriched = enrich_dac_device({"alsa_id": alsa_id, "name": name, "raw_name": raw_name, "online": True, "kind": "dac", "is_usb": is_usb})
         enriched["id"] = "dac:" + enriched["stable_id"]
         devices.append(enriched)
-    return [device for device in devices if device.get("is_usb")]
+    return [device for device in devices if device.get("is_usb") or _is_onboard_analog(device.get("name"), device.get("raw_name"))]
 
 
 def dac_public_status():

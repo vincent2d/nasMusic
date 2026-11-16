@@ -17,14 +17,14 @@
       return typeof fn === "function" && Boolean(fn());
     };
     const visible = () => !doc || doc.visibilityState !== "hidden";
-    const every = (milliseconds, callback) => {
+    const every = (milliseconds, callback, waitForLibrary = true) => {
       const id = setIntervalSafe(() => {
         if (!visible()) return;
         // A library page replacement owns the few HTTP/1.1 connections the browser
         // keeps to the app gateway, and on fnOS every one of these ticks also starts a
         // CGI worker. Yielding the background lanes for that window is what turns a
         // queued half-second-late click into an immediate one.
-        if (check("isInteractionBlocked")) return;
+        if (waitForLibrary && check("isInteractionBlocked")) return;
         callback();
       }, milliseconds);
       if (id !== null && id !== undefined) intervals.push(id);
@@ -50,12 +50,12 @@
     every(1000, () => { if (check("isLibraryScanning")) call("refreshLibraryStatus"); });
     every(1200, () => call("refreshCurrentTranscodeStatus"));
     every(5000, () => {
-      if (check("isRemoteTarget") && !check("isRemoteEventConnected")) call("refreshRemoteStatus");
-    });
+      if (check("isRemoteTarget")) call("refreshRemoteStatus");
+    }, false);
     every(1500, () => call("refreshRendererSession"));
     // An incoming DLNA render paints the same transport row but is not a remote
     // play target, so the 500ms tick has to recognise both states.
-    every(500, () => { if (check("isRemoteTarget") || check("isIncomingRendererSession")) call("updateRemoteUi"); });
+    every(500, () => { if (check("isRemoteTarget") || check("isIncomingRendererSession")) call("updateRemoteUi"); }, false);
     every(10000, () => call("refreshServerUserState"));
     if (doc?.addEventListener) doc.addEventListener("visibilitychange", onVisibilityChange);
 

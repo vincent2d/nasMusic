@@ -1,4 +1,4 @@
-const state = { items: [], view: "all", queue: [], index: -1, devices: [], repeat: "off", shuffle: false, folderPath: "", playTarget: "local", playTargetName: "本机播放", libraryDirPath: "", libraryDirParent: "" };
+const state = { items: [], view: "folders", queue: [], index: -1, devices: [], repeat: "all", shuffle: false, folderPath: "", playTarget: "local", playTargetName: "本机播放", libraryDirPath: "", libraryDirParent: "" };
 const $ = (id) => document.getElementById(id);
 const SETTINGS_SAVE_BUTTON_IDS = [
   "saveLibrarySettingsBtn",
@@ -181,6 +181,8 @@ state.transcodeStatusRequestToken = 0;
 state.transcodeStatusController = null;
 state.playSourceKind = "";
 state.playbackLoadToken = 0;
+state.contextPlaybackRequest = 0;
+state.contextPlaybackCommit = Promise.resolve();
 state.random100 = [];
 state.playlists = loadStoredPlaylists();
 state.favorites = loadStoredFavorites();
@@ -1583,7 +1585,7 @@ function visibleUserStatePresentationSignature() {
 function refreshUserStateChrome() {
   renderPlaylistNav();
   updateFavoriteControls();
-  updateRepeatShuffleButtons();
+  updatePlaybackModeButton();
   updateDeviceLabel();
   if (!isIncomingRendererSession()) restoreLibraryNowPlaying();
 }
@@ -1672,7 +1674,7 @@ async function restorePlaybackSession(playback) {
     const nativeIndex = state.queue.findIndex(item => String(item.id || "") === nativeCurrentId);
     if (nativeIndex >= 0) state.index = nativeIndex;
   }
-  updateRepeatShuffleButtons();
+  updatePlaybackModeButton();
   updateDeviceLabel();
   restoreLibraryNowPlaying();
   // A restored session does not necessarily re-enter `loadCurrent()` (for
@@ -1685,8 +1687,6 @@ async function restorePlaybackSession(playback) {
   if (isRemoteTarget() && state.queue.length) {
     startRemoteEventStream();
     await refreshRemoteStatus({ allowAdvance: false });
-    const remoteCore = state.remoteStatus?.core;
-    if (remoteCore) applyCoreSnapshot(remoteCore, false);
     nativeRemoteEnter(true);
     updateRemoteUi();
   } else if (state.playTarget === "local" && state.queue.length && nativePlaybackAvailable()) {
@@ -1696,6 +1696,7 @@ async function restorePlaybackSession(playback) {
   }
 }
 function isPlaylistView(view = state.view) { return String(view || "").startsWith("playlist:"); }
+function isFolderOrPlaylistView() { return state.view === "folders" || isPlaylistView(); }
 function isPlaylistLibraryView(view = state.view) {
   return view === "random100" || view === "recent" || view === "favorites" || view === "queue" || isPlaylistView(view);
 }
@@ -2321,6 +2322,7 @@ function renderIncomingRendererSession(session) {
   // from this 1.5s status poll instead.
   updateIncomingRendererUi();
   updateNowMarquee();
+  requestAnimationFrame(() => requestAnimationFrame(() => scrollCurrentTrackToCenter(true)));
 }
 function resetTransportRow() {
   // The transport row describes whatever the library view is playing. An incoming cast paints it
@@ -2709,7 +2711,7 @@ function applyCoreSnapshot(core, shouldLoad = true) {
   state.index = index;
   state.repeat = core.repeat || state.repeat;
   state.shuffle = typeof core.shuffle === "boolean" ? core.shuffle : state.shuffle;
-  updateRepeatShuffleButtons();
+  updatePlaybackModeButton();
   if (shouldLoad) {
     resetPlaybackProgress();
     loadCurrent();
@@ -2724,18 +2726,22 @@ async function coreControl(action, position = null, payload = {}) {
     nativePlaybackCall(action === "next" ? "next" : "previous");
     return { ok: true, native: true };
   }
+  const targetId = remoteDeviceId() || "local";
   const item = currentItem();
   const response = await apiFetch("api/playback/control", {
     method: "POST",
     headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ target_id: remoteDeviceId() || "local", action, position, track_id: item?.id || "", command_id: playbackCommandId(), ...payload }),
+    body: JSON.stringify({ target_id: targetId, action, position, track_id: item?.id || "", command_id: playbackCommandId(), ...payload }),
   });
   const data = await readResponseJsonBounded(response);
   if (!response.ok || data.ok !== true) return false;
-  const changedTrack = action === "next" || action === "previous";
-  applyCoreSnapshot(data.core, changedTrack && !isRemoteTarget());
-  if (isRemoteTarget()) {
-    const snapshot = remoteSnapshotFromCore(data.core);
+  if (targetId !== (remoteDeviceId() || "local")) return data;
+  if (action === "volume") return data; // _fnaudioCoreControlFastVolPatched
+  if (targetId === "local") {
+    applyCoreSnapshot(data.core, action === "next" || action === "previous");
+  } else {
+    // The snapshot compares against the displayed index to detect a track change.
+    const snapshot = remoteSnapshotFromCore(data.core, targetId);
     if (snapshot) applyRemotePlaybackSnapshot(snapshot);
   }
   scheduleUserStateSave();
@@ -2819,7 +2825,10 @@ window.fnAudioMediaSessionDiagnostics = () => ({
 async function refreshRemoteStatus(options = {}) {
   if (!isRemoteTarget()) return;
   if (!state.remoteEventSource && typeof EventSource !== "undefined") startRemoteEventStream();
-  if (state.remoteEventConnected) return;
+  // Playback events report state changes. A track can keep playing without sending one.
+  const needsPosition = state.remoteStatus?.transport?.state === "PLAYING"
+    && Date.now() - state.remoteSnapshotAt >= 2500;
+  if (state.remoteEventConnected && !needsPosition) return;
   if (state.remoteStatusRequestInFlight) return;
   const targetId = remoteDeviceId();
   const token = ++state.remoteStatusRequestToken;
@@ -2868,6 +2877,25 @@ function stopRemoteEventStream() {
   state.remoteEventSource = null;
   state.remoteEventConnected = false;
 }
+function refreshRemoteNowPlaying(item) {
+  // A remote track change arrives as a server snapshot (SSE or poll), not as a
+  // local load. Before this, only the progress rail moved: the now-playing row
+  // kept the previous title/cover and the lyrics view kept the previous words
+  // until the user clicked something else. This mirrors the display half of
+  // loadCurrent() for a remote target and deliberately omits pushToDevice(),
+  // because the device is already playing the track this snapshot describes.
+  if (!item) return;
+  setTextContentIfChanged($("nowTitle"), displayTrackTitle(item));
+  setTextContentIfChanged($("nowArtist"), `${displayText(item.artist)} · ${item.format} · ${playbackBadge(item)} · ${state.playTargetName}`);
+  setNowPlayingCover(coverUrl(item, 512));
+  prefetchCurrentTrackMetadata(item);
+  syncLyricsForCurrentTrack(item);
+  updateMediaSessionMetadata(item);
+  updateMediaSessionPlaybackState();
+  updateFavoriteControls();
+  updateNowMarquee();
+}
+
 function applyRemotePlaybackSnapshot(data, options = {}) {
   if (!isRemoteTarget() || !data || (data.target_id && !sameDeviceTarget(data.target_id, state.playTarget))) return;
   const stateVersion = remoteStateVersion(data.state_version);
@@ -2888,18 +2916,33 @@ function applyRemotePlaybackSnapshot(data, options = {}) {
   state.remoteSnapshotAt = Date.now();
   state.remoteBaseSeconds = playbackSeconds(data?.position?.rel_seconds);
   const core = data.core || {};
-  const currentId = String(core.current || "");
+  const repeat = core.repeat || state.repeat;
+  const shuffle = typeof core.shuffle === "boolean" ? core.shuffle : state.shuffle;
+  if (repeat !== state.repeat || shuffle !== state.shuffle) {
+    state.repeat = repeat;
+    state.shuffle = shuffle;
+    updatePlaybackModeButton();
+  }
+  const currentId = String(core.current || core.state?.current || "");
   const nextIndex = currentId ? state.queue.findIndex(item => String(item.id || "") === currentId) : -1;
   if (nextIndex >= 0 && nextIndex !== state.index) {
     const previousIndex = state.index;
     state.index = nextIndex;
     if (!declaredCueSegment) state.remoteCueSegment = currentItem()?.cue_track === true && !isDacTarget();
     syncCurrentQueuePresentation(previousIndex);
+    // Server-driven track change: repaint the now-playing row and the lyrics
+    // view here, otherwise they keep showing the track that just ended.
+    refreshRemoteNowPlaying(currentItem());
   }
   if (options.allowAdvance !== false) maybeAdvanceRemoteQueue(data);
+  const _remoteMpdVol = data?.mpd?.status?.raw?.volume ?? data?.status?.raw?.volume ?? data?.status?.volume ?? data?.volume;
+  if (typeof syncVolumeFromRemote === "function" && _remoteMpdVol != null) {
+    syncVolumeFromRemote(_remoteMpdVol);
+  }
   updateRemoteUi();
   nativeRemoteUpdate();
 }
+// _fnaudioVolumeStatusSyncPatched
 function startRemoteEventStream() {
   if (!isRemoteTarget() || typeof EventSource === "undefined" || state.remoteEventSource) return;
   const targetId = String(state.playTarget || "");
@@ -3074,8 +3117,9 @@ function groupedTracks() {
   return state.groupRows || [];
 }
 function clientPagedResult(view = state.view) {
-  const offset = Math.max(0, ((Number(state.page) || 1) - 1) * state.pageSize);
-  const limit = Math.max(1, state.pageSize);
+  const isWaterfall = true;
+  const offset = isWaterfall ? 0 : Math.max(0, ((Number(state.page) || 1) - 1) * state.pageSize);
+  const limit = isWaterfall ? Math.max(state.pageSize, (Number(state.page) || 1) * state.pageSize) : Math.max(1, state.pageSize);
   const search = currentQueryText().toLowerCase();
   if (view === "queue") {
     // Keep the existing queue display semantics: ordering and visible rows use
@@ -3132,15 +3176,41 @@ function currentQueuePage() {
   const position = queueDisplayEntries().findIndex(entry => entry.queueIndex === state.index);
   return position < 0 ? 1 : Math.floor(position / Math.max(1, state.pageSize)) + 1;
 }
-function scrollCurrentQueueTrackIntoView() {
-  if (state.view !== "queue" || state.index < 0) return;
-  const row = document.querySelector(`#trackList .track[data-queue-index="${state.index}"]`);
+function scrollCurrentTrackToCenter(smooth = true) {
+  const currentId = String(currentItem()?.id || "");
+  let row = null;
+  if (state.view === "queue" && Number.isInteger(state.index) && state.index >= 0) {
+    row = document.querySelector(`#trackList .track[data-queue-index="${state.index}"]`);
+  }
+  if (!row && currentId) {
+    row = document.querySelector(`#trackList .track[data-track-id="${currentId}"]`);
+  }
+  if (!row) {
+    row = document.querySelector("#trackList .track.is-current");
+  }
   const viewport = $("libraryScroll");
-  if (!row || !viewport) return;
+  if (!row || !viewport) return false;
+
+  document.querySelectorAll("#trackList .track.is-current").forEach(el => {
+    if (el !== row) el.classList.remove("is-current");
+  });
+  row.classList.add("is-current");
+
   const rowBounds = row.getBoundingClientRect();
   const viewportBounds = viewport.getBoundingClientRect();
-  const targetTop = viewport.scrollTop + rowBounds.top - viewportBounds.top - Math.max(0, (viewport.clientHeight - row.offsetHeight) / 2);
-  viewport.scrollTo({ top: Math.max(0, targetTop), behavior: "auto" });
+  const rowCenterRelative = (rowBounds.top - viewportBounds.top) + (row.offsetHeight / 2);
+  const viewportCenter = viewport.clientHeight / 2;
+  const targetTop = viewport.scrollTop + rowCenterRelative - viewportCenter;
+
+  viewport.scrollTo({
+    top: Math.max(0, targetTop),
+    behavior: smooth ? "smooth" : "auto"
+  });
+  return true;
+}
+
+function scrollCurrentQueueTrackIntoView() {
+  return scrollCurrentTrackToCenter(true);
 }
 function updateCurrentQueueTrackRow(queueIndex, current) {
   if (!Number.isInteger(queueIndex) || queueIndex < 0) return false;
@@ -3164,14 +3234,17 @@ function updateCurrentQueueTrackRow(queueIndex, current) {
 function syncCurrentQueuePresentation(previousIndex) {
   if (state.view !== "queue" || previousIndex === state.index) return false;
   const page = currentQueuePage();
+  const neededPage = Math.floor(state.index / Math.max(1, state.pageSize)) + 1;
+  if (state.page < neededPage) {
+    state.page = neededPage;
+  }
   const plan = globalThis.fnAudioQueuePresentation?.queuePresentationPlan?.({
     view: state.view,
     previousIndex,
     currentIndex: state.index,
     previousPage: state.page,
-    currentPage: page,
-  }) || { requiresFullRender: state.page !== page, shouldScrollCurrent: true };
-  state.page = page;
+    currentPage: state.page,
+  }) || { requiresFullRender: true, shouldScrollCurrent: true };
   // A queue position change normally affects only two rows.  Rebuilding the
   // whole page also restarts its cover loader, which is needlessly expensive
   // for large queues.  Keep a full render only for a cross-page jump.
@@ -3528,7 +3601,10 @@ function renderTrack(item, index = 0, columns = activeTrackColumns()) {
   const localCover = coverUrl(item);
   const queueIndex = Number(item.__queueIndex);
   const hasQueuePosition = Number.isInteger(queueIndex) && queueIndex >= 0;
-  const isCurrent = state.view === "queue" && hasQueuePosition && queueIndex === state.index;
+  const currentPlayingId = String(currentItem()?.id || "");
+  const isCurrent = (state.view === "queue" && hasQueuePosition)
+    ? (queueIndex === state.index)
+    : (Boolean(currentPlayingId) && String(item.id || "") === currentPlayingId);
   const columnValues = trackColumnValues(item, columns.filter(key => key !== "title"));
   const artist = displayText(item.artist) || "未知歌手";
   const album = displayText(item.album);
@@ -4079,6 +4155,9 @@ function renderGenreTracks(list) {
     <strong>${escapeHtml(genre)}</strong>
   </nav>${renderTrackRows(list)}`;
 }
+function playCurrentListButton(enabled) {
+  return `<button type="button" class="secondary-button" data-play-current-list${enabled ? "" : " disabled"}>播放全部</button>`;
+}
 function renderFolders(data = folderChildren()) {
   const rootRow = state.folderRootRows.find(row => row.root === state.folderRoot || row.path === state.folderRoot);
   const rootLabel = folderDisplayName(rootRow?.path || state.folderRoot || "音乐目录");
@@ -4086,7 +4165,8 @@ function renderFolders(data = folderChildren()) {
   const breadcrumbItems = state.folderRoot
     ? [`<button type="button" class="folder-crumb" data-folder-crumb-root="${encodeURIComponent(state.folderRoot)}" data-folder-crumb-path="">${escapeHtml(rootLabel)}</button>`, ...parts.map((part, index) => `<button type="button" class="folder-crumb${index === parts.length - 1 ? " is-current" : ""}" data-folder-crumb-root="${encodeURIComponent(state.folderRoot)}" data-folder-crumb-path="${encodeURIComponent(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`)]
     : ["<span class=\"folder-crumb is-current\">音乐目录</span>"];
-  const breadcrumb = `<nav class="folder-toolbar folder-breadcrumb" aria-label="当前路径">${breadcrumbItems.join('<span class="folder-crumb-separator">/</span>')}</nav>`;
+  const playAll = state.folderRoot ? playCurrentListButton(state.pageTotal > 0 || Boolean(currentQueryText())) : "";
+  const breadcrumb = `<nav class="folder-toolbar folder-breadcrumb" aria-label="当前文件夹">${playAll}${breadcrumbItems.join('<span class="folder-crumb-separator">/</span>')}</nav>`;
   const folders = data.folders.map(row => {
     const path = row.path || row.parent || "";
     const name = row.name || path.split("/").pop();
@@ -4144,17 +4224,10 @@ function render() {
   const clientPageTotal = clientPage?.total ?? null;
   const albumDetail = isAlbumDetailView();
   const genreDetail = state.view === "genres" && Boolean(state.groupName);
-  // R508（负责人要求「取消掉所有列表里面的『播放全部』按钮」）: 列表顶部不再有
-  // 「播放全部」。播放列表 / 收藏 / 队列原本就有的这条工具条只留计数与它们自己的
-  // 动作（删除播放列表 / 清空队列）。
-  //
-  // R511（负责人「还是有些地方有『播放全部』按钮」）: R508 当时按「列表里面的」
-  // 划界，留下了专辑详情面包屑、类型详情面包屑与分类详情头这三处。负责人看到
-  // 之后要求一并不留：三处渲染、共用选择器、点击回调与专用样式这次全部删除。
-  // 播整张仍可从列表任意一行开始，分组长按 / 右键也仍有「播放」。
   const countBar = (countText, extraActions = "") => `<div class="playlist-toolbar"><span>${countText}</span>${extraActions ? `<div class="playlist-toolbar-actions">${extraActions}</div>` : ""}</div>`;
-  const playlistToolbar = isPlaylistView() && currentPlaylist()
-    ? countBar(`${clientPageTotal} 首歌曲`, `<button type="button" class="danger-button" data-delete-playlist="${escapeHtml(currentPlaylist().id)}">删除播放列表</button>`)
+  const playlist = isPlaylistView() ? currentPlaylist() : null;
+  const playlistToolbar = playlist
+    ? countBar(`${clientPageTotal} 首歌曲`, `${playCurrentListButton(playlist.trackIds.length)}<button type="button" class="danger-button" data-delete-playlist="${escapeHtml(playlist.id)}">删除播放列表</button>`)
     : state.view === "favorites"
       ? countBar(`${clientPageTotal} 首收藏歌曲`)
       : state.view === "queue"
@@ -4274,6 +4347,7 @@ function render() {
   // current state at click time, so re-binding them after an unrelated player
   // state render only adds a full DOM walk on a large library.
   if (listChanged) {
+    document.querySelectorAll("[data-play-current-list]").forEach(b => b.onclick = () => playFromCurrentTrack());
     document.querySelectorAll("[data-delete-playlist]").forEach(b => b.onclick = () => deletePlaylist(b.dataset.deletePlaylist));
     document.querySelectorAll("[data-clear-queue]").forEach(b => b.onclick = clearQueue);
     document.querySelectorAll("[data-play-group]").forEach(b => b.onclick = () => playGroup(b.dataset.playGroup));
@@ -4369,6 +4443,9 @@ function render() {
     state.folderPage = 1;
     state.page = 1;
     state.pageItems = [];
+    if (typeof window._pushNavState === "function") {
+      window._pushNavState("folder", { root: state.folderRoot, path: state.folderPath });
+    }
     requestLibraryLoad(1, false);
   });
   document.querySelectorAll("[data-page-step]").forEach(b => b.onclick = () => {
@@ -4425,6 +4502,9 @@ function setView(view) {
   const nextView = String(view || "all");
   resetLibraryScrollPosition();
   const viewChanged = nextView !== state.view;
+  if (viewChanged && typeof window._pushNavState === "function") {
+    window._pushNavState("view", { view: nextView });
+  }
   // A paged-to-paged switch used to leave the previous worker's request
   // sequence alive. If its response won the race before the new microtask
   // started, it could paint the old category into the new view. Invalidate
@@ -4533,6 +4613,9 @@ function openGroupRow(row) {
   if (group.type === "folder") {
     state.folderRoot = group.root;
     state.folderPath = group.path;
+    if (typeof window._pushNavState === "function") {
+      window._pushNavState("folder", { root: state.folderRoot, path: state.folderPath });
+    }
   } else if (isCreatorView() && !currentCreatorName()) {
     setCurrentCreator(group.name, group.trackCount);
   } else {
@@ -4600,7 +4683,7 @@ function applyConfirmedQueue(queue, core) {
   if (state.index < 0 && state.queue.length) state.index = 0;
   if (core?.repeat) state.repeat = core.repeat;
   if (typeof core?.shuffle === "boolean") state.shuffle = core.shuffle;
-  updateRepeatShuffleButtons();
+  updatePlaybackModeButton();
   updateFavoriteControls();
 }
 async function commitQueue(queue, currentId = "", options = {}) {
@@ -4660,19 +4743,16 @@ async function addTracksToQueue(tracks = []) {
 async function addSelectedToQueue(ids = []) {
   return addTracksToQueue(selectedItems(ids));
 }
-async function playTracks(tracks = []) {
+async function playTracks(tracks = [], currentId = "") {
   const items = (tracks || []).filter(item => item && item.id);
   if (!items.length) return;
-  state.streamOffset = 0;
-  state.pendingSeekTime = null;
-  state.transcodeCacheReady = false;
-  state.playSourceKind = "";
   try {
-    await commitQueue(items, items[0].id);
+    await commitQueue(items, currentId || items[0].id);
   } catch (error) {
     alert(error.message || "播放队列保存失败");
     return;
   }
+  resetPlaybackProgress();
   loadCurrent();
   render();
 }
@@ -4733,13 +4813,26 @@ async function resolveTracksByIds(ids = []) {
   return orderedIds.map(itemById).filter(Boolean);
 }
 async function allTracksForCurrentContext() {
+  if (state.view === "folders") {
+    if (!isPagedTrackListing()) return [];
+    const params = currentQueryParams();
+    if (!params.has("search")) return sortTracks(await fetchAllTracksForCurrentView());
+    params.delete("search");
+    return sortTracks(await fetchAllTracksForCurrentView({}, { params: params.toString(), pageSize: state.pageSize }));
+  }
+  if (isPlaylistView()) {
+    const ids = currentPlaylist()?.trackIds || [];
+    const batchSize = fnAudioItemHydrationPolicy.MAX_ITEM_IDS;
+    const tracks = [];
+    for (let offset = 0; offset < ids.length; offset += batchSize) {
+      tracks.push(...await resolveTracksByIds(ids.slice(offset, offset + batchSize)));
+    }
+    return sortTracks(tracks);
+  }
   if (isClientPagedView()) {
     if (state.view === "queue") return clientContextTracks();
-    const ids = state.view === "favorites"
-      ? state.favorites
-      : (currentPlaylist()?.trackIds || []);
-    const source = await resolveTracksByIds(ids);
     const search = currentQueryText().toLowerCase();
+    const source = await resolveTracksByIds(state.favorites);
     return sortTracks(search ? source.filter(item => trackMatchesSearch(item, search)) : source);
   }
   if (state.view === "random100") {
@@ -4750,31 +4843,22 @@ async function allTracksForCurrentContext() {
   if (isPagedTrackListing()) return fetchAllTracksForCurrentView();
   return sortTracks(filteredTracks());
 }
-async function playFromCurrentTrack(trackId) {
+async function playFromCurrentTrack(trackId = "") {
+  const request = ++state.contextPlaybackRequest;
   const id = String(trackId || "");
   let tracks = [];
   try {
     tracks = await allTracksForCurrentContext();
   } catch (error) {
-    alert("读取当前列表失败");
+    if (request === state.contextPlaybackRequest) alert("读取当前列表失败");
     return;
   }
-  const start = tracks.findIndex(item => String(item?.id || "") === id);
-  if (start < 0) return alert("当前歌曲已不在这个列表中");
-  const queue = tracks;
-  if (!queue.length) return;
-  state.streamOffset = 0;
-  state.pendingSeekTime = null;
-  state.transcodeCacheReady = false;
-  state.playSourceKind = "";
-  try {
-    await commitQueue(queue, id);
-  } catch (error) {
-    alert(error.message || "播放队列保存失败");
-    return;
-  }
-  loadCurrent();
-  render();
+  await state.contextPlaybackCommit;
+  if (request !== state.contextPlaybackRequest) return;
+  if (id && !tracks.some(item => String(item.id) === id)) return alert("当前歌曲已不在这个列表中");
+  if (!tracks.length) return alert("当前列表没有可播放的歌曲");
+  state.contextPlaybackCommit = playTracks(tracks, id);
+  return state.contextPlaybackCommit;
 }
 async function insertSelectedTracks(ids = []) {
   const items = selectedItems(ids);
@@ -4821,8 +4905,12 @@ async function clearQueue() {
   }
 }
 async function playById(id) {
+  if (isFolderOrPlaylistView()) return playFromCurrentTrack(id);
   const item = itemById(id);
   if (!item) return;
+  const request = ++state.contextPlaybackRequest;
+  await state.contextPlaybackCommit;
+  if (request !== state.contextPlaybackRequest) return;
   state.streamOffset = 0;
   state.pendingSeekTime = null;
   state.transcodeCacheReady = false;
@@ -5028,6 +5116,7 @@ async function loadCurrent() {
   updateNowMarquee();
   syncState();
   refreshCurrentTranscodeStatus();
+  requestAnimationFrame(() => requestAnimationFrame(() => scrollCurrentTrackToCenter(true)));
 }
 // Extrapolation only has to bridge the gap between two *accepted* status
 // snapshots. The slowest healthy source is the remote fallback poll (5000 ms,
@@ -5825,6 +5914,9 @@ function retryCurrentTrackMetadataAfterRecovery(metadata) {
 async function openLyrics() {
   const item = currentItem();
   $("lyricsView").hidden = false;
+  if (typeof window._pushNavState === "function") {
+    window._pushNavState("lyrics");
+  }
   updateLyricsMeta(item);
   const trackId = String(item?.id || "");
   const retry = state.lyricsTrackId === trackId && ["pending", "error"].includes(state.lyricsStatus);
@@ -9539,15 +9631,15 @@ function bindTrackListInteractions() {
         event.preventDefault();
         event.stopPropagation();
         toggleTrackSelection(rowKey);
-      } else if (!mobile) {
+      } else if (!mobile && !isFolderOrPlaylistView()) {
         event.preventDefault();
         event.stopPropagation();
         setTrackSelection([rowKey]);
-      } else if (state.selectedTrackRowKeys.size) {
+      } else if (mobile && state.selectedTrackRowKeys.size) {
         event.preventDefault();
         event.stopPropagation();
         setTrackSelection([]);
-      } else {
+      } else if (!isFolderOrPlaylistView() || event.detail < 2) {
         playById(button.dataset.play);
       }
       return;
@@ -10530,7 +10622,8 @@ function runTrackAction(action) {
   const selected = selectedTrackIds(trackId);
   closeTrackActionDialog();
   closeTrackContextMenu();
-  if (action === "play") playSelectedTracks(selected);
+  if (action === "play" && isFolderOrPlaylistView() && selected.length === 1) playFromCurrentTrack(selected[0]);
+  else if (action === "play") playSelectedTracks(selected);
   else if (action === "play-from-current") playFromCurrentTrack(trackId);
   else if (action === "queue") addSelectedToQueue(selected);
   else if (action === "favorite") toggleSelectedFavorites(selected);
@@ -10546,63 +10639,49 @@ function runTrackAction(action) {
   else if (action === "remove-favorite") removeFavorite(trackId);
   else if (action === "remove-playlist") removeTrackFromCurrentPlaylist(trackId);
 }
-function normalizedRepeatMode(repeat) {
-  return globalThis.fnAudioRepeatModePolicy.normalize(repeat);
+function updatePlaybackModeButton() {
+  const policy = globalThis.fnAudioRepeatModePolicy;
+  const mode = policy.mode(state.repeat, state.shuffle);
+  const button = $("playbackModeBtn");
+  button.disabled = Boolean(state.playbackModePending);
+  if (button.dataset.mode === mode) return;
+  button.dataset.mode = mode;
+  button.title = policy.labels[mode];
+  button.setAttribute("aria-label", `播放模式：${policy.labels[mode]}，点击切换为${policy.labels[policy.next[mode]]}`);
+  button.querySelector("svg").innerHTML = policy.iconMarkup(mode);
 }
-function nextRepeatMode(repeat) {
-  return globalThis.fnAudioRepeatModePolicy.next(repeat);
+function showPlaybackModeStatus(message) {
+  const status = $("playbackModeStatus");
+  clearTimeout(state.playbackModeStatusTimer);
+  status.textContent = message;
+  state.playbackModeStatusTimer = setTimeout(() => { status.textContent = ""; }, 1800);
 }
-function repeatModeLabel(repeat) {
-  return globalThis.fnAudioRepeatModePolicy.label(repeat);
-}
-function repeatNextAction(repeat) {
-  return globalThis.fnAudioRepeatModePolicy.action(repeat);
-}
-function repeatIconMarkup(repeat) {
-  return globalThis.fnAudioRepeatModePolicy.iconMarkup(repeat);
-}
-function updateRepeatShuffleButtons() {
-  const repeat = normalizedRepeatMode(state.repeat);
-  [[$("repeatBtn"), $("repeatIcon")], [$("mobileRepeatBtn"), $("mobileRepeatIcon")]].forEach(([button, icon]) => {
-    if (!button || !icon) return;
-    const active = repeat !== "off";
-    const title = `${repeatModeLabel(repeat)}，点击${repeatNextAction(repeat)}`;
-    const ariaLabel = `循环模式：${repeatModeLabel(repeat)}，点击${repeatNextAction(repeat)}`;
-    if (button.dataset.repeat !== repeat) {
-      button.dataset.repeat = repeat;
-      icon.innerHTML = repeatIconMarkup(repeat);
+async function cyclePlaybackMode() {
+  if (state.playbackModePending || state.deviceSwitchInFlight) return;
+  const policy = globalThis.fnAudioRepeatModePolicy;
+  const mode = policy.next[policy.mode(state.repeat, state.shuffle)];
+  const target = state.playTarget;
+  state.playbackModePending = true;
+  updatePlaybackModeButton();
+  try {
+    for (const [action, value] of Object.entries(policy.settings[mode])) {
+      if (state[action] === value) continue;
+      const data = await coreControl(action, null, { [action]: value });
+      if (target !== state.playTarget) return;
+      if (!data?.core) throw new Error("切换播放模式失败");
+      if (target === "local") {
+        state[action] = data.core[action] ?? value;
+        if (nativePlaybackAvailable()) nativePlaybackCall(action === "repeat" ? "setRepeat" : "setShuffle", state[action]);
+      }
     }
-    if (button.classList.contains("active-control") !== active) button.classList.toggle("active-control", active);
-    if (button.title !== title) button.title = title;
-    if (button.getAttribute("aria-label") !== ariaLabel) button.setAttribute("aria-label", ariaLabel);
-  });
-  [$("shuffleBtn"), $("mobileShuffleBtn")].forEach(button => {
-    if (!button) return;
-    const active = state.shuffle === true;
-    const pressed = String(active);
-    const label = active ? "关闭随机播放" : "随机播放";
-    if (button.classList.contains("active-control") !== active) button.classList.toggle("active-control", active);
-    if (button.getAttribute("aria-pressed") !== pressed) button.setAttribute("aria-pressed", pressed);
-    if (button.title !== label) button.title = label;
-    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
-  });
-}
-async function toggleRepeat() {
-  const nextRepeat = nextRepeatMode(state.repeat);
-  const data = await coreControl("repeat", null, { repeat: nextRepeat });
-  if (data?.core) state.repeat = data.core.repeat || state.repeat;
-  else if (data) state.repeat = nextRepeat;
-  if (nativePlaybackAvailable()) nativePlaybackCall("setRepeat", state.repeat);
-  updateRepeatShuffleButtons();
-  syncState();
-}
-async function toggleShuffle() {
-  const data = await coreControl("shuffle");
-  if (data?.core && typeof data.core.shuffle === "boolean") state.shuffle = data.core.shuffle;
-  else state.shuffle = !state.shuffle;
-  if (nativePlaybackAvailable()) nativePlaybackCall("setShuffle", Boolean(state.shuffle));
-  updateRepeatShuffleButtons();
-  syncState();
+    showPlaybackModeStatus(policy.labels[policy.mode(state.repeat, state.shuffle)]);
+  } catch (error) {
+    showPlaybackModeStatus("切换播放模式失败");
+  } finally {
+    state.playbackModePending = false;
+    updatePlaybackModeButton();
+    syncState();
+  }
 }
 function savePlaylistFromDialog() {
   const pending = state.pendingPlaylistTracks?.length
@@ -11009,7 +11088,11 @@ function setMobileNavigation(open) {
   const backdrop = $("mobileNavBackdrop");
   const button = $("mobileNavBtn");
   if (!sidebar || !backdrop || !button) return;
+  const wasOpen = sidebar.classList.contains("mobile-open");
   sidebar.classList.toggle("mobile-open", open);
+  if (open && !wasOpen && typeof window._pushNavState === "function") {
+    window._pushNavState("sidebar");
+  }
   backdrop.hidden = !open;
   button.setAttribute("aria-expanded", String(open));
 }
@@ -11154,6 +11237,7 @@ function openDeviceDialog() {
 $("deviceBtn").onclick = openDeviceDialog;
 function closeLyrics() {
   $("lyricsView").hidden = true;
+  requestAnimationFrame(() => requestAnimationFrame(() => scrollCurrentTrackToCenter(true)));
   // Closing the lyrics surface is a user cancellation boundary. Keep the
   // playback-level metadata lane intact, but stop the view-owned poll and
   // request so a slow provider cannot consume a connection after the user
@@ -11209,8 +11293,268 @@ window.fnAudioHandleAndroidBack = () => {
     closeLyrics();
     return true;
   }
-  return goBackFromNestedLibraryView();
+  if (goBackFromNestedLibraryView()) return true;
+  if (state.view !== "folders") {
+    setView("folders");
+    return true;
+  }
+  return false;
 };
+
+// ==========================================
+// 移动端路由拦截与历史栈管理 (Mobile Route Guard System)
+// ==========================================
+(function initMobileRouteGuard() {
+  if (window._fnaudioRouteGuardInstalled) return;
+  window._fnaudioRouteGuardInstalled = true;
+
+  let toastTimer = null;
+  function showToast(msg) {
+    let toast = document.getElementById("fnAudioMobileToast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "fnAudioMobileToast";
+      toast.style.cssText = [
+        "position: fixed",
+        "bottom: 84px",
+        "left: 50%",
+        "transform: translateX(-50%) translateY(16px)",
+        "background: rgba(18, 20, 26, 0.94)",
+        "color: #ffffff",
+        "font-size: 13px",
+        "font-weight: 500",
+        "padding: 8px 18px",
+        "border-radius: 20px",
+        "box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45)",
+        "backdrop-filter: blur(12px)",
+        "-webkit-backdrop-filter: blur(12px)",
+        "border: 1px solid rgba(255, 255, 255, 0.16)",
+        "z-index: 100000",
+        "pointer-events: none",
+        "opacity: 0",
+        "transition: opacity 0.22s ease, transform 0.22s ease",
+        "white-space: nowrap"
+      ].join(";");
+      document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.style.opacity = "1";
+    toast.style.transform = "translateX(-50%) translateY(0)";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateX(-50%) translateY(16px)";
+    }, 2000);
+  }
+
+  let lastExitAttempt = 0;
+  let isNavigatingInternal = false;
+
+  window._pushNavState = function(type, meta = {}) {
+    if (isNavigatingInternal) return;
+    const cur = window.history.state;
+    if (cur && cur._fnaudio && cur.type === type) {
+      if (type === "folder" && cur.path === (meta.path || "")) return;
+      if (type === "view" && cur.view === (meta.view || "")) return;
+      if (type === "lyrics") return;
+      if (type === "sidebar") return;
+      if (type === "dialog" && cur.id === (meta.id || "")) return;
+    }
+    const data = {
+      _fnaudio: true,
+      type: type,
+      view: state.view || "folders",
+      root: state.folderRoot || "",
+      path: state.folderPath || "",
+      ...meta,
+      ts: Date.now()
+    };
+    try {
+      window.history.pushState(data, "", window.location.href);
+    } catch (_) {}
+  };
+
+  // 初始化历史栈：底部放置 base_guard，随后放置当前主视图状态
+  try {
+    window.history.replaceState({ _fnaudio: true, type: "base_guard" }, "", window.location.href);
+    window.history.pushState({
+      _fnaudio: true,
+      type: "root",
+      view: state.view || "folders",
+      root: state.folderRoot || "",
+      path: state.folderPath || ""
+    }, "", window.location.href);
+  } catch (_) {}
+
+  // 拦截全局弹窗 showModal
+  if (typeof HTMLDialogElement !== "undefined" && HTMLDialogElement.prototype.showModal) {
+    const _origShowModal = HTMLDialogElement.prototype.showModal;
+    HTMLDialogElement.prototype.showModal = function() {
+      const res = _origShowModal.apply(this, arguments);
+      if (this.id) {
+        window._pushNavState("dialog", { id: this.id });
+      }
+      return res;
+    };
+  }
+
+  // 监听 popstate 路由回退事件（手机侧滑/左滑/返回手势）
+  window.addEventListener("popstate", (e) => {
+    isNavigatingInternal = true;
+    try {
+      const s = e.state;
+
+      // 1. 到达历史栈最底部 (base_guard 或无状态)
+      if (!s || s.type === "base_guard") {
+        let handled = false;
+        if (closeTopDialog()) handled = true;
+        const sidebar = document.querySelector(".sidebar");
+        if (sidebar?.classList.contains("mobile-open")) {
+          setMobileNavigation(false);
+          handled = true;
+        }
+        if (!$("lyricsView").hidden) {
+          closeLyrics();
+          handled = true;
+        }
+        if (state.view === "folders" && state.folderPath) {
+          state.folderPath = "";
+          state.folderPage = 1;
+          state.page = 1;
+          state.pageItems = [];
+          resetLibraryScrollPosition();
+          requestLibraryLoad(1, false);
+          handled = true;
+        } else if (state.view !== "folders") {
+          setView("folders");
+          handled = true;
+        }
+
+        if (handled) {
+          window.history.pushState({ _fnaudio: true, type: "root", view: "folders", path: "" }, "", window.location.href);
+          return;
+        }
+
+        // 已经处于根页面：启动防误触双击退出计时
+        const now = Date.now();
+        if (now - lastExitAttempt < 2200) {
+          showToast("正在退出页面...");
+          window.history.back();
+        } else {
+          lastExitAttempt = now;
+          showToast("再次滑动返回将退出应用");
+          window.history.pushState({ _fnaudio: true, type: "root", view: "folders", path: "" }, "", window.location.href);
+        }
+        return;
+      }
+
+      // 2. 回退到某个具体的内页状态
+      if (s._fnaudio) {
+        // 关闭非目标弹窗
+        if (s.type !== "dialog") {
+          const dialogs = document.querySelectorAll("dialog[open]");
+          dialogs.forEach(d => d.close());
+        }
+        // 关闭非目标侧边栏
+        if (s.type !== "sidebar") {
+          const sidebar = document.querySelector(".sidebar");
+          if (sidebar?.classList.contains("mobile-open")) {
+            setMobileNavigation(false);
+          }
+        }
+        // 关闭非目标歌词页
+        if (s.type !== "lyrics") {
+          if (!$("lyricsView").hidden) {
+            closeLyrics();
+          }
+        }
+
+        // 还原目标目录或视图
+        if (s.type === "folder") {
+          if (state.view !== "folders") {
+            state.view = "folders";
+            updateNavigationActiveState();
+          }
+          const targetRoot = s.root || state.folderRoot;
+          const targetPath = s.path || "";
+          if (state.folderPath !== targetPath || state.folderRoot !== targetRoot) {
+            state.folderRoot = targetRoot;
+            state.folderPath = targetPath;
+            state.folderPage = 1;
+            state.page = 1;
+            state.pageItems = [];
+            resetLibraryScrollPosition();
+            requestLibraryLoad(1, false);
+          }
+        } else if (s.type === "root") {
+          if (state.view !== "folders" || state.folderPath !== "") {
+            state.view = "folders";
+            state.folderPath = "";
+            state.folderPage = 1;
+            state.page = 1;
+            state.pageItems = [];
+            updateNavigationActiveState();
+            resetLibraryScrollPosition();
+            requestLibraryLoad(1, false);
+          }
+        } else if (s.type === "view") {
+          if (state.view !== s.view) {
+            setView(s.view);
+          }
+        } else if (s.type === "lyrics") {
+          if ($("lyricsView").hidden) {
+            openLyrics();
+          }
+        } else if (s.type === "sidebar") {
+          setMobileNavigation(true);
+        } else if (s.type === "dialog" && s.id) {
+          const dlg = document.getElementById(s.id);
+          if (dlg && !dlg.open) {
+            dlg.showModal();
+          }
+        }
+      }
+    } finally {
+      setTimeout(() => { isNavigatingInternal = false; }, 30);
+    }
+  });
+
+  // 歌词视图手势增强：右滑或下滑快速关闭
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+
+  window.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchStartTime = Date.now();
+    }
+  }, { passive: true });
+
+  window.addEventListener("touchend", (e) => {
+    if (!touchStartX && !touchStartY) return;
+    const endX = e.changedTouches[0].clientX;
+    const endY = e.changedTouches[0].clientY;
+    const dx = endX - touchStartX;
+    const dy = endY - touchStartY;
+    const dt = Date.now() - touchStartTime;
+
+    const lyricsView = document.getElementById("lyricsView");
+    if (lyricsView && !lyricsView.hidden) {
+      const isSwipeRight = dx > 80 && Math.abs(dy) < Math.abs(dx) * 0.7 && dt < 500;
+      const isSwipeDown = dy > 100 && Math.abs(dx) < Math.abs(dy) * 0.6 && dt < 500;
+      if (isSwipeRight || isSwipeDown) {
+        if (typeof closeLyrics === "function") closeLyrics();
+        if (window.history.state?.type === "lyrics") {
+          window.history.back();
+        }
+      }
+    }
+    touchStartX = 0;
+    touchStartY = 0;
+  }, { passive: true });
+})();
 function toggleLyrics() {
   if (!$("lyricsView").hidden) {
     closeLyrics();
@@ -11219,6 +11563,10 @@ function toggleLyrics() {
   openLyrics();
 }
 $("lyricsBtn").onclick = toggleLyrics;
+$("lyricsBackBtn").onclick = () => {
+  closeLyrics();
+  $("nowPlayingSummary").focus();
+};
 $("nowPlayingSummary").onclick = toggleLyrics;
 $("nowPlayingSummary").onkeydown = event => {
   if (!["Enter", " "].includes(event.key)) return;
@@ -11365,10 +11713,8 @@ $("playBtn").onclick = () => {
 };
 $("prevBtn").onclick = () => playPreviousTrack();
 $("nextBtn").onclick = () => playNextTrack();
-$("repeatBtn").onclick = toggleRepeat;
-$("shuffleBtn").onclick = toggleShuffle;
-$("mobileRepeatBtn").onclick = toggleRepeat;
-$("mobileShuffleBtn").onclick = toggleShuffle;
+$("playbackModeBtn").onclick = cyclePlaybackMode;
+updatePlaybackModeButton();
 function updateVolumeRail(value = Number($("volume")?.value || 0)) {
   // The rail's fill is a gradient stop, so the value has to reach CSS as a
   // custom property.  It is written on the input rather than on the panel: the
@@ -11378,21 +11724,201 @@ function updateVolumeRail(value = Number($("volume")?.value || 0)) {
   const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
   setStyleVarIfChanged($("volume"), "--volume-fill", `${percent}%`);
 }
-$("volume").oninput = e => {
-  const value = Number(e.target.value);
-  audio.volume = value;
-  if (nativePlaybackAvailable()) nativePlaybackCall("setVolume", value);
-  updateVolumeRail(value);
-};
+// === fnAudio Mobile & Remote Volume Control ===
+let _isUserAdjustingVolume = false;
+let _lastUserVolumeTime = 0;
+let _volRequestInFlight = false;
+let _pendingVolume = null;
+let _lastSentVolume = null;
+
+async function _flushRemoteVolume() {
+  if (_volRequestInFlight) return;
+  if (_pendingVolume === null || _pendingVolume === _lastSentVolume) return;
+  if (typeof isRemoteTarget !== "function" || !isRemoteTarget()) return;
+
+  const targetVol = _pendingVolume;
+  _pendingVolume = null;
+  _lastSentVolume = targetVol;
+  _volRequestInFlight = true;
+
+  try {
+    if (typeof coreControl === "function") {
+      await coreControl("volume", targetVol);
+    }
+  } catch (e) {
+    // ignore
+  } finally {
+    _volRequestInFlight = false;
+    if (_pendingVolume !== null && _pendingVolume !== _lastSentVolume) {
+      _flushRemoteVolume();
+    }
+  }
+}
+
+function _syncRemoteVolume(value) {
+  if (typeof isRemoteTarget === "function" && isRemoteTarget()) {
+    _pendingVolume = Math.round(value * 100);
+    _flushRemoteVolume();
+  }
+}
+
+function updateVolumeRail(value = Number($("volume")?.value || 0)) {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  const percentStr = `${percent}%`;
+  setStyleVarIfChanged($("volume"), "--volume-fill", percentStr);
+  setStyleVarIfChanged($("volumeSliderWrap"), "--volume-fill", percentStr);
+  setStyleVarIfChanged($("volumeTrack"), "--volume-fill", percentStr);
+  const fill = $("volumeFill");
+  if (fill) fill.style.height = percentStr;
+  const thumb = $("volumeThumb");
+  if (thumb) thumb.style.bottom = percentStr;
+}
+
+function applyVolume(value, syncRemote = true) {
+  const clamped = Math.max(0, Math.min(1, Math.round(value * 100) / 100));
+  const el = $("volume");
+  if (el) el.value = String(clamped);
+  audio.volume = clamped;
+  if (nativePlaybackAvailable()) nativePlaybackCall("setVolume", clamped);
+  updateVolumeRail(clamped);
+  _lastUserVolumeTime = Date.now();
+  if (syncRemote) {
+    _syncRemoteVolume(clamped);
+  }
+}
+
+function syncVolumeFromRemote(volumeNumber) {
+  if (_isUserAdjustingVolume || (Date.now() - _lastUserVolumeTime < 1800)) return;
+  const vol = Number(volumeNumber);
+  if (!Number.isFinite(vol) || vol < 0) return;
+  const normalized = Math.max(0, Math.min(1, vol / 100));
+  const el = $("volume");
+  if (el && Math.abs(Number(el.value) - normalized) > 0.01) {
+    el.value = String(normalized);
+    updateVolumeRail(normalized);
+  }
+}
+
+function stepVolume(delta) {
+  const el = $("volume");
+  const current = Number(el?.value || 0.85);
+  applyVolume(current + delta, true);
+}
+
+function bindStepButton(btnId, delta) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.onclick = event => {
+    event.stopPropagation();
+    stepVolume(delta);
+  };
+  let holdTimer = null;
+  let repeatInterval = null;
+  const startHold = (e) => {
+    e.stopPropagation();
+    stepVolume(delta);
+    clearTimeout(holdTimer);
+    clearInterval(repeatInterval);
+    holdTimer = setTimeout(() => {
+      repeatInterval = setInterval(() => stepVolume(delta), 85);
+    }, 280);
+  };
+  const endHold = () => {
+    clearTimeout(holdTimer);
+    clearInterval(repeatInterval);
+  };
+  btn.addEventListener("pointerdown", startHold);
+  btn.addEventListener("pointerup", endHold);
+  btn.addEventListener("pointercancel", endHold);
+  btn.addEventListener("pointerleave", endHold);
+}
+
+bindStepButton("volumeUpBtn", 0.02);
+bindStepButton("volumeDownBtn", -0.02);
+
+// 自定义高精度垂直音量交互：规避 Android Chrome PWA 模式下的横向触控错位
+(function initCustomVolumeSlider() {
+  const wrap = $("volumeSliderWrap");
+  if (!wrap) return;
+
+  let isDragging = false;
+
+  function getRatioFromEvent(e) {
+    const track = $("volumeTrack") || wrap;
+    const rect = track.getBoundingClientRect();
+    if (rect.height <= 0) return 0;
+    // 纵向计算：轨道底部为 0.0，顶部为 1.0
+    const ratio = (rect.bottom - e.clientY) / rect.height;
+    return Math.max(0, Math.min(1, Math.round(ratio * 100) / 100));
+  }
+
+  function onPointerDown(e) {
+    e.stopPropagation();
+    isDragging = true;
+    _isUserAdjustingVolume = true;
+    try {
+      wrap.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    const val = getRatioFromEvent(e);
+    applyVolume(val, true);
+  }
+
+  function onPointerMove(e) {
+    if (!isDragging) return;
+    e.stopPropagation();
+    _isUserAdjustingVolume = true;
+    const val = getRatioFromEvent(e);
+    applyVolume(val, true);
+  }
+
+  function onPointerUp(e) {
+    if (!isDragging) return;
+    isDragging = false;
+    e.stopPropagation();
+    try {
+      wrap.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+    const val = getRatioFromEvent(e);
+    applyVolume(val, true);
+    setTimeout(() => { _isUserAdjustingVolume = false; }, 800);
+  }
+
+  wrap.addEventListener("pointerdown", onPointerDown);
+  wrap.addEventListener("pointermove", onPointerMove);
+  wrap.addEventListener("pointerup", onPointerUp);
+  wrap.addEventListener("pointercancel", onPointerUp);
+})();
+
 $("volumeBtn").onclick = event => {
   event.stopPropagation();
-  $("volumePanel").hidden = !$("volumePanel").hidden;
+  const panel = $("volumePanel");
+  if (!panel) return;
+  panel.hidden = !panel.hidden;
+  $("volumeBtn")?.classList.toggle("active-control", !panel.hidden);
+  if (!panel.hidden) {
+    updateVolumeRail();
+  }
 };
 $("volumePanel").onclick = event => event.stopPropagation();
-document.addEventListener("click", () => {
+
+document.addEventListener("click", event => {
   const panel = $("volumePanel");
-  if (panel) panel.hidden = true;
+  if (panel && !panel.hidden && !event.target?.closest?.("#volumeControl")) {
+    panel.hidden = true;
+    $("volumeBtn")?.classList.remove("active-control");
+  }
+  _isUserAdjustingVolume = false;
 });
+
+document.addEventListener("pointerdown", event => {
+  const panel = $("volumePanel");
+  if (panel && !panel.hidden && !event.target?.closest?.("#volumeControl")) {
+    panel.hidden = true;
+    $("volumeBtn")?.classList.remove("active-control");
+    _isUserAdjustingVolume = false;
+  }
+});
+// _fnaudioMobileVolumePatched
 audio.volume = 1;
 if ($("volume")) $("volume").value = "1";
 // The rail is a gradient, so it starts empty unless the boot value is pushed
@@ -11495,6 +12021,7 @@ document.addEventListener("dblclick", event => {
   }
   const row = event.target.closest(".track");
   if (!row || event.target.closest("button")) return;
+  if (isFolderOrPlaylistView() && event.target.closest("[data-play]")) return;
   const play = row.querySelector("[data-play]");
   if (play) playById(play.dataset.play);
 });
@@ -11516,7 +12043,6 @@ const uiSyncScheduler = globalThis.fnAudioUiSyncScheduler.create({
   isInteractionBlocked: uiBackgroundWorkBlocked,
   isLibraryScanning: () => state.libraryStatus?.scanning === true,
   isRemoteTarget,
-  isRemoteEventConnected: () => state.remoteEventConnected,
   refreshLibraryStatus,
   refreshCurrentTranscodeStatus,
   refreshRendererSession,
@@ -11539,3 +12065,23 @@ refreshRendererSession();
 if (isRemoteTarget()) startRemoteEventStream();
 
 
+
+// === fnAudio Waterfall Infinite Scroll & Track Centering ===
+let _waterfallScrollLoading = false;
+function checkWaterfallScroll() {
+  const el = $("libraryScroll");
+  if (!el || _waterfallScrollLoading) return;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 350) {
+    if (typeof isClientPagedView === "function" && isClientPagedView()) {
+      const total = typeof clientPagedTotal === "function" ? clientPagedTotal() : 0;
+      if (state.page * state.pageSize < total) {
+        _waterfallScrollLoading = true;
+        state.page += 1;
+        render();
+        setTimeout(() => { _waterfallScrollLoading = false; }, 200);
+      }
+    }
+  }
+}
+$("libraryScroll")?.addEventListener("scroll", checkWaterfallScroll, { passive: true });
+// _fnaudioWaterfallTrackCenterPatched

@@ -61,6 +61,14 @@ def _safe_capabilities(value: Any) -> Dict[str, Any]:
     return result
 
 
+def _is_onboard_analog_target(device):
+    """fnOS patch: mirror alsa_output._is_onboard_analog for a target row."""
+    text = ("%s %s" % (_text(device.get("name")), _text(device.get("raw_name")))).lower()
+    if any(token in text for token in ("hdmi", "pcsp", "pc speaker", "pc-speaker", "pcspeaker")):
+        return False
+    return "analog" in text
+
+
 def build_targets(
     mpd: Any,
     core_state: Any,
@@ -97,7 +105,8 @@ def build_targets(
     current_target_name = "当前设备" if current_target == "local" else ""
 
     for device in _items(capabilities.get("devices"), MAX_TARGETS - len(targets)):
-        if device.get("is_usb") is not True:
+        onboard = _is_onboard_analog_target(device)
+        if device.get("is_usb") is not True and not onboard:
             continue
         alsa_id = _text(device.get("alsa_id"))
         if not alsa_id:
@@ -111,11 +120,11 @@ def build_targets(
         targets.append({
             "id": target_id,
             "kind": "mpd",
-            "name": "NAS - %s - USB Audio" % name,
+            "name": ("NAS - %s" % name) if onboard else ("NAS - %s - USB Audio" % name),
             "online": available,
             "available": available,
             "selected": selected,
-            "message": "当前 USB DAC" if selected else "本机 USB DAC",
+            "message": ("当前 本机声卡" if selected else "板载 3.5mm 输出") if onboard else ("当前 USB DAC" if selected else "本机 USB DAC"),
             "caps": _safe_capabilities(device.get("caps")),
             "raw_name": _text(device.get("raw_name")),
             "backend": {

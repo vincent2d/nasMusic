@@ -479,10 +479,12 @@ class PlaybackCore:
             self.state.current_index = random.choice(choices)
         elif self.state.current_index < len(self.state.queue) - 1:
             self.state.current_index += 1
-        elif self.state.repeat == "all":
-            self.state.current_index = 0
         else:
-            return None
+            # QUEUE_TAIL_WRAP: an explicit Next at the queue tail wraps to the
+            # first track so the transport button never looks dead. Automatic
+            # end-of-track behaviour is still MPD's job, so repeat="off" keeps
+            # stopping after the last track finishes.
+            self.state.current_index = 0
         self.state.current_track_id = self.state.queue[self.state.current_index].track_id
         return self.state.queue[self.state.current_index]
 

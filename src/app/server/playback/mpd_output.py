@@ -193,6 +193,14 @@ class MpdOutput(OutputPlugin):
 
     def command(self, command: PlaybackCommand, state: PlaybackState, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
+            # FAST_PATH_MPD_VOLUME: instant hardware/mixer volume control without rediscovering ALSA devices
+            if command.action == "volume":
+                try:
+                    result = self.service.control("volume", command.position) if self.service else mpd_control("volume", command.position, **self._connection())
+                    if result.get("ok") is True:
+                        return {**result, "target_id": state.target_id}
+                except Exception:
+                    pass
             selected = self._select_target_output(state)
             if selected.get("ok") is False:
                 return self._failure(selected.get("message") or "MPD 输出设备不可用", state.target_id, "output_device_missing")

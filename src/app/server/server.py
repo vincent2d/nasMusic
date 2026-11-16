@@ -2858,6 +2858,18 @@ def _playback_command_accepted(result):
 
 def playback_control(handler, payload):
     target_id = payload_target_id(payload)
+    # FAST_PATH_VOLUME: ultra-low-latency direct volume response (<5ms)
+    action_val = str(payload.get("action") or "").strip().lower()
+    if action_val == "volume" and target_id is not None:
+        target_kind = playback_target_kind(target_id)
+        vol = safe_float(payload.get("position"))
+        result = PLAYBACK_CORE.dispatch(
+            PlaybackCommand("volume", vol, context={"handler": handler, "config": handler.server.config})
+        )
+        output_result = result.get("result") or {}
+        ok = output_result.get("ok") is True
+        message = output_result.get("message") or ""
+        return {"ok": ok, "kind": target_kind, "message": message, "core": PLAYBACK_CORE.state.to_dict(), "volume": vol}, 200 if ok else 502
     if target_id is None:
         return {
             "ok": False,
