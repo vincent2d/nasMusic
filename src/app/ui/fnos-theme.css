@@ -2231,8 +2231,15 @@ html, body {
 }
 
 #neteaseResults .nav-item {
-  flex: 1;
+  flex: 1 !important;
+  display: block;
+  width: auto !important;
   min-width: 0;
   text-align: left;
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#neteaseResults .secondary-button {
+  white-space: nowrap;
 }
