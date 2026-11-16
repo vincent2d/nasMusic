@@ -31,6 +31,39 @@ class NeteaseMusicTests(unittest.TestCase):
         self.assertNotIn("path", row)
         self.assertEqual(music.track(row["id"]), row)
 
+    def test_similar_songs_follow_netease_order_and_use_musicbox_metadata(self):
+        music = netease_music.MusicBox()
+        recommendations = {"code": 200, "songs": [
+            {"id": 456}, {"id": 123}, {"id": 789}, {"id": 456}, {"id": "bad"},
+        ]}
+        with mock.patch("netease_music._read_json", return_value=recommendations) as source, \
+                mock.patch("netease_music._request", return_value=[
+                    {"song_id": 789, "name": "Second"},
+                    {"song_id": 456, "name": "First", "duration_ms": 11000},
+                ]) as detail:
+            rows = music.similar("123")
+        self.assertIn("songid=123", source.call_args.args[0].full_url)
+        detail.assert_called_once_with("/songs/detail", ids="456,789")
+        self.assertEqual([row["id"] for row in rows], ["netease:456", "netease:789"])
+        self.assertEqual(music.track("netease:456")["duration"], 11)
+
+    def test_similar_songs_distinguish_empty_results_from_provider_errors(self):
+        music = netease_music.MusicBox()
+        with mock.patch("netease_music._request") as detail:
+            with mock.patch("netease_music._read_json", return_value={"code": 200, "songs": []}):
+                self.assertEqual(music.similar("123"), [])
+            with mock.patch("netease_music._read_json", return_value={"code": 403}):
+                with self.assertRaises(netease_music.MusicBoxError):
+                    music.similar("123")
+            detail.assert_not_called()
+
+    def test_similar_endpoint_rejects_an_invalid_netease_id(self):
+        handler = mock.Mock()
+        with mock.patch("server.NETEASE.similar") as similar:
+            Handler.serve_netease_catalog(handler, "/api/netease/similar", {"id": ["123/456"]})
+            self.assertEqual(handler.send_json.call_args.args[1], 400)
+            similar.assert_not_called()
+
     def test_online_stream_uses_a_stable_internal_url(self):
         self.assertEqual(netease_music.stream_uri("netease:123", 55555),
                          "http://127.0.0.1:55555/internal/netease/123")

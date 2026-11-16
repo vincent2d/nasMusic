@@ -1,4 +1,4 @@
-"""Read-only access to the MusicBox service installed by fnmusic-ext."""
+"""Read-only NetEase catalog and playback access through MusicBox and NetEase."""
 
 import json
 import re
@@ -32,16 +32,20 @@ def stream_uri(track_id, port):
     return f"http://127.0.0.1:{port}{STREAM_PREFIX}{value}" if value and type(port) is int and 1024 <= port <= 65535 else ""
 
 
-def _request(path, **parameters):
-    query = "?" + urlencode(parameters) if parameters else ""
+def _read_json(request, timeout, error):
     try:
-        with _HTTP.open(MUSICBOX + path + query, timeout=25) as response:
+        with _HTTP.open(request, timeout=timeout) as response:
             raw = response.read(_MAX_PAYLOAD + 1)
         if len(raw) > _MAX_PAYLOAD:
             raise ValueError("response too large")
-        payload = json.loads(raw)
+        return json.loads(raw)
     except (OSError, ValueError) as exc:
-        raise MusicBoxError("网易云音源暂时不可用") from exc
+        raise MusicBoxError(error) from exc
+
+
+def _request(path, **parameters):
+    query = "?" + urlencode(parameters) if parameters else ""
+    payload = _read_json(MUSICBOX + path + query, 25, "网易云音源暂时不可用")
     if not isinstance(payload, dict):
         raise MusicBoxError("网易云音源返回了无效数据")
     if payload.get("error") == "not_logged_in" or payload.get("logged_in") is False:
@@ -132,6 +136,26 @@ class MusicBox:
     def search(self, keyword):
         keyword = keyword.strip()[:120]
         return self._remember(_request("/search", keyword=keyword, type="song", limit=50)) if keyword else []
+
+    def similar(self, value):
+        query = urlencode({"songid": value, "offset": 0, "total": "true", "limit": 20})
+        request = Request(
+            "https://music.163.com/api/discovery/simiSong?" + query,
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+        )
+        error = "暂时无法获取网易云相似歌曲"
+        payload = _read_json(request, 8, error)
+        if not isinstance(payload, dict) or payload.get("code") != 200 or not isinstance(payload.get("songs"), list):
+            raise MusicBoxError(error)
+        ids = list(dict.fromkeys(
+            str(row["id"]) for row in payload["songs"][:20]
+            if isinstance(row, dict) and _ID.fullmatch(str(row.get("id"))) and str(row["id"]) != value
+        ))
+        if not ids:
+            return []
+        details = self._remember(_request("/songs/detail", ids=",".join(ids)))
+        by_id = {song_id(item["id"]): item for item in details}
+        return [by_id[value] for value in ids if value in by_id]
 
     def playlists(self):
         rows = _request("/user/playlists", limit=100)

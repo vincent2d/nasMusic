@@ -157,7 +157,10 @@
   <dialog id="neteaseDialog" aria-labelledby="neteaseTitle" data-dialog-initial-focus="neteaseKeyword">
     <div class="dialog-head">
       <h2 id="neteaseTitle">网易云音乐</h2>
-      <form method="dialog"><button class="secondary-button" type="submit">关闭</button></form>
+      <form method="dialog" class="netease-dialog-actions">
+        <button class="secondary-button" type="button" id="neteaseCurrentSimilar" hidden>当前歌曲听相似</button>
+        <button class="secondary-button" type="submit">关闭</button>
+      </form>
     </div>
     <form id="neteaseSearch" class="netease-controls">
       <input id="neteaseKeyword" type="search" maxlength="120" placeholder="搜索歌曲或歌手" aria-label="搜索网易云歌曲" required>

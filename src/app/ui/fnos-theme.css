@@ -2200,6 +2200,13 @@ html, body {
   padding: .5rem 1rem;
 }
 
+.netease-dialog-actions,
+#neteaseResults li {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
 .netease-controls input,
 .netease-controls select {
   min-width: 0;
@@ -2220,8 +2227,12 @@ html, body {
 }
 
 #neteaseResults button {
-  width: 100%;
   min-height: 2.75rem;
+}
+
+#neteaseResults .nav-item {
+  flex: 1;
+  min-width: 0;
   text-align: left;
   white-space: normal;
 }

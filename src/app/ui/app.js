@@ -10989,6 +10989,7 @@ function bindNeteaseDialog() {
   const playlists = $("neteasePlaylists");
   const results = $("neteaseResults");
   const playAll = $("neteasePlayAll");
+  const currentSimilar = $("neteaseCurrentSimilar");
   let tracks = [];
   let request = 0;
   let starting = false;
@@ -11008,9 +11009,19 @@ function bindNeteaseDialog() {
     }
   }
 
-  async function showTracks(path) {
+  function showSimilar(item) {
+    const id = item?.id?.match(/^netease:([1-9][0-9]{0,19})$/)?.[1];
+    if (!id) {
+      status.textContent = "当前没有可查找相似歌曲的网易云曲目";
+      return;
+    }
+    playlists.value = "";
+    showTracks(`api/netease/similar?id=${id}`, item.title || "当前歌曲");
+  }
+
+  async function showTracks(path, similarTo = "") {
     const revision = ++request;
-    status.textContent = "正在读取歌曲…";
+    status.textContent = similarTo ? "正在查找相似歌曲…" : "正在读取歌曲…";
     tracks = [];
     playAll.disabled = true;
     results.replaceChildren();
@@ -11025,12 +11036,23 @@ function bindNeteaseDialog() {
         button.className = "nav-item";
         button.textContent = [item.title, item.artist].filter(Boolean).join(" · ");
         button.addEventListener("click", () => play(item.id));
-        row.append(button);
+        const similar = document.createElement("button");
+        similar.type = "button";
+        similar.className = "secondary-button";
+        similar.textContent = "听相似";
+        similar.setAttribute("aria-label", `听《${item.title}》的相似歌曲`);
+        similar.addEventListener("click", () => showSimilar(item));
+        row.append(button, similar);
         return row;
       });
       results.replaceChildren(...rows);
       playAll.disabled = !tracks.length;
-      status.textContent = tracks.length ? `${tracks.length} 首 · NAS 本机播放` : "没有找到歌曲";
+      if (tracks.length) {
+        const heading = similarTo ? `《${similarTo}》的相似歌曲 · ` : "";
+        status.textContent = `${heading}${tracks.length} 首 · NAS 本机播放`;
+      } else {
+        status.textContent = similarTo ? `《${similarTo}》暂无相似歌曲` : "没有找到歌曲";
+      }
     } catch (error) {
       if (revision === request) status.textContent = error.message;
     }
@@ -11039,6 +11061,7 @@ function bindNeteaseDialog() {
   $("neteaseBtn").addEventListener("click", async () => {
     const revision = request;
     setMobileNavigation(false);
+    currentSimilar.hidden = !currentItem()?.id?.startsWith("netease:");
     dialog.showModal();
     try {
       const data = await fetchJsonChecked("api/netease/playlists", {}, "无法读取网易云歌单");
@@ -11060,6 +11083,7 @@ function bindNeteaseDialog() {
   playlists.addEventListener("change", () => {
     if (playlists.value) showTracks(`api/netease/playlists/${encodeURIComponent(playlists.value)}`);
   });
+  currentSimilar.addEventListener("click", () => showSimilar(currentItem()));
   playAll.addEventListener("click", () => play(tracks[0]?.id));
   $("neteaseOutput").addEventListener("click", () => {
     dialog.close();

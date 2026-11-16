@@ -927,6 +927,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/netease/search":
                 result = {"items": NETEASE.search((query.get("q") or [""])[0])}
+            elif path == "/api/netease/similar":
+                value = netease_song_id("netease:" + (query.get("id") or [""])[0])
+                if not value:
+                    return self.send_json({"ok": False, "message": "无效的网易云歌曲"}, 400)
+                result = {"items": NETEASE.similar(value)}
             elif path == "/api/netease/playlists":
                 result = {"playlists": NETEASE.playlists()}
             elif path.startswith("/api/netease/playlists/"):
