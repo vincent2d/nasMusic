@@ -979,11 +979,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/netease/search":
                 result = {"items": NETEASE.search((query.get("q") or [""])[0])}
-            elif path == "/api/netease/similar":
+            elif path in ("/api/netease/similar", "/api/netease/lyrics"):
                 value = netease_song_id("netease:" + (query.get("id") or [""])[0])
                 if not value:
                     return self.send_json({"ok": False, "message": "无效的网易云歌曲"}, 400)
-                result = {"items": NETEASE.similar(value)}
+                if path == "/api/netease/lyrics":
+                    result = {"lyrics": NETEASE.lyrics(value), "source": "网易云音乐"}
+                else:
+                    result = {"items": NETEASE.similar(value)}
             elif path == "/api/netease/playlists":
                 result = {"playlists": NETEASE.playlists()}
             elif path == "/api/netease/daily":

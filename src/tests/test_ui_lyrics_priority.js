@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const source = fs.readFileSync(
   path.join(__dirname, "..", "app", "ui", "app.js"),
@@ -80,7 +81,7 @@ assert.match(source, /loadLyricsForCurrentTrack\(item, retry, state\.lyricsStatu
 assert.match(source, /showLyricsMessage\("正在获取歌词\.\.\."\)/, "Pending lyrics should show an active retrieval state");
 assert.ok(source.includes('const detail = String(error?.message || "").replace(/[\\r\\n]+/g, " ").trim().slice(0, 180);'), "Structured lyric-service errors should remain visible with a bounded message");
 assert.match(source, /error\.metadataUnavailable = unavailable/, "Unavailable metadata service must be classified separately");
-assert.match(source, /if \(!error\?\.metadataUnavailable\) scheduleLyricsPoll\(trackId\)/, "Unavailable metadata service must not trigger an endless lyric poll loop");
+assert.match(source, /if \(!online && !error\?\.metadataUnavailable\) scheduleLyricsPoll\(trackId\)/, "Online lyrics and unavailable metadata must not trigger lyric error polls");
 assert.match(source, /歌词加载失败：\$\{detail\}/, "The lyrics view should distinguish service failures from an ordinary empty lyric");
 assert.match(source, /const lyricArtwork = usableCoverSource\(data\.image_url\);[\s\S]*?lyricArtwork && !item\.cover_url && !item\.cover_thumbnail_url/, "Resolved lyric artwork should validate and fill only missing local artwork");
 assert.match(source, /const lyricArtwork = usableCoverSource\(data\.image_url\);[\s\S]*?if \(data\.pending === true\)/, "Cached artwork returned with pending lyrics must be applied before the pending branch");
@@ -89,6 +90,63 @@ assert.doesNotMatch(source.slice(source.indexOf("async function refreshMetadataL
 assert.match(source, /已请求后台元数据补全并加入队列/, "Manual metadata refresh should report the request without claiming persistent enablement");
 assert.match(source, /prefetchCurrentTrackMetadata\(currentItem\(\)\)/, "Restored sessions must re-enter the current-track metadata lane");
 
-console.log("Lyrics priority UI regression checks passed.");
+async function checkOnlineLyrics() {
+  const item = { id: "netease:123" };
+  const view = { hidden: true };
+  const state = { lyricsRequestToken: 0 };
+  const requests = [];
+  const rendered = [];
+  const messages = [];
+  const text = "[00:01.20]歌词";
+  const limited = "网易云暂时限制歌词请求";
+  let reply;
+  const ui = vm.createContext({
+    state,
+    $: () => view,
+    window: {},
+    requestAnimationFrame: () => {},
+    AbortController,
+    isNeteaseTrack: id => id.startsWith("netease:"),
+    currentItem: () => item,
+    updateLyricsMeta: () => {},
+    updateLyricHighlight: () => {},
+    showLyricsMessage: message => messages.push(message),
+    renderLyrics: value => rendered.push(value),
+    parseLyrics: value => value,
+    usableCoverSource: () => "",
+    unwrapMetadataResponsePayload: value => value,
+    fetchMetadataRequest: (url, _timeout, signal) => {
+      requests.push(url);
+      return reply(signal);
+    },
+    scheduleLyricsPoll: () => assert.fail("Online lyric errors must not poll"),
+  });
+  vm.runInContext([
+    "cancelLyricsPoll", "cancelLyricsRequest", "loadLyricsForCurrentTrack",
+    "syncLyricsForCurrentTrack", "openLyrics", "closeLyrics",
+  ].map(functionBody).join("\n"), ui);
+
+  ui.syncLyricsForCurrentTrack(item);
+  assert.deepEqual(requests, []);
+  reply = signal => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(Object.assign(new Error(), { name: "AbortError" })));
+  });
+  const firstOpen = ui.openLyrics();
+  ui.closeLyrics();
+  await firstOpen;
+
+  reply = () => ({ response: { ok: false, status: 502 }, data: { message: limited } });
+  await ui.openLyrics();
+  assert.match(messages.at(-1), /网易云暂时限制歌词请求/);
+  ui.closeLyrics();
+  reply = () => ({ response: { ok: true }, data: { lyrics: text } });
+  await ui.openLyrics();
+  assert.deepEqual(rendered, [text]);
+  assert.deepEqual(requests, Array(3).fill("api/netease/lyrics?id=123"));
+}
+checkOnlineLyrics().then(() => console.log("Lyrics priority UI regression checks passed.")).catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
 
 

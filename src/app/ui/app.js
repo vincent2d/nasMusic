@@ -5463,11 +5463,17 @@ async function loadLyricsForCurrentTrack(item = currentItem(), force = false, re
     return;
   }
   const trackId = String(item.id);
+  const online = isNeteaseTrack(trackId);
   if (!force && state.lyricsTrackId === trackId && ["loading", "loaded", "pending"].includes(state.lyricsStatus)) return;
   if (state.lyricsTrackId !== trackId) {
     cancelLyricsPoll();
     cancelLyricsRequest();
     state.lyricsPollAttempts = 0;
+  }
+  if (online && $("lyricsView").hidden) {
+    state.lyricsTrackId = trackId;
+    state.lyricsStatus = "idle";
+    return;
   }
   // A forced poll/reopen owns a fresh request. Abort the previous request
   // first so a slow WebView response cannot keep a stale connection alive or
@@ -5482,11 +5488,10 @@ async function loadLyricsForCurrentTrack(item = currentItem(), force = false, re
   state.lyricsRequestController = controller;
   try {
     const retry = retryFailed ? "&retry=1" : "";
-    const result = await fetchMetadataRequest(
-      `api/lyrics?track_id=${encodeURIComponent(trackId)}${retry}`,
-      10000,
-      controller?.signal,
-    );
+    const url = online
+      ? `api/netease/lyrics?id=${encodeURIComponent(trackId.slice("netease:".length))}`
+      : `api/lyrics?track_id=${encodeURIComponent(trackId)}${retry}`;
+    const result = await fetchMetadataRequest(url, 10000, controller?.signal);
     const response = result.response;
     // Lyrics and track metadata share the same host/CGI bridge. Some
     // deployments wrap successful JSON in bounded transport envelopes;
@@ -5498,7 +5503,7 @@ async function loadLyricsForCurrentTrack(item = currentItem(), force = false, re
     // reason and let an explicit reopen retry after the worker is restored.
     if (!response.ok) {
       const unavailable = response.status === 503 || data.status === "unavailable";
-      const reason = String(data.error || (unavailable ? "后台元数据服务没有启动" : "歌词加载失败"))
+      const reason = String(data.error || (online && data.message) || (unavailable ? "后台元数据服务没有启动" : "歌词加载失败"))
         .replace(/[\r\n]+/g, " ").trim().slice(0, 180);
       const error = new Error(reason || "歌词加载失败");
       error.metadataUnavailable = unavailable;
@@ -5533,7 +5538,8 @@ async function loadLyricsForCurrentTrack(item = currentItem(), force = false, re
     state.lyricsStatus = "loaded";
     cancelLyricsPoll();
     state.lyricsPollAttempts = 0;
-    renderLyrics(parseLyrics(data.lyrics || ""));
+    if (online && !data.lyrics) showLyricsMessage("这首网易云歌曲暂无歌词。");
+    else renderLyrics(parseLyrics(data.lyrics || ""));
   } catch (error) {
     if (requestToken !== state.lyricsRequestToken || String(currentItem()?.id || "") !== trackId) return;
     if (error?.name === "AbortError") return;
@@ -5545,7 +5551,7 @@ async function loadLyricsForCurrentTrack(item = currentItem(), force = false, re
     // displayed detail bounded because it may originate from a remote response.
     const detail = String(error?.message || "").replace(/[\r\n]+/g, " ").trim().slice(0, 180);
     showLyricsMessage(detail ? `歌词加载失败：${detail}` : "歌词加载失败，请稍后重试。");
-    if (!error?.metadataUnavailable) scheduleLyricsPoll(trackId);
+    if (!online && !error?.metadataUnavailable) scheduleLyricsPoll(trackId);
   } finally {
     if (requestToken === state.lyricsRequestToken) {
       state.lyricsLoadingTrackId = "";
@@ -11646,6 +11652,9 @@ function closeLyrics() {
   cancelLyricsRequest();
   state.lyricsRequestToken += 1;
   state.lyricsLoadingTrackId = "";
+  if (state.lyricsStatus === "loading" && isNeteaseTrack(state.lyricsTrackId)) {
+    state.lyricsStatus = "idle";
+  }
 }
 function closeTopDialog() {
   const dialogs = [...document.querySelectorAll("dialog[open]")];

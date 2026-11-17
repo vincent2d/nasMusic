@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from urllib.error import HTTPError
 
 import netease_music
 from playback.core import PlaybackCore
@@ -134,6 +135,51 @@ class NeteaseMusicTests(unittest.TestCase):
             Handler.serve_netease_catalog(handler, "/api/netease/similar", {"id": ["123/456"]})
             self.assertEqual(handler.send_json.call_args.args[1], 400)
             similar.assert_not_called()
+
+    def test_online_lyrics_request_uses_only_the_song_id_and_caches_the_result(self):
+        music = netease_music.MusicBox()
+        text = "[00:01.20]第一句"
+        payload = {"code": 200, "lrc": {"lyric": text + "\n"}}
+        with mock.patch("netease_music._read_json", return_value=payload) as source:
+            for _ in range(2):
+                self.assertEqual(music.lyrics("123"), text)
+        source.assert_called_once()
+        request = source.call_args.args[0]
+        self.assertEqual(request.full_url, "https://music.163.com/api/song/lyric?id=123&lv=1&kv=1&tv=-1")
+        self.assertIsNone(request.get_header("Cookie"))
+
+    def test_online_lyrics_caches_empty_results_and_backs_off_provider_restrictions(self):
+        music = netease_music.MusicBox()
+        blocked = HTTPError("", 429, "Too Many Requests", {}, io.BytesIO())
+        with mock.patch("netease_music._HTTP.open", side_effect=[
+            io.BytesIO(b'{"code":200,"nolyric":true}'), blocked, io.BytesIO(b'{"code":200}'),
+        ]) as source, mock.patch("netease_music.time.monotonic", return_value=100) as clock:
+            self.assertEqual(music.lyrics("123"), "")
+            for value in ("456", "789"):
+                with self.assertRaisesRegex(netease_music.MusicBoxError, "暂时限制"):
+                    music.lyrics(value)
+            self.assertTrue(blocked.fp.closed)
+            self.assertEqual(music.lyrics("123"), "")
+            self.assertEqual(source.call_count, 2)
+            clock.return_value = 401
+            self.assertEqual(music.lyrics("789"), "")
+            self.assertEqual(source.call_count, 3)
+
+    def test_online_lyrics_endpoint_uses_the_provider_instead_of_the_local_library(self):
+        handler = mock.Mock()
+        handler.path = "/api/netease/lyrics?id=123"
+        with mock.patch("server.find_library_item") as local, mock.patch("server.NETEASE.lyrics") as provider:
+            provider.return_value = "[00:01.20]歌词"
+            Handler.handle_get(handler)
+            handler.authorize_api_request.assert_called_once_with("GET", "/api/netease/lyrics")
+            handler.serve_netease_catalog.assert_called_once_with("/api/netease/lyrics", {"id": ["123"]})
+            Handler.serve_netease_catalog(handler, "/api/netease/lyrics", {"id": ["123"]})
+            provider.assert_called_once_with("123")
+            handler.send_json.assert_called_once_with({"ok": True, "lyrics": "[00:01.20]歌词", "source": "网易云音乐"})
+            Handler.serve_netease_catalog(handler, "/api/netease/lyrics", {"id": ["123/456"]})
+            self.assertEqual(handler.send_json.call_args.args[1], 400)
+            self.assertEqual(provider.call_count, 1)
+            local.assert_not_called()
 
     def test_daily_and_private_radar_produce_playback_rows(self):
         music = netease_music.MusicBox()

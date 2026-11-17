@@ -4,9 +4,13 @@ import json
 import re
 import subprocess
 import threading
+import time
 from collections import OrderedDict
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from metadata_provider_response import lyrics_document
 
 STREAM_PREFIX = "/internal/netease/"
 MUSICBOX = "http://127.0.0.1:8770/api/v1"
@@ -14,6 +18,8 @@ _RADAR_PLAYLIST_ID = "3136952023"
 _ID = re.compile(r"[1-9][0-9]{0,19}")
 _MAX_PAYLOAD = 2 * 1024 * 1024
 _MAX_CACHED_TRACKS = 2048
+_MAX_CACHED_LYRICS = 128
+_LYRICS_RESTRICTIONS = (403, 418, 429)
 _HTTP = build_opener(ProxyHandler({}))
 _LIKE_COMMAND = (
     "/usr/bin/docker", "exec", "fnmusic-sources", "python", "-c", """
@@ -118,6 +124,10 @@ class MusicBox:
     def __init__(self):
         self._items = OrderedDict()
         self._lock = threading.Lock()
+        self._lyrics = OrderedDict()
+        self._lyrics_lock = threading.Lock()
+        self._lyrics_next_request = 0
+        self._lyrics_restricted = False
 
     def _remember(self, rows):
         if not isinstance(rows, list):
@@ -189,6 +199,46 @@ class MusicBox:
         details = self._remember(_request("/songs/detail", ids=",".join(ids)))
         by_id = {song_id(item["id"]): item for item in details}
         return [by_id[value] for value in ids if value in by_id]
+
+    def lyrics(self, value):
+        restricted = "网易云暂时限制歌词请求，请稍后重新打开歌词页。"
+        unavailable = "暂时无法获取网易云歌词，请稍后重试。"
+        with self._lyrics_lock:
+            now = time.monotonic()
+            cached = self._lyrics.pop(value, None)
+            if cached and cached[0] > now:
+                self._lyrics[value] = cached
+                return cached[1]
+            if now < self._lyrics_next_request:
+                raise MusicBoxError(restricted if self._lyrics_restricted else unavailable)
+
+            query = urlencode({"id": value, "lv": 1, "kv": 1, "tv": -1})
+            request = Request("https://music.163.com/api/song/lyric?" + query,
+                              headers={"Accept": "application/json"})
+            try:
+                payload = _read_json(request, 5, unavailable)
+            except MusicBoxError as exc:
+                cause = exc.__cause__
+                if isinstance(cause, HTTPError):
+                    cause.close()
+                    payload = {"code": cause.code}
+                else:
+                    payload = {}
+
+            code = payload.get("code") if isinstance(payload, dict) else None
+            now = time.monotonic()
+            self._lyrics_restricted = code in _LYRICS_RESTRICTIONS
+            self._lyrics_next_request = now + (300 if self._lyrics_restricted else 10 if code != 200 else 0)
+            if code != 200:
+                raise MusicBoxError(restricted if self._lyrics_restricted else unavailable)
+
+            lrc = payload.get("lrc")
+            raw = lrc.get("lyric") if isinstance(lrc, dict) else None
+            text = lyrics_document(raw, limit=64 * 1024)
+            self._lyrics[value] = (now + (86400 if text else 600), text)
+            if len(self._lyrics) > _MAX_CACHED_LYRICS:
+                self._lyrics.popitem(last=False)
+            return text
 
     def playlists(self):
         return _playlist_summaries(_request("/user/playlists", limit=100), "playlist_id")
