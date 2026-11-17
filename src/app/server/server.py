@@ -934,6 +934,17 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"items": NETEASE.similar(value)}
             elif path == "/api/netease/playlists":
                 result = {"playlists": NETEASE.playlists()}
+            elif path == "/api/netease/daily":
+                result = {"items": NETEASE.daily()}
+            elif path == "/api/netease/radar":
+                result = {"items": NETEASE.radar()}
+            elif path == "/api/netease/recommended-playlists":
+                result = {"playlists": NETEASE.recommended_playlists()}
+            elif path.startswith("/api/netease/recommended-playlists/"):
+                value = netease_song_id("netease:" + path.removeprefix("/api/netease/recommended-playlists/"))
+                if not value:
+                    return self.send_json({"ok": False, "message": "无效的网易云歌单"}, 400)
+                result = {"items": NETEASE.recommended_playlist(value)}
             elif path.startswith("/api/netease/playlists/"):
                 value = netease_song_id("netease:" + path.removeprefix("/api/netease/playlists/"))
                 if not value:

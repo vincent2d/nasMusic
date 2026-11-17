@@ -73,6 +73,45 @@ class NeteaseMusicTests(unittest.TestCase):
             self.assertEqual(handler.send_json.call_args.args[1], 400)
             similar.assert_not_called()
 
+    def test_daily_and_private_radar_produce_playback_rows(self):
+        music = netease_music.MusicBox()
+        rows = [{"song_id": 123, "name": "Song", "duration_ms": 63000}]
+        with mock.patch("netease_music._request", side_effect=[rows, None, rows]) as source:
+            self.assertEqual(music.daily()[0]["id"], "netease:123")
+            self.assertEqual(music.radar()[0]["duration"], 63)
+        self.assertEqual(source.call_args_list, [
+            mock.call("/recommend/songs", limit=30),
+            mock.call("/auth/status"),
+            mock.call("/user/playlists/3136952023/tracks"),
+        ])
+
+    def test_private_radar_checks_login_before_reading_tracks(self):
+        music = netease_music.MusicBox()
+        with mock.patch("netease_music._read_json", return_value={"ok": True, "logged_in": False}) as source:
+            with self.assertRaisesRegex(netease_music.MusicBoxError, "登录网易云"):
+                music.radar()
+        source.assert_called_once()
+        self.assertTrue(source.call_args.args[0].endswith("/auth/status"))
+
+    def test_account_recommended_playlists_use_top_level_items_and_valid_ids(self):
+        music = netease_music.MusicBox()
+        playlist_payload = {"ok": True, "items": [
+            {"id": "456", "name": "Recommendation"}, {"id": "456/tracks", "name": "Invalid"},
+        ]}
+        track_payload = {"ok": True, "data": [{"id": 123, "name": "Track"}]}
+        with mock.patch("netease_music._read_json", side_effect=[playlist_payload, track_payload]) as source:
+            self.assertEqual(music.recommended_playlists(), [{"id": "456", "name": "Recommendation"}])
+            self.assertEqual(music.recommended_playlist("456")[0]["id"], "netease:123")
+        self.assertTrue(source.call_args_list[0].args[0].endswith("/public-playlists?channel=account_recommend"))
+        self.assertTrue(source.call_args_list[1].args[0].endswith("/public-playlists/456/tracks"))
+
+    def test_recommended_playlist_endpoint_rejects_an_invalid_id(self):
+        handler = mock.Mock()
+        with mock.patch("server.NETEASE.recommended_playlist") as playlist:
+            Handler.serve_netease_catalog(handler, "/api/netease/recommended-playlists/123/456", {})
+            self.assertEqual(handler.send_json.call_args.args[1], 400)
+            playlist.assert_not_called()
+
     def test_online_stream_uses_a_stable_internal_url(self):
         self.assertEqual(netease_music.stream_uri("netease:123", 55555),
                          "http://127.0.0.1:55555/internal/netease/123")

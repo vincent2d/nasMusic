@@ -11025,15 +11025,19 @@ function bindNeteaseDialog() {
       return;
     }
     playlists.value = "";
-    showTracks(`api/netease/similar?id=${id}`, item.title || "当前歌曲");
+    showTracks(`api/netease/similar?id=${id}`, `《${item.title || "当前歌曲"}》的相似歌曲`);
   }
 
-  async function showTracks(path, similarTo = "") {
-    const revision = ++request;
-    status.textContent = similarTo ? "正在查找相似歌曲…" : "正在读取歌曲…";
+  function beginCatalogRequest(message) {
+    status.textContent = message;
     tracks = [];
     playAll.disabled = true;
     results.replaceChildren();
+    return ++request;
+  }
+
+  async function showTracks(path, label = "") {
+    const revision = beginCatalogRequest(`正在读取${label || "歌曲"}…`);
     try {
       const data = await fetchJsonChecked(path, {}, "无法读取网易云歌曲");
       if (revision !== request) return;
@@ -11042,7 +11046,7 @@ function bindNeteaseDialog() {
         const row = document.createElement("li");
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "nav-item";
+        button.className = "nav-item netease-track";
         button.textContent = [item.title, item.artist].filter(Boolean).join(" · ");
         button.setAttribute("aria-label", `播放 ${button.textContent}`);
         button.addEventListener("click", () => play(item.id));
@@ -11058,11 +11062,36 @@ function bindNeteaseDialog() {
       results.replaceChildren(...rows);
       playAll.disabled = !tracks.length;
       if (tracks.length) {
-        const heading = similarTo ? `《${similarTo}》的相似歌曲 · ` : "";
+        const heading = label ? `${label} · ` : "";
         status.textContent = `${heading}${tracks.length} 首 · NAS 本机播放`;
       } else {
-        status.textContent = similarTo ? `《${similarTo}》暂无相似歌曲` : "没有找到歌曲";
+        status.textContent = label ? `${label} · 暂无歌曲` : "没有找到歌曲";
       }
+    } catch (error) {
+      if (revision === request) status.textContent = error.message;
+    }
+  }
+
+  async function showRecommendedPlaylists() {
+    playlists.value = "";
+    const revision = beginCatalogRequest("正在读取推荐歌单…");
+    try {
+      const data = await fetchJsonChecked("api/netease/recommended-playlists", {}, "无法读取推荐歌单");
+      if (revision !== request) return;
+      const rows = data.playlists.map(playlist => {
+        const row = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "nav-item";
+        button.textContent = playlist.name;
+        button.addEventListener("click", () => {
+          showTracks(`api/netease/recommended-playlists/${encodeURIComponent(playlist.id)}`, playlist.name);
+        });
+        row.append(button);
+        return row;
+      });
+      results.replaceChildren(...rows);
+      status.textContent = rows.length ? `${rows.length} 份 · 点歌单查看歌曲` : "暂无推荐歌单";
     } catch (error) {
       if (revision === request) status.textContent = error.message;
     }
@@ -11100,6 +11129,15 @@ function bindNeteaseDialog() {
   playlists.addEventListener("change", () => {
     if (playlists.value) showTracks(`api/netease/playlists/${encodeURIComponent(playlists.value)}`);
   });
+  $("neteaseDaily")?.addEventListener("click", () => {
+    playlists.value = "";
+    showTracks("api/netease/daily", "每日推荐");
+  });
+  $("neteaseRadar")?.addEventListener("click", () => {
+    playlists.value = "";
+    showTracks("api/netease/radar", "私人雷达");
+  });
+  $("neteaseRecommendedPlaylists")?.addEventListener("click", showRecommendedPlaylists);
   playAll.addEventListener("click", () => play(tracks[0]?.id));
   $("neteaseOutput").addEventListener("click", () => {
     dialog.close();

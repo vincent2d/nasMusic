@@ -2209,6 +2209,12 @@ html, body {
   padding: .5rem 1rem;
 }
 
+.netease-recommendations button {
+  flex: 1;
+  min-height: 44px;
+  padding-inline: .25rem !important;
+}
+
 #neteaseResults li {
   display: flex;
   align-items: center;
@@ -2248,7 +2254,7 @@ html, body {
   overflow-wrap: anywhere;
 }
 
-#neteaseResults .nav-item::before {
+#neteaseResults .netease-track::before {
   content: "▶";
   margin-inline-end: .5em;
   color: var(--ui-accent);

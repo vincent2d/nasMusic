@@ -163,9 +163,14 @@
       <input id="neteaseKeyword" type="search" maxlength="120" placeholder="搜索歌曲或歌手" aria-label="搜索网易云歌曲" required>
       <button class="secondary-button" type="submit">搜索</button>
     </form>
+    <div class="netease-controls netease-recommendations" role="group" aria-label="网易云推荐">
+      <button class="secondary-button" id="neteaseDaily" type="button">每日推荐</button>
+      <button class="secondary-button" id="neteaseRadar" type="button">私人雷达</button>
+      <button class="secondary-button" id="neteaseRecommendedPlaylists" type="button">推荐歌单</button>
+    </div>
     <div class="netease-controls">
       <select id="neteasePlaylists" aria-label="网易云账号歌单"><option value="">我的网易云歌单</option></select>
-      <button class="secondary-button" type="button" id="neteasePlayAll" disabled>播放列表</button>
+      <button class="secondary-button" type="button" id="neteasePlayAll" disabled>播放全部</button>
       <button class="secondary-button" type="button" id="neteaseOutput">选择输出</button>
     </div>
     <p class="dialog-help" id="neteaseStatus" role="status"></p>
