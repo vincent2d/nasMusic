@@ -95,12 +95,18 @@ class NeteaseMusicTests(unittest.TestCase):
 
     def test_account_recommended_playlists_use_top_level_items_and_valid_ids(self):
         music = netease_music.MusicBox()
+        cover = "https://p1.music.126.net/example.jpg"
         playlist_payload = {"ok": True, "items": [
-            {"id": "456", "name": "Recommendation"}, {"id": "456/tracks", "name": "Invalid"},
+            {"id": "456", "name": "Recommendation", "cover_url": cover, "track_count": 65},
+            {"id": "789", "name": "Unknown", "cover_url": "https://example.com/cover", "track_count": True},
+            {"id": "456/tracks", "name": "Invalid"},
         ]}
         track_payload = {"ok": True, "data": [{"id": 123, "name": "Track"}]}
         with mock.patch("netease_music._read_json", side_effect=[playlist_payload, track_payload]) as source:
-            self.assertEqual(music.recommended_playlists(), [{"id": "456", "name": "Recommendation"}])
+            self.assertEqual(music.recommended_playlists(), [
+                {"id": "456", "name": "Recommendation", "cover_url": cover, "track_count": 65},
+                {"id": "789", "name": "Unknown", "cover_url": "", "track_count": None},
+            ])
             self.assertEqual(music.recommended_playlist("456")[0]["id"], "netease:123")
         self.assertTrue(source.call_args_list[0].args[0].endswith("/public-playlists?channel=account_recommend"))
         self.assertTrue(source.call_args_list[1].args[0].endswith("/public-playlists/456/tracks"))

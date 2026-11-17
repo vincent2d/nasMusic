@@ -64,7 +64,13 @@ def _playlist_summaries(rows, id_key):
     if not isinstance(rows, list):
         raise MusicBoxError("网易云音源返回了无效的歌单列表")
     return [
-        {"id": str(row[id_key]), "name": _text(row.get("name")) or "网易云歌单"}
+        {
+            "id": str(row[id_key]),
+            "name": _text(row.get("name")) or "网易云歌单",
+            "cover_url": _netease_url(row.get("cover_url")),
+            "track_count": row["track_count"]
+            if type(row.get("track_count")) is int and row["track_count"] >= 0 else None,
+        }
         for row in rows
         if isinstance(row, dict) and _ID.fullmatch(str(row.get(id_key) or ""))
     ]

@@ -38,6 +38,67 @@ async function loadLibrary(page, viewport) {
   return consoleErrors;
 }
 
+test("NetEase discovery preserves playlist position and updates the current track in place", async ({ page }) => {
+  const target = "mpd:alsa:pch:dev0";
+  const tracks = [
+    { id: "netease:123", title: "第一首", artist: "测试歌手", duration: 120, format: "网易云" },
+    { id: "netease:456", title: "第二首", artist: "测试歌手", duration: 150, format: "网易云" },
+  ];
+  const playlists = Array.from({ length: 18 }, (_, i) => ({
+    id: String(1000 + i), name: `歌单 ${i + 1}`, track_count: tracks.length,
+    cover_url: "https://p1.music.126.net/fixture.jpg",
+  }));
+  await page.route("https://p1.music.126.net/fixture.jpg?*", route => route.fulfill({
+    contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>',
+  }));
+  await page.route("**/api/netease/recommended-playlists", route => route.fulfill({ json: { ok: true, playlists } }));
+  await page.route("**/api/netease/recommended-playlists/*", route => route.fulfill({ json: { ok: true, items: tracks } }));
+  await page.route("**/api/playback/targets**", route => route.fulfill({ json: {
+    current_target: target, current_target_name: "NAS", targets: [
+      { id: "local", name: "当前设备" }, { id: target, name: "NAS", kind: "mpd" },
+    ],
+  } }));
+  await page.route("**/api/playback/events**", route => route.abort());
+  await page.route("**/api/playback/queue", route => route.fulfill({
+    json: { ok: true, core: { current: route.request().postDataJSON().current_id } },
+  }));
+  await page.route("**/api/playback/load", route => route.fulfill({
+    json: { ok: true, core: { current: route.request().postDataJSON().track_id, transport: "PLAYING" } },
+  }));
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".track")).toHaveCount(4);
+  await page.locator("#mobileNavBtn").click();
+  await page.locator("#neteaseBtn").click();
+  const discovery = page.locator("#neteasePage");
+  const cards = discovery.locator(".netease-playlist");
+  await expect(discovery).toBeVisible();
+  await expect(discovery.locator("#neteaseSearch")).toBeHidden();
+  await expect(cards).toHaveCount(6);
+  await expect(cards.first().locator("img")).toHaveCount(1);
+  await discovery.getByRole("button", { name: "查看全部 ›" }).click();
+  await expect(cards).toHaveCount(18);
+  const scroll = discovery.locator("#neteaseScroll");
+  await cards.nth(13).scrollIntoViewIfNeeded();
+  const before = await scroll.evaluate(node => node.scrollTop);
+  expect(before).toBeGreaterThan(0);
+  await cards.nth(13).click();
+  await expect(discovery.getByRole("heading", { name: "歌单 14" })).toBeVisible();
+
+  await discovery.locator("#neteaseOutput").click();
+  await expect(page.locator('#deviceList [data-target="mpd:alsa:pch:dev0"]')).toHaveClass(/is-current/);
+  await page.locator("#closeDialog").click();
+  const load = page.waitForRequest(request => request.url().endsWith("/api/playback/load"));
+  const song = discovery.getByRole("button", { name: "播放 第二首" });
+  await song.click();
+  expect((await load).postDataJSON()).toMatchObject({ target_id: target, track_id: "netease:456" });
+  await expect(song).toHaveAttribute("aria-current", "true");
+  await expect(discovery.getByRole("heading", { name: "歌单 14" })).toBeVisible();
+  await discovery.getByRole("button", { name: "‹ 返回" }).click();
+  expect(await scroll.evaluate(node => node.scrollTop)).toBeCloseTo(before, 0);
+});
+
 test("first-screen metrics expose bounded list, cover and metadata evidence", async ({ page }) => {
   await loadLibrary(page, { width: 1440, height: 900 });
   const metrics = await page.evaluate(() => window.__fnAudioUiMetricsSnapshot?.());
