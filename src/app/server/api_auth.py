@@ -48,7 +48,7 @@ def _granted_scopes(scopes):
     return frozenset(granted)
 
 
-def authorize_api(client_host: str, method: str, path: str, token: str, scopes) -> tuple[bool, int, str, str]:
+def authorize_api(client_host: str, method: str, path: str, token: str, scopes, *, lan_controller=False) -> tuple[bool, int, str, str]:
     scope = required_scope(method, path)
     if not scope:
         return True, 200, scope, ""
@@ -58,7 +58,7 @@ def authorize_api(client_host: str, method: str, path: str, token: str, scopes) 
         # Public addresses stay behind fnOS/Android authentication. LAN media
         # browsing and playback remain available to direct controllers, while
         # destructive configuration/file writes must use the fnOS CGI entry.
-        if not peer.is_loopback and any(peer in network for network in TRUSTED_LAN_NETWORKS):
+        if lan_controller or (not peer.is_loopback and any(peer in network for network in TRUSTED_LAN_NETWORKS)):
             if scope in PRIVILEGED_WRITE_SCOPES:
                 return False, 403, scope, "fnOS authenticated application entry is required"
             return True, 200, scope, ""

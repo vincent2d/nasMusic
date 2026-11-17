@@ -19,11 +19,14 @@ class NeteaseMusicTests(unittest.TestCase):
             ("192.168.1.2", {"X-Fnaudio-Internal": "1"}),
             ("127.0.0.1", {}),
         ):
-            handler = mock.Mock(headers=headers, client_address=(peer, 51000))
-            self.assertFalse(Handler.authorize_api_request(handler, "POST", path))
+            handler = Handler.__new__(Handler)
+            handler.headers = headers
+            handler.client_address = (peer, 51000)
+            handler.send_json = mock.Mock()
+            self.assertFalse(handler.authorize_api_request("POST", path))
             self.assertEqual(handler.send_json.call_args.args[1], 403)
-        gateway = mock.Mock(headers={"X-Fnaudio-Internal": "1"}, client_address=("127.0.0.1", 51000))
-        self.assertTrue(Handler.authorize_api_request(gateway, "POST", path))
+        handler.headers = {"X-Fnaudio-Internal": "1"}
+        self.assertTrue(handler.authorize_api_request("POST", path))
 
     def test_favorite_requires_explicit_json_boolean_and_persists_only_after_success(self):
         handler = mock.Mock(headers={"Content-Type": "text/plain"})
@@ -196,7 +199,7 @@ class NeteaseMusicTests(unittest.TestCase):
                     music.stream("123")
 
     def test_stream_stays_local_to_mpd(self):
-        handler = mock.Mock()
+        handler = mock.Mock(mobile_proxy=False)
         with mock.patch("server.NETEASE.open_stream") as stream:
             for host, headers in (("192.168.1.2", {}), ("127.0.0.1", {"X-Fnaudio-Internal": "1"})):
                 handler.client_address = (host, 2399)
@@ -207,7 +210,7 @@ class NeteaseMusicTests(unittest.TestCase):
 
     def test_verified_provider_range_is_advertised_to_mpd(self):
         for requested, offset, response_code in (("", 0, 200), ("bytes=2-", 2, 206)):
-            handler = mock.Mock(client_address=("127.0.0.1", 2399), headers={"Range": requested})
+            handler = mock.Mock(mobile_proxy=False, client_address=("127.0.0.1", 2399), headers={"Range": requested})
             source = io.BytesIO(b"abcd"[offset:])
             source.status = 206
             source.headers = Message()

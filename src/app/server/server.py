@@ -127,6 +127,7 @@ from services.mpd_service import MpdService
 from services.audio_output_lease import AUDIO_OUTPUT_LEASE
 from services.airplay_service import AirplayService, airplay_probe
 from state_store import StateConflict, load_user_state, save_netease_favorite, save_playback_session, save_user_state
+import netease_mobile
 from state_projection import playback_queue_ids
 from playback_session_projection import project_playback_session
 from metadata_service import MAX_ARTWORK_BYTES, MetadataProviders, MetadataService
@@ -228,6 +229,7 @@ PLAYBACK_RESTORE_RETRY_GENERATION = 0
 PLAYBACK_COMMAND_LOCK = threading.RLock()
 NETEASE_FAVORITE_LOCK = threading.Lock()
 NETEASE_FAVORITE_PATH = "/api/netease/favorite"
+NETEASE_MOBILE_PATH = "/api/netease/mobile"
 PLAYBACK_COMMAND_RESULTS = {}
 PLAYBACK_COMMAND_INFLIGHT = {}
 PLAYBACK_COMMAND_TTL_SECONDS = 30.0
@@ -783,6 +785,7 @@ def http_worker_status(http_server):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = APP_USER_AGENT
+    mobile_proxy = False
 
     def log_message(self, fmt, *args):
         return
@@ -881,26 +884,68 @@ class Handler(BaseHTTPRequestHandler):
     def trim_api_token(self):
         return trim_api_token(self.headers)
 
+    def trusted_cgi(self):
+        return (not self.mobile_proxy and self.client_address[0] in ("127.0.0.1", "::1")
+                and self.headers.get("X-Fnaudio-Internal") == "1")
+
+    def mobile_same_origin(self):
+        return self.mobile_proxy and self.headers.get("Origin") == self.server.mobile_origin
+
+    def mobile_device_status(self):
+        digest = netease_mobile.device_digest(self.headers.get("Cookie", ""))
+        return netease_mobile.device_status(self.server.config, digest)
+
     def authorize_api_request(self, method, path):
         # Requests relayed by our own CGI entry point never receive an fnOS
         # token on some fnOS releases. They are still confined to loopback;
         # allow that explicit internal channel for local settings such as
         # manually configured music roots.
-        trusted_cgi = (self.headers.get("X-Fnaudio-Internal") == "1"
-                       and self.client_address[0] in ("127.0.0.1", "::1"))
-        if method == "POST" and path == NETEASE_FAVORITE_PATH and not trusted_cgi:
-            self.send_json({"ok": False, "message": "请登录飞牛桌面并从应用入口打开 fnAudio，再同步网易云收藏。"}, 403)
-            return False
-        if trusted_cgi:
+        if path == NETEASE_MOBILE_PATH or self.trusted_cgi():
             return True
+        if method == "POST" and path == NETEASE_FAVORITE_PATH:
+            if self.mobile_same_origin() and self.mobile_device_status()[0]:
+                return True
+            self.send_json({"ok": False, "error": "netease_mobile_authorization_required",
+                            "message": "请先授权此设备同步网易云收藏。"}, 403)
+            return False
         scopes = (self.headers.get("X-Fnaudio-Scopes") or "").split(",")
         allowed, status, scope, message = authorize_api(
-            self.client_address[0], method, path, self.trim_api_token(), scopes
+            self.client_address[0], method, path, self.trim_api_token(), scopes,
+            lan_controller=self.mobile_proxy,
         )
         if allowed:
             return True
         self.send_json({"ok": False, "error": message, "required_scope": scope}, status)
         return False
+
+    def serve_netease_mobile(self, payload=None):
+        origin = getattr(self.server, "mobile_origin", "")
+        mode = "phone" if self.mobile_proxy else "fnos" if self.trusted_cgi() else "direct"
+        info = {"ok": True, "mode": mode, "url": origin}
+        if payload is None:
+            if mode == "phone":
+                info["authorized"], info["code"] = self.mobile_device_status()
+            return self.send_json(info)
+        if not origin or self.headers.get_content_type() != "application/json":
+            return self.send_json({"ok": False, "message": "请使用 fnAudio 的收藏授权页面。"}, 403)
+        action = payload.get("action")
+        if mode == "fnos" and action == "approve":
+            if netease_mobile.approve_device(self.server.config, payload.get("code")):
+                return self.send_json(info)
+            return self.send_json({"ok": False, "message": "授权码无效、已使用或已过期。"}, 400)
+        if mode == "fnos" and action == "revoke":
+            netease_mobile.revoke_devices(self.server.config)
+            return self.send_json(info)
+        if self.mobile_same_origin() and action == "request":
+            info["authorized"], info["code"] = self.mobile_device_status()
+            if info["authorized"] or info["code"]:
+                return self.send_json(info)
+            token, info["code"] = netease_mobile.request_approval(self.server.config)
+            if not token:
+                return self.send_json({"ok": False, "message": "待确认的授权过多，请稍后再试。"}, 429)
+            cookie = netease_mobile.device_cookie(token, netease_mobile.SESSION_SECONDS + netease_mobile.APPROVAL_SECONDS)
+            return self.send_json(info, extra_headers={"Set-Cookie": cookie})
+        return self.send_json({"ok": False, "message": "当前入口无权执行此操作。"}, 403)
 
     def send_xml(self, body, status=200, content_type="text/xml; charset=utf-8", head_only=False):
         body, valid = serialize_xml_response(body)
@@ -983,7 +1028,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "state": state})
 
     def serve_netease_stream(self, value, head_only=False):
-        if (self.client_address[0] not in ("127.0.0.1", "::1")
+        if (self.mobile_proxy or self.client_address[0] not in ("127.0.0.1", "::1")
                 or self.headers.get("X-Fnaudio-Internal")):
             return self.send_json({"ok": False, "message": "此地址仅供 NAS 播放器使用"}, 403)
         if not netease_song_id("netease:" + value):
@@ -1048,6 +1093,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if requires_resource_auth(path) and not self.authorize_api_request("HEAD" if head_only else "GET", path):
             return
+        if path == NETEASE_MOBILE_PATH:
+            return self.serve_netease_mobile()
         if path.startswith("/api/netease/"):
             return self.serve_netease_catalog(path, query)
         if path == "/api/health":
@@ -1603,6 +1650,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         if parsed.path == NETEASE_FAVORITE_PATH:
             return self.set_netease_favorite(payload)
+        if parsed.path == NETEASE_MOBILE_PATH:
+            return self.serve_netease_mobile(payload)
         if parsed.path == "/api/state/user":
             try:
                 revision = payload.get("revision")
@@ -2507,6 +2556,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(503, str(exc))
         except OSError as exc:
             return self.send_error(502, "failed to start ffmpeg: %s" % exc)
+
+
+class MobileProxyHandler(Handler):
+    mobile_proxy = True
+
+    def run_request(self, callback, *args, **kwargs):
+        host = self.server.mobile_origin.removeprefix("https://")
+        if (self.headers.get("X-Forwarded-Proto") != "https"
+                or (self.headers.get("X-Forwarded-Host") or self.headers.get("Host")) != host):
+            self.close_connection = True
+            return self.send_error(403)
+        if (not self.path.startswith("/") or self.path.startswith(("//", "/dlna/"))
+                or self.command in ("SUBSCRIBE", "UNSUBSCRIBE")):
+            return self.send_error(404)
+        return super().run_request(callback, *args, **kwargs)
+
+    def trim_api_token(self):
+        return ""
 
 
 def public_item(item, config=None):
@@ -3810,6 +3877,7 @@ def main():
     web_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
     save_proxy_port(web_root, args.port)
     server = None
+    mobile_server = None
     try:
         try:
             server = BoundedThreadingHTTPServer((args.host, args.port), Handler, config.get("http_max_workers", 32))
@@ -3885,9 +3953,26 @@ def main():
         if not MUSIC_CACHE["stamp"]:
             request_library_refresh(config, False)
         start_library_watcher(config)
+        origin = config.get("netease_mobile_origin")
+        if isinstance(origin, str) and re.fullmatch(r"https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?", origin):
+            try:
+                mobile_server = BoundedThreadingHTTPServer(
+                    ("127.0.0.1", netease_mobile.PROXY_PORT), MobileProxyHandler, config.get("http_max_workers", 32),
+                )
+            except OSError as exc:
+                print("fnAudio NetEase mobile HTTPS backend unavailable: %s" % exc, flush=True)
+            else:
+                mobile_server.config = config
+                mobile_server.config_path = args.config
+                mobile_server.web_root = web_root
+                mobile_server.mobile_origin = server.mobile_origin = origin
+                threading.Thread(target=mobile_server.serve_forever, name="fnaudio-mobile-http", daemon=True).start()
         print("fnAudio listening on %s:%s, library=%s" % (args.host, args.port, config["library_path"]), flush=True)
         server.serve_forever()
     finally:
+        if mobile_server is not None:
+            mobile_server.shutdown()
+            mobile_server.server_close()
         shutdown_runtime(server)
 
 

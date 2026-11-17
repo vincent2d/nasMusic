@@ -303,6 +303,10 @@
             </div>
           </section>
           <section id="settings-pane-advanced" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-pane="advanced" hidden>
+            <div class="settings-group" data-settings-block="advanced-netease">
+              <div class="settings-group-head"><h3>网易云收藏</h3></div>
+              <button type="button" id="openNeteaseMobileAuth" class="secondary-button">手机收藏授权</button>
+            </div>
             <div class="settings-group" data-settings-block="advanced-cache">
               <div class="settings-group-head"><h3>歌词缓存</h3><span class="settings-badge is-save">需保存</span></div>
               <p class="dialog-help">本地歌词正文的内存缓存上限，超预算时自动淘汰最旧的歌词，不改变磁盘上的歌词文件。调小缓存后保存会立刻淘汰已缓存的歌词。</p>
@@ -333,6 +337,23 @@
         <button id="saveDlnaSettingsBtn" type="button">保存 DLNA 设置</button>
       </div>
     </div>
+  </dialog>
+  <dialog id="neteaseMobileDialog" aria-labelledby="neteaseMobileTitle">
+    <div class="dialog-head">
+      <h2 id="neteaseMobileTitle">手机收藏授权</h2>
+      <form method="dialog"><button class="icon-button dialog-close-button" type="submit" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></form>
+    </div>
+    <p class="dialog-help" id="neteaseMobileHelp"></p>
+    <p><a id="neteaseMobileLink" hidden>打开手机入口</a></p>
+    <strong id="neteaseMobileCode" hidden></strong>
+    <form id="neteaseMobileApprove" hidden>
+      <div class="path-entry single"><input name="code" placeholder="手机上显示的授权码" aria-label="手机上显示的授权码" minlength="12" maxlength="12" autocomplete="off" required></div>
+      <button type="submit" class="secondary-button">确认授权</button>
+      <button type="button" class="secondary-button" id="neteaseMobileRevoke">撤销所有手机授权</button>
+    </form>
+    <button type="button" class="secondary-button" id="neteaseMobileRequest" hidden>获取授权码</button>
+    <button type="button" class="secondary-button" id="neteaseMobileContinue" hidden>我已确认授权</button>
+    <p class="settings-pane-status" id="neteaseMobileStatus" role="status"></p>
   </dialog>
   <dialog id="libraryDirDialog" aria-labelledby="libraryDirDialogTitle"><div class="dialog-head"><h2 id="libraryDirDialogTitle">选择音乐目录</h2><button class="icon-button dialog-close-button" id="closeLibraryDirDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="libraryDirPath">正在读取目录...</p><div class="library-dir-toolbar"><button class="secondary-button" id="libraryDirUpBtn" type="button">上一级</button><button class="secondary-button" id="libraryDirAddBtn" type="button">添加当前目录</button></div><div class="library-dir-list" id="libraryDirList" role="list"></div><p class="settings-pane-status" id="libraryDirStatus" aria-live="polite"></p></dialog>
   <dialog id="dlnaDiagnosticsDialog" aria-labelledby="dlnaDiagnosticsDialogTitle"><div class="dialog-head"><h2 id="dlnaDiagnosticsDialogTitle">DLNA 兼容性记录</h2><button class="icon-button dialog-close-button" id="closeDlnaDiagnosticsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg></button></div><p class="dialog-help" id="dlnaDiagnosticsSummary"></p><div class="diagnostics-list" id="dlnaDiagnosticsList"></div><button class="secondary-button" id="refreshDlnaDiagnosticsBtn" type="button">刷新记录</button></dialog>

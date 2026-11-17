@@ -142,6 +142,11 @@ def ensure_state_schema(conn: sqlite3.Connection) -> None:
             track_id TEXT PRIMARY KEY,
             created_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS netease_mobile_devices (
+            digest TEXT PRIMARY KEY,
+            code TEXT UNIQUE,
+            expires INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS playlists (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,

@@ -10952,6 +10952,76 @@ function removeFavorite(trackId) {
   saveFavorites();
   refreshFavoritePresentation();
 }
+let neteaseMobileIntent = null;
+async function refreshNeteaseMobileAuth(action = "", code = "") {
+  const dialog = $("neteaseMobileDialog");
+  const status = $("neteaseMobileStatus");
+  status.textContent = "正在读取授权…";
+  try {
+    const result = await fetchJsonResponseBounded("api/netease/mobile", action ? {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, code }),
+    } : {});
+    if (!dialog.open) return;
+    const info = result.data || {};
+    if (!result.response.ok || info.ok !== true) throw new Error(info.message || "无法读取手机授权。");
+
+    const help = $("neteaseMobileHelp");
+    const link = $("neteaseMobileLink");
+    const shownCode = $("neteaseMobileCode");
+    link.hidden = !info.url || info.mode === "phone";
+    if (!link.hidden) link.href = info.url;
+    shownCode.textContent = info.code || "";
+    shownCode.hidden = !info.code;
+    $("neteaseMobileApprove").hidden = info.mode !== "fnos" || !info.url;
+    $("neteaseMobileRequest").hidden = info.mode !== "phone" || info.authorized || !!info.code;
+    $("neteaseMobileContinue").hidden = info.mode !== "phone" || !info.code;
+    status.textContent = "";
+
+    if (info.mode === "phone") {
+      if (info.authorized && neteaseMobileIntent) {
+        const { trackId, liked } = neteaseMobileIntent;
+        neteaseMobileIntent = null;
+        dialog.close();
+        syncNeteaseFavorite(trackId, liked);
+        return;
+      }
+      help.textContent = info.authorized ? "此设备已授权，可以同步网易云收藏。"
+        : info.code ? "在飞牛桌面打开 fnAudio，进入「设置 → 高级 → 手机收藏授权」，输入下方授权码。授权码 10 分钟内有效。"
+          : "获取授权码后，用已登录的飞牛桌面确认一次。";
+    } else if (info.mode === "fnos" && info.url) {
+      help.textContent = "在手机桌面的 fnAudio 里获取授权码，再到这里确认。";
+      if (action === "approve") {
+        $("neteaseMobileApprove").reset();
+        status.textContent = "已授权，回手机继续收藏。";
+      } else if (action === "revoke") {
+        status.textContent = "已撤销所有手机的收藏授权。";
+      }
+    } else {
+      help.textContent = info.url ? "请把 HTTPS 手机入口添加到主屏幕，再从桌面图标获取授权码。"
+        : "手机 HTTPS 入口尚未配置。当前可在飞牛应用入口同步收藏。";
+    }
+  } catch (error) {
+    status.textContent = error.message || "手机授权失败，请重试。";
+  }
+}
+function openNeteaseMobileAuth(intent = null) {
+  const dialog = $("neteaseMobileDialog");
+  neteaseMobileIntent = intent;
+  if (!dialog.open) dialog.showModal();
+  return refreshNeteaseMobileAuth();
+}
+$("openNeteaseMobileAuth").onclick = () => openNeteaseMobileAuth();
+$("neteaseMobileRequest").onclick = () => refreshNeteaseMobileAuth("request");
+$("neteaseMobileContinue").onclick = () => refreshNeteaseMobileAuth();
+$("neteaseMobileApprove").onsubmit = event => {
+  event.preventDefault();
+  refreshNeteaseMobileAuth("approve", event.currentTarget.elements.code.value);
+};
+$("neteaseMobileRevoke").onclick = () => {
+  if (confirm("撤销所有手机的网易云收藏授权？")) refreshNeteaseMobileAuth("revoke");
+};
 async function syncNeteaseFavorite(trackId, liked) {
   if (state.neteaseFavoritePending) return;
   state.neteaseFavoritePending = true;
@@ -10963,8 +11033,12 @@ async function syncNeteaseFavorite(trackId, liked) {
       body: JSON.stringify({ track_id: trackId, liked }),
     }, 29000);
     const data = result.data || {};
+    if (result.response.status === 403 && data.error === "netease_mobile_authorization_required") {
+      openNeteaseMobileAuth({ trackId, liked });
+      return;
+    }
     if (!result.response.ok || data.ok !== true || !data.state) {
-      throw new Error(data.message || "收藏同步失败，请从飞牛桌面打开 fnAudio 后重试。");
+      throw new Error(data.message || "网易云收藏同步失败，请重试。");
     }
     applyUserMediaAcknowledgement(data.state);
     if (liked && state.view === "favorites") hydrateReferencedItems();
