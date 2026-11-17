@@ -20,18 +20,21 @@ from services.mpd_service import (
 
 
 class MpdQueueTests(unittest.TestCase):
-    def test_online_entries_join_the_native_queue_by_stable_id(self):
+    def test_online_and_local_entries_share_a_native_queue(self):
         service = self.make_service()
         service.config["server_port"] = 53300
         tracks = [TrackRef.from_mapping({"id": f"netease:{number}", "url": "https://ignored.invalid"})
                   for number in (123, 456)]
+        local_path = "/fixture/song.flac"
+        tracks.insert(1, TrackRef.from_mapping({"id": "local", "path": local_path}))
         with mock.patch("services.mpd_service.mpd_replace_queue", return_value={
-            "ok": True, "song_ids": {"netease:123": "1", "netease:456": "2"},
+            "ok": True, "song_ids": {"netease:123": "1", "local": "2", "netease:456": "3"},
         }) as replace:
             result = service.sync_playback_queue(tracks, "netease:123")
-        self.assertEqual(result["queue_count"], 2)
+        self.assertEqual(result["queue_count"], 3)
         self.assertEqual([row["uri"] for row in replace.call_args.args[0]], [
             "http://127.0.0.1:53300/internal/netease/123",
+            service.uri_for_path(local_path),
             "http://127.0.0.1:53300/internal/netease/456",
         ])
 

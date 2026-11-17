@@ -1,7 +1,8 @@
-"""Read-only NetEase catalog and playback access through MusicBox and NetEase."""
+"""NetEase catalog, playback and account favorites through MusicBox."""
 
 import json
 import re
+import subprocess
 import threading
 from collections import OrderedDict
 from urllib.parse import urlencode, urlsplit
@@ -14,6 +15,18 @@ _ID = re.compile(r"[1-9][0-9]{0,19}")
 _MAX_PAYLOAD = 2 * 1024 * 1024
 _MAX_CACHED_TRACKS = 2048
 _HTTP = build_opener(ProxyHandler({}))
+_LIKE_COMMAND = (
+    "/usr/bin/docker", "exec", "fnmusic-sources", "python", "-c", """
+import sys
+from NEMbox.api import NetEase
+
+api = NetEase()
+if not (api.get_account_info().get("account") or {}).get("id"):
+    print("not_logged_in")
+else:
+    print("ok" if api.song_like(int(sys.argv[1]), like=sys.argv[2] == "true") else "rejected")
+""",
+)
 
 
 class MusicBoxError(RuntimeError):
@@ -196,6 +209,23 @@ class MusicBox:
 
     def recommended_playlist(self, playlist_id):
         return self._remember(_request(f"/public-playlists/{playlist_id}/tracks"))
+
+    def set_liked(self, value, liked):
+        if not isinstance(value, str) or not _ID.fullmatch(value) or type(liked) is not bool:
+            raise ValueError("invalid NetEase favorite")
+        try:
+            reply = subprocess.run(
+                (*_LIKE_COMMAND, value, "true" if liked else "false"),
+                capture_output=True, text=True, timeout=25, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MusicBoxError("网易云未确认收藏操作，请重试。") from exc
+        result = reply.stdout.strip()
+        if reply.returncode == 0 and result == "ok":
+            return
+        if reply.returncode == 0 and result == "not_logged_in":
+            raise MusicBoxError("请在 fnMusic 扩展管理中登录网易云")
+        raise MusicBoxError("网易云未确认收藏操作，请重试。")
 
     def stream(self, value):
         row = _request(f"/song/{value}/url", quality="exhigh")

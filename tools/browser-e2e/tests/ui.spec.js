@@ -99,6 +99,80 @@ test("NetEase discovery preserves playlist position and updates the current trac
   expect(await scroll.evaluate(node => node.scrollTop)).toBeCloseTo(before, 0);
 });
 
+test("NetEase favorite waits for account confirmation and the mixed favorites list routes both sources", async ({ page }) => {
+  const target = "mpd:alsa:pch:dev0";
+  const song = { id: "netease:123", title: "在线歌曲", artist: "测试歌手", format: "网易云", duration: 150 };
+  const userState = { initialized: true, revision: 1, favorites: ["fixture-1"], playlists: [], playback: { target_id: target } };
+  await page.route("**/api/state/user", route => route.fulfill({ json: { ok: true, state: userState } }));
+  await page.route("**/api/netease/recommended-playlists", route => route.fulfill({ json: { ok: true, playlists: [] } }));
+  await page.route("**/api/netease/daily", route => route.fulfill({ json: { ok: true, items: [song] } }));
+  await page.route("**/api/playback/targets**", route => route.fulfill({ json: {
+    current_target: target, current_target_name: "NAS", targets: [
+      { id: "local", name: "当前设备" }, { id: target, name: "NAS", kind: "mpd" },
+    ],
+  } }));
+  await page.route("**/api/playback/events**", route => route.abort());
+  await page.route("**/api/playback/queue", route => route.fulfill({
+    json: { ok: true, core: { current: route.request().postDataJSON().current_id } },
+  }));
+  await page.route("**/api/playback/load", route => route.fulfill({
+    json: { ok: true, core: { current: route.request().postDataJSON().track_id, transport: "PLAYING" } },
+  }));
+  let fail = true;
+  await page.route("**/api/netease/favorite", async route => {
+    const payload = route.request().postDataJSON();
+    expect(payload.track_id).toBe(song.id);
+    if (fail) return route.fulfill({ status: 502, json: { ok: false, message: "测试同步失败" } });
+    userState.revision += 1;
+    userState.favorites = payload.liked ? [song.id, "fixture-1"] : ["fixture-1"];
+    return route.fulfill({ json: { ok: true, state: userState } });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".track")).toHaveCount(4);
+  await page.locator("#mobileNavBtn").click();
+  await page.locator("#neteaseBtn").click();
+  await page.locator('[data-netease-action="daily"]').click();
+  const online = page.getByRole("button", { name: "播放 在线歌曲" });
+  await expect(online).toBeVisible();
+  await page.locator("#neteaseOutput").click();
+  await expect(page.locator('#deviceList [data-target="mpd:alsa:pch:dev0"]')).toHaveClass(/is-current/);
+  await page.locator("#closeDialog").click();
+  const loadOnline = page.waitForRequest(request => request.url().endsWith("/api/playback/load"));
+  await online.click();
+  expect((await loadOnline).postDataJSON()).toMatchObject({ target_id: target, track_id: song.id });
+  const heart = page.locator("#favoriteCurrentBtn");
+  const failure = page.waitForEvent("dialog");
+  const failedClick = heart.click();
+  const alert = await failure;
+  expect(alert.message()).toBe("测试同步失败");
+  await alert.accept();
+  await failedClick;
+  await expect(heart).toHaveAttribute("aria-pressed", "false");
+
+  fail = false;
+  const like = page.waitForRequest(request => request.url().endsWith("/api/netease/favorite"));
+  await heart.click();
+  expect((await like).postDataJSON().liked).toBe(true);
+  await expect(heart).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#mobileNavBtn").click();
+  await page.locator('.sidebar [data-view="favorites"]').click();
+  const onlineRow = page.locator('.track[data-track-id="netease:123"]');
+  const localRow = page.locator('.track[data-track-id="fixture-1"]');
+  await expect(onlineRow.locator(".favorite-source")).toHaveText("网易云");
+  await expect(localRow.locator(".favorite-source")).toHaveText("本地");
+  for (const [row, id] of [[localRow, "fixture-1"], [onlineRow, song.id]]) {
+    const load = page.waitForRequest(request => request.url().endsWith("/api/playback/load"));
+    await row.locator(".track-main").click();
+    expect((await load).postDataJSON()).toMatchObject({ target_id: target, track_id: id });
+  }
+  const unlike = page.waitForRequest(request => request.url().endsWith("/api/netease/favorite"));
+  await heart.click();
+  expect((await unlike).postDataJSON().liked).toBe(false);
+  await expect(onlineRow).toHaveCount(0);
+  await expect(localRow).toHaveCount(1);
+});
+
 test("first-screen metrics expose bounded list, cover and metadata evidence", async ({ page }) => {
   await loadLibrary(page, { width: 1440, height: 900 });
   const metrics = await page.evaluate(() => window.__fnAudioUiMetricsSnapshot?.());

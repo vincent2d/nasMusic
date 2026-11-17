@@ -1,14 +1,73 @@
 from email.message import Message
 import io
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
 import netease_music
 from playback.core import PlaybackCore
 from server import Handler, playback_queue
+from state_store import load_user_state, save_netease_favorite, save_user_state
 
 
 class NeteaseMusicTests(unittest.TestCase):
+    def test_favorite_write_requires_the_fn_os_gateway(self):
+        path = "/api/netease/favorite"
+        for peer, headers in (
+            ("192.168.1.2", {}),
+            ("192.168.1.2", {"X-Fnaudio-Internal": "1"}),
+            ("127.0.0.1", {}),
+        ):
+            handler = mock.Mock(headers=headers, client_address=(peer, 51000))
+            self.assertFalse(Handler.authorize_api_request(handler, "POST", path))
+            self.assertEqual(handler.send_json.call_args.args[1], 403)
+        gateway = mock.Mock(headers={"X-Fnaudio-Internal": "1"}, client_address=("127.0.0.1", 51000))
+        self.assertTrue(Handler.authorize_api_request(gateway, "POST", path))
+
+    def test_favorite_requires_explicit_json_boolean_and_persists_only_after_success(self):
+        handler = mock.Mock(headers={"Content-Type": "text/plain"})
+        with tempfile.TemporaryDirectory() as cache:
+            handler.server.config = {"cache_dir": cache}
+            with mock.patch("server.NETEASE.set_liked") as provider:
+                Handler.set_netease_favorite(handler, {"track_id": "netease:123", "liked": True})
+                self.assertEqual(handler.send_json.call_args.args[1], 415)
+                handler.headers = {"Content-Type": "application/json; charset=utf-8"}
+                Handler.set_netease_favorite(handler, {"track_id": "netease:123", "liked": "true"})
+                self.assertEqual(handler.send_json.call_args.args[1], 400)
+                provider.assert_not_called()
+                provider.side_effect = netease_music.MusicBoxError("无法同步")
+                Handler.set_netease_favorite(handler, {"track_id": "netease:123", "liked": True})
+                self.assertEqual(handler.send_json.call_args.args[1], 502)
+                self.assertEqual(load_user_state(handler.server.config)["favorites"], [])
+                provider.side_effect = None
+                for liked, favorites in ((True, ["netease:123"]), (False, [])):
+                    Handler.set_netease_favorite(handler, {"track_id": "netease:123", "liked": liked})
+                    provider.assert_called_with("123", liked)
+                    self.assertEqual(handler.send_json.call_args.args[0]["state"]["favorites"], favorites)
+
+    def test_online_favorite_survives_a_full_or_stale_local_save(self):
+        with tempfile.TemporaryDirectory() as cache:
+            config = {"cache_dir": cache}
+            save_netease_favorite(config, "netease:123", True)
+            state = save_user_state(config, {"favorites": ["local", "netease:456"]})
+            self.assertCountEqual(state["favorites"], ["local", "netease:123"])
+            state = save_user_state(config, {"changes": {
+                "favorites_add": ["local-2", "netease:456"],
+                "favorites_remove": ["netease:123"],
+            }}, expected_revision=0)
+            self.assertCountEqual(state["favorites"], ["local", "local-2", "netease:123"])
+
+    def test_provider_uses_explicit_desired_state_and_reports_expired_login(self):
+        music = netease_music.MusicBox()
+        with mock.patch("netease_music.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, "ok\n", "")
+            music.set_liked("123", False)
+            self.assertEqual(run.call_args.args[0][-2:], ("123", "false"))
+            run.return_value = subprocess.CompletedProcess([], 0, "not_logged_in\n", "")
+            with self.assertRaisesRegex(netease_music.MusicBoxError, "登录网易云"):
+                music.set_liked("123", True)
+
     def test_online_queue_requires_a_nas_target_and_accepts_legacy_track_keys(self):
         core = PlaybackCore()
         with mock.patch("server.PLAYBACK_CORE", core):

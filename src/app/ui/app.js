@@ -1337,7 +1337,10 @@ function normalizeUserMediaState(source = {}) {
   return globalThis.fnAudioUserMediaStatePolicy.normalize(source);
 }
 function userStateChanges() {
-  return globalThis.fnAudioUserMediaStatePolicy.changes(state.userStateBase, { favorites: state.favorites, playlists: state.playlists });
+  const changes = globalThis.fnAudioUserMediaStatePolicy.changes(state.userStateBase, { favorites: state.favorites, playlists: state.playlists });
+  changes.favorites_add = changes.favorites_add.filter(id => !isNeteaseTrack(id));
+  changes.favorites_remove = changes.favorites_remove.filter(id => !isNeteaseTrack(id));
+  return changes;
 }
 function applyUserStateChanges(source, changes) {
   return globalThis.fnAudioUserMediaStatePolicy.apply(source, changes);
@@ -1348,6 +1351,15 @@ function persistUserMediaState(value) {
   writeStoredUserMedia(FAVORITE_STORE_KEY, state.favorites);
   writeStoredUserMedia(PLAYLIST_STORE_KEY, state.playlists);
   updateFavoriteControls();
+}
+function applyUserMediaAcknowledgement(serverState) {
+  const revision = userStateRevision(serverState.revision);
+  if (revision < (state.userStateMediaRevision || 0)) return;
+  const pending = userStateChanges();
+  state.userStateMediaRevision = revision;
+  state.userStateRevision = Math.max(state.userStateRevision || 0, revision);
+  state.userStateBase = normalizeUserMediaState(serverState);
+  persistUserMediaState(applyUserStateChanges(state.userStateBase, pending));
 }
 function userStatePayload() {
   return {
@@ -1403,11 +1415,7 @@ async function saveUserStateNow() {
     const response = result.response;
     const data = result.data || {};
     if (data.state && (response.ok || response.status === 409)) {
-      const latestChanges = userStateChanges();
-      const serverMedia = normalizeUserMediaState(data.state);
-      state.userStateBase = serverMedia;
-      state.userStateRevision = userStateRevision(data.state.revision, state.userStateRevision || 0);
-      persistUserMediaState(applyUserStateChanges(serverMedia, latestChanges));
+      applyUserMediaAcknowledgement(data.state);
       if (response.status === 409) state.userStateDirty = true;
     } else if (!response.ok || !globalThis.fnAudioResponseJsonLoader.parsedBody(result.bodyStatus)) {
       // A 200 whose body never made it here is not an acknowledgement: keep the
@@ -1464,8 +1472,11 @@ async function applyServerUserState(serverState) {
   // page.  Preserve a compact signature of only the state that can alter the
   // currently mounted song rows before applying it, so an identical remote
   // state does not cause a second full list render just after first paint.
+  const revision = userStateRevision(serverState.revision);
+  if (revision < (state.userStateMediaRevision || 0)) return false;
   const visibleSignatureBefore = visibleUserStatePresentationSignature();
-  state.userStateRevision = userStateRevision(serverState.revision);
+  state.userStateRevision = Math.max(state.userStateRevision || 0, revision);
+  state.userStateMediaRevision = revision;
   state.userStateBase = normalizeUserMediaState(serverState);
   persistUserMediaState(state.userStateBase);
   const remoteColumns = serverState?.ui?.track_columns;
@@ -1503,6 +1514,7 @@ async function refreshServerUserState() {
       const pendingChanges = userStateChanges();
       const visibleSignatureBefore = visibleUserStatePresentationSignature();
       await applyServerUserState(serverState);
+      if (state.userStateMediaRevision > revision) return;
       // applyServerUserState may await queue hydration or remote status. Any
       // local edit made during that wait is now represented by latestChanges;
       // retain both generations instead of letting the older snapshot win.
@@ -2130,10 +2142,13 @@ function updateFavoriteControls() {
   // read-only surface with no header buttons (R489).
   const node = $("favoriteCurrentBtn");
   if (!node) return;
-  node.disabled = isNeteaseTrack(item?.id);
+  const online = isNeteaseTrack(item?.id);
+  node.disabled = Boolean(online && state.neteaseFavoritePending);
   node.classList.toggle("active-control", active);
   node.setAttribute("aria-pressed", String(active));
-  const label = active ? "取消收藏当前歌曲" : "收藏当前歌曲";
+  const label = online
+    ? (active ? "同步取消网易云收藏" : "收藏到网易云和 fnAudio")
+    : (active ? "取消收藏当前歌曲" : "收藏当前歌曲");
   node.title = label;
   node.setAttribute("aria-label", label);
 }
@@ -3631,8 +3646,10 @@ function renderTrack(item, index = 0, columns = activeTrackColumns()) {
   // scheduler attaches/loads the image. Hiding it for every row created a
   // blank tile between the list commit and IntersectionObserver hydration.
   const coverFallback = `<span class="track-cover-fallback">${recordPlaceholderMarkup()}</span>`;
-  const titleCell = `<div class="track-main" data-play="${escapeHtml(item.id)}"><div class="track-cover">${coverImage}${coverFallback}</div><div class="track-info"><div class="track-title-line"><strong class="track-title">${escapeHtml(displayTrackTitle(item))}</strong>${playingIndicator}</div><span class="mobile-track-subtitle">${escapeHtml(mobileSubtitle)}</span></div></div>`;
-  const rowSignature = trackRowMarkupSignature(item, index, columns, columnValues, localCover);
+  const source = state.view === "favorites" ? (isNeteaseTrack(item.id) ? "网易云" : "本地") : "";
+  const sourceBadge = source ? `<span class="favorite-source${isNeteaseTrack(item.id) ? " is-online" : ""}">${source}</span>` : "";
+  const titleCell = `<div class="track-main" data-play="${escapeHtml(item.id)}"><div class="track-cover">${coverImage}${coverFallback}</div><div class="track-info"><div class="track-title-line"><strong class="track-title">${escapeHtml(displayTrackTitle(item))}</strong>${sourceBadge}${playingIndicator}</div><span class="mobile-track-subtitle">${escapeHtml(mobileSubtitle)}</span></div></div>`;
+  const rowSignature = trackRowMarkupSignature(item, index, columns, columnValues, localCover) + source;
   return `<div class="track${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}" data-track-row-key="${escapeHtml(rowKey)}" data-track-row-signature="${escapeHtml(rowSignature)}" data-track-id="${escapeHtml(item.id)}"${hasQueuePosition ? ` data-queue-index="${queueIndex}"` : ""}>
     ${columns.map(key => key === "title" ? titleCell : `<span class="track-cell track-cell-${key}${key === "format" && item.is_dsd === true ? " dsd" : ""}">${columnValues[key] || "—"}</span>`).join("")}
   </div>`;
@@ -4765,7 +4782,8 @@ async function addSelectedToQueue(ids = []) {
   return addTracksToQueue(selectedItems(ids));
 }
 async function playTracks(tracks = [], currentId = "") {
-  const items = (tracks || []).filter(item => item && item.id);
+  const localFavorites = state.view === "favorites" && !isMpdTarget() && !isNeteaseTrack(currentId || tracks?.[0]?.id);
+  const items = (tracks || []).filter(item => item && item.id && (!localFavorites || !isNeteaseTrack(item.id)));
   if (!items.length) return;
   try {
     await commitQueue(items, currentId || items[0].id);
@@ -4939,9 +4957,10 @@ async function playById(id) {
   state.transcodeCacheReady = false;
   state.playSourceKind = "";
   const queue = state.queue.some(x => String(x.id) === String(id)) ? [...state.queue] : [...state.queue, item];
+  const localFavorites = state.view === "favorites" && !isMpdTarget() && !isNeteaseTrack(id);
   const previousIndex = state.index;
   try {
-    await commitQueue(queue, id);
+    await commitQueue(localFavorites ? queue.filter(track => !isNeteaseTrack(track.id)) : queue, id);
   } catch (error) {
     alert(error.message || "播放队列保存失败");
     return;
@@ -10655,6 +10674,7 @@ function runTrackAction(action) {
   else if (action === "play") playSelectedTracks(selected);
   else if (action === "play-from-current") playFromCurrentTrack(trackId);
   else if (action === "queue") addSelectedToQueue(selected);
+  else if (action === "favorite" && selected.length === 1 && isNeteaseTrack(selected[0])) toggleFavorite(selected[0]);
   else if (action === "favorite") toggleSelectedFavorites(selected);
   else if (action === "favorite-add") addSelectedFavorites(selected);
   else if (action === "playlist") openPlaylistDialogForTracks(selected);
@@ -10897,7 +10917,8 @@ function invalidateLibraryResponseCacheForMetadataRevision() {
 }
 function toggleFavorite(trackId) {
   const id = String(trackId);
-  if (isNeteaseTrack(id) || !itemById(id)) return;
+  if (isNeteaseTrack(id)) return syncNeteaseFavorite(id, !isFavorite(id));
+  if (!itemById(id)) return;
   if (isFavorite(id)) state.favorites = state.favorites.filter(x => x !== id);
   else state.favorites.unshift(id);
   saveFavorites();
@@ -10916,7 +10937,7 @@ function toggleSelectedFavorites(ids = []) {
   refreshFavoritePresentation();
 }
 function addSelectedFavorites(ids = []) {
-  const valid = (ids || []).map(String).filter(id => itemById(id));
+  const valid = (ids || []).map(String).filter(id => !isNeteaseTrack(id) && itemById(id));
   if (!valid.length) return;
   const existing = new Set(state.favorites.map(String));
   const additions = valid.filter(id => !existing.has(id));
@@ -10926,9 +10947,34 @@ function addSelectedFavorites(ids = []) {
   refreshFavoritePresentation();
 }
 function removeFavorite(trackId) {
+  if (isNeteaseTrack(trackId)) return syncNeteaseFavorite(String(trackId), false);
   state.favorites = state.favorites.filter(x => x !== String(trackId));
   saveFavorites();
   refreshFavoritePresentation();
+}
+async function syncNeteaseFavorite(trackId, liked) {
+  if (state.neteaseFavoritePending) return;
+  state.neteaseFavoritePending = true;
+  updateFavoriteControls();
+  try {
+    const result = await fetchJsonResponseBounded("api/netease/favorite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: trackId, liked }),
+    }, 29000);
+    const data = result.data || {};
+    if (!result.response.ok || data.ok !== true || !data.state) {
+      throw new Error(data.message || "收藏同步失败，请从飞牛桌面打开 fnAudio 后重试。");
+    }
+    applyUserMediaAcknowledgement(data.state);
+    if (liked && state.view === "favorites") hydrateReferencedItems();
+    refreshFavoritePresentation();
+  } catch (error) {
+    alert(error.message || "网易云收藏同步失败，请重试。");
+  } finally {
+    state.neteaseFavoritePending = false;
+    updateFavoriteControls();
+  }
 }
 function toggleCurrentFavorite() {
   const item = currentItem();

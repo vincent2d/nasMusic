@@ -97,6 +97,21 @@ h1, h2, h3 { color: var(--ui-text) !important; font-style: normal; overflow-wrap
 .track.is-selected, .track.is-selected:hover, .album-group-row.is-selected, .group-row.is-selected { background: var(--ui-selected) !important; box-shadow: none !important; }
 .track.is-current:not(.is-selected) .track-title { color: var(--ui-accent) !important; }
 .track.is-current:not(.is-selected) .track-cover { background: var(--ui-selected) !important; }
+.favorite-source {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--ui-hover);
+  color: var(--ui-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.favorite-source.is-online {
+  background: var(--ui-selected);
+  color: var(--ui-accent);
+}
+
 .track-playing-indicator {
   background: var(--ui-selected) !important;
   color: var(--ui-accent) !important;

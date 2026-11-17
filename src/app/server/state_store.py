@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable
 
 from file_permissions import secure_directory, secure_sqlite_files
+from netease_music import song_id as netease_song_id
 from state_count_policy import (CHILD_INTEGRITY_VERIFIED,
                                 child_integrity_is_recorded,
                                 children_are_within_budget)
@@ -355,7 +356,7 @@ def load_user_state(config: Dict[str, Any]) -> Dict[str, Any]:
         revision = _revision(conn)
     playback = _mapping_or_empty(_load_json_bounded(session["payload"] if session else "{}"))
     ui = _ui_preferences(_load_json_bounded(ui_row["payload"] if ui_row else "{}"))
-    return {"initialized": bool(session or ui_row), "revision": revision, "favorites": favorites, "playlists": playlists, "playback": playback, "ui": ui}
+    return {"initialized": bool(session or ui_row or favorites), "revision": revision, "favorites": favorites, "playlists": playlists, "playback": playback, "ui": ui}
 
 
 def _trim_persisted_favorites(conn: sqlite3.Connection) -> None:
@@ -404,14 +405,16 @@ def save_user_state(config: Dict[str, Any], payload: Dict[str, Any], expected_re
         if expected_revision is not None and expected_revision != current_revision:
             if changes is None:
                 raise StateConflict("state changed by another client")
-            conn.executemany("DELETE FROM favorites WHERE track_id = ?", [(track_id,) for track_id in changes["favorites_remove"]])
+            conn.executemany("DELETE FROM favorites WHERE track_id = ?", [
+                (track_id,) for track_id in changes["favorites_remove"] if not track_id.startswith("netease:")
+            ])
             # A batch add has to land in the client's newest-first order. Every
             # new row shares this save's timestamp, so the tie-break in
             # load_user_state (rowid DESC) decides the sequence: insert in
             # reverse and the first requested id keeps the highest rowid.
             conn.executemany(
                 "INSERT OR IGNORE INTO favorites(track_id, created_at) VALUES (?, ?)",
-                [(track_id, now) for track_id in reversed(changes["favorites_add"])],
+                [(track_id, now) for track_id in reversed(changes["favorites_add"]) if not track_id.startswith("netease:")],
             )
             for playlist_id in changes["playlist_delete"]:
                 conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
@@ -432,8 +435,12 @@ def save_user_state(config: Dict[str, Any], payload: Dict[str, Any], expected_re
                 )
             _trim_persisted_playlists(conn)
         else:
-            conn.execute("DELETE FROM favorites")
-            conn.executemany("INSERT INTO favorites(track_id, created_at) VALUES (?, ?)", [(track_id, now - index) for index, track_id in enumerate(favorites)])
+            # Online favorites are written only after the account sync succeeds.
+            # A full save from an older client must keep those records.
+            conn.execute("DELETE FROM favorites WHERE track_id NOT GLOB 'netease:*'")
+            conn.executemany("INSERT OR IGNORE INTO favorites(track_id, created_at) VALUES (?, ?)", [
+                (track_id, now - index) for index, track_id in enumerate(favorites) if not track_id.startswith("netease:")
+            ])
             conn.execute("DELETE FROM playlist_tracks")
             conn.execute("DELETE FROM playlists")
             for index, playlist in enumerate(playlists):
@@ -443,6 +450,21 @@ def save_user_state(config: Dict[str, Any], payload: Dict[str, Any], expected_re
             conn.execute("INSERT OR REPLACE INTO playback_sessions(id, payload, updated_at) VALUES (?, ?, ?)", ("default", playback_payload, now))
             conn.execute("INSERT OR REPLACE INTO ui_preferences(id, payload, updated_at) VALUES (?, ?, ?)", ("default", ui_payload, now))
         _trim_persisted_favorites(conn)
+        _next_revision(conn)
+    return load_user_state(config)
+
+
+def save_netease_favorite(config: Dict[str, Any], track_id: str, liked: bool) -> Dict[str, Any]:
+    if not netease_song_id(track_id) or type(liked) is not bool:
+        raise ValueError("invalid NetEase favorite")
+    with _STATE_WRITE_LOCK, state_db_connect(config) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if liked:
+            conn.execute("INSERT OR IGNORE INTO favorites(track_id, created_at) VALUES (?, ?)",
+                         (track_id, int(time.time())))
+            _trim_persisted_favorites(conn)
+        else:
+            conn.execute("DELETE FROM favorites WHERE track_id = ?", (track_id,))
         _next_revision(conn)
     return load_user_state(config)
 

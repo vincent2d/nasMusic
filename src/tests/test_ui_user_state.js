@@ -8,14 +8,15 @@ const policySource = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "us
 const responseJsonLoader = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "response_json_loader.js"), "utf8");
 const start = source.indexOf("function normalizeUserMediaState");
 const end = source.indexOf("async function loadServerUserState", start);
+const neteaseTrackPolicy = source.match(/^function isNeteaseTrack\(.+$/m)[0];
 assert.ok(start >= 0 && end > start, "Unable to locate user-state merge helpers");
 
 const context = vm.createContext({
   state: {
-    favorites: ["keep", "local-add"],
+    favorites: ["keep", "local-add", "netease:111"],
     playlists: [{ id: "local", name: "Local edit", trackIds: ["two"] }],
     userStateBase: {
-      favorites: ["keep", "removed-locally"],
+      favorites: ["keep", "removed-locally", "netease:222"],
       playlists: [
         { id: "local", name: "Before", trackIds: ["one"] },
         { id: "deleted", name: "Deleted", trackIds: ["old"] },
@@ -34,7 +35,7 @@ const context = vm.createContext({
 });
 // Mirror index.html's production load order: the pure policy module precedes app.js.
 vm.runInContext(policySource, context);
-vm.runInContext(source.slice(start, end), context);
+vm.runInContext(neteaseTrackPolicy + "\n" + source.slice(start, end), context);
 
 const changes = vm.runInContext("userStateChanges()", context);
 assert.deepEqual(Array.from(changes.favorites_add), ["local-add"]);
@@ -127,7 +128,7 @@ function userMediaShadowContext(failing) {
     parseStoredJson() { return []; },
   });
   vm.runInContext(policySource, context);
-  vm.runInContext(source.slice(guardedWriterStart, end), context);
+  vm.runInContext(neteaseTrackPolicy + "\n" + source.slice(revisionStart, revisionEnd) + source.slice(guardedWriterStart, end), context);
   return context;
 }
 function runUserMedia(context, code) {
@@ -173,6 +174,16 @@ assert.deepEqual(shadowKeys(), ["fnaudio.favorites", "fnaudio.playlists"],
 assert.deepEqual(JSON.parse(shadowCalls[0].value), ["two", "three"], "The favorites cache must hold the new ids");
 assert.deepEqual(JSON.parse(shadowCalls[1].value), [{ id: "q", name: "Q", trackIds: [] }], "The playlist cache must hold the new list");
 assert.equal(shadowRepaintCount(), 1);
+
+const acknowledged = userMediaShadowContext(false);
+acknowledged.state.userStateRevision = 12;
+acknowledged.state.userStateBase = { favorites: [], playlists: [] };
+vm.runInContext(`
+  applyUserMediaAcknowledgement({revision: 10, favorites: ["netease:123"], playlists: []});
+  applyUserMediaAcknowledgement({revision: 9, favorites: [], playlists: []});
+`, acknowledged);
+assert.deepEqual(Array.from(acknowledged.state.favorites), ["netease:123", "one"]);
+assert.equal(acknowledged.state.userStateRevision, 12);
 
 // Source-level sentinels: the writers must not regress to bare writes, and the
 // guard must swallow storage failures only.

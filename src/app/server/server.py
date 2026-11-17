@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -125,7 +126,7 @@ from playback.alsa_output import (
 from services.mpd_service import MpdService
 from services.audio_output_lease import AUDIO_OUTPUT_LEASE
 from services.airplay_service import AirplayService, airplay_probe
-from state_store import StateConflict, load_user_state, save_playback_session, save_user_state
+from state_store import StateConflict, load_user_state, save_netease_favorite, save_playback_session, save_user_state
 from state_projection import playback_queue_ids
 from playback_session_projection import project_playback_session
 from metadata_service import MAX_ARTWORK_BYTES, MetadataProviders, MetadataService
@@ -225,6 +226,8 @@ PLAYBACK_RESTORE_RETRY_LOCK = threading.Lock()
 PLAYBACK_RESTORE_RETRY_TIMER = None
 PLAYBACK_RESTORE_RETRY_GENERATION = 0
 PLAYBACK_COMMAND_LOCK = threading.RLock()
+NETEASE_FAVORITE_LOCK = threading.Lock()
+NETEASE_FAVORITE_PATH = "/api/netease/favorite"
 PLAYBACK_COMMAND_RESULTS = {}
 PLAYBACK_COMMAND_INFLIGHT = {}
 PLAYBACK_COMMAND_TTL_SECONDS = 30.0
@@ -883,8 +886,12 @@ class Handler(BaseHTTPRequestHandler):
         # token on some fnOS releases. They are still confined to loopback;
         # allow that explicit internal channel for local settings such as
         # manually configured music roots.
-        if (self.headers.get("X-Fnaudio-Internal") == "1"
-                and self.client_address[0] in ("127.0.0.1", "::1")):
+        trusted_cgi = (self.headers.get("X-Fnaudio-Internal") == "1"
+                       and self.client_address[0] in ("127.0.0.1", "::1"))
+        if method == "POST" and path == NETEASE_FAVORITE_PATH and not trusted_cgi:
+            self.send_json({"ok": False, "message": "请登录飞牛桌面并从应用入口打开 fnAudio，再同步网易云收藏。"}, 403)
+            return False
+        if trusted_cgi:
             return True
         scopes = (self.headers.get("X-Fnaudio-Scopes") or "").split(",")
         allowed, status, scope, message = authorize_api(
@@ -955,6 +962,25 @@ class Handler(BaseHTTPRequestHandler):
         except MusicBoxError as exc:
             return self.send_json({"ok": False, "message": str(exc)}, 502)
         return self.send_json({"ok": True, **result})
+
+    def set_netease_favorite(self, payload):
+        if (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() != "application/json":
+            return self.send_json({"ok": False, "message": "收藏操作需要 JSON 请求。"}, 415)
+        track_id = payload.get("track_id")
+        value = netease_song_id(track_id)
+        liked = payload.get("liked")
+        if not value or type(liked) is not bool:
+            return self.send_json({"ok": False, "message": "无效的网易云收藏操作。"}, 400)
+        with NETEASE_FAVORITE_LOCK:
+            try:
+                NETEASE.set_liked(value, liked)
+            except MusicBoxError as exc:
+                return self.send_json({"ok": False, "message": str(exc)}, 502)
+            try:
+                state = save_netease_favorite(self.server.config, track_id, liked)
+            except (OSError, sqlite3.Error):
+                return self.send_json({"ok": False, "message": "网易云已更新，fnAudio 收藏保存失败，请重试。"}, 500)
+        return self.send_json({"ok": True, "state": state})
 
     def serve_netease_stream(self, value, head_only=False):
         if (self.client_address[0] not in ("127.0.0.1", "::1")
@@ -1575,6 +1601,8 @@ class Handler(BaseHTTPRequestHandler):
                 apply_legacy_player_state(payload, STATE, PLAYBACK_CORE),
                 extra_headers=legacy_response_headers(parsed.path),
             )
+        if parsed.path == NETEASE_FAVORITE_PATH:
+            return self.set_netease_favorite(payload)
         if parsed.path == "/api/state/user":
             try:
                 revision = payload.get("revision")
