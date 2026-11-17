@@ -2189,6 +2189,15 @@ html, body {
     grid-row: 2 !important;
   }
 }
+.player-actions #playerSimilarBtn {
+  width: auto !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  padding: 0 4px !important;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 #neteaseDialog {
   width: min(38rem, calc(100vw - 2rem));
   max-height: min(78vh, 42rem);
@@ -2200,7 +2209,6 @@ html, body {
   padding: .5rem 1rem;
 }
 
-.netease-dialog-actions,
 #neteaseResults li {
   display: flex;
   align-items: center;
@@ -2238,6 +2246,13 @@ html, body {
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+#neteaseResults .nav-item::before {
+  content: "▶";
+  margin-inline-end: .5em;
+  color: var(--ui-accent);
+  font-size: .8em;
 }
 
 #neteaseResults .secondary-button {

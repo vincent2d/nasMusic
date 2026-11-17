@@ -2120,6 +2120,8 @@ function isPlayingNow() {
 }
 function updateFavoriteControls() {
   const item = currentItem();
+  const similar = $("playerSimilarBtn");
+  if (similar) similar.hidden = !isNeteaseTrack(item?.id);
   const active = Boolean(item && isFavorite(item.id));
   // Only the player bar carries a favorite action now: the lyrics page is a
   // read-only surface with no header buttons (R489).
@@ -4755,9 +4757,10 @@ async function playTracks(tracks = [], currentId = "") {
     return;
   }
   resetPlaybackProgress();
-  loadCurrent();
+  const waitForNas = isNeteaseTrack(currentItem()?.id);
+  const loading = loadCurrent();
   render();
-  return true;
+  return waitForNas ? await loading : true;
 }
 async function playSelectedTracks(ids = []) {
   // Selection is a list of ids and the id -> item lookups are bounded by the
@@ -4992,10 +4995,10 @@ async function loadCurrent() {
     alert("网易云歌曲仅在 NAS 播放，请先选择 NAS 音频输出。");
     return;
   }
-  const loadToken = ++state.playbackLoadToken;
   syncState();
   if (isRemoteTarget()) {
     stopLocalAudio();
+    const loadToken = state.playbackLoadToken;
     // A device load takes the output from the caster just as a local play does,
     // and the server ends that renderer session when it applies this load. Drop
     // the row here rather than after the reply: `updateRemoteUi` paints the cast
@@ -5035,12 +5038,12 @@ async function loadCurrent() {
     updateMediaSessionMetadata(item);
     updateMediaSessionPlaybackState();
     updateFavoriteControls();
-    pushToDevice(state.playTarget, item).then(loaded => {
-      if (loaded && loadToken === state.playbackLoadToken
-        && String(currentItem()?.id || "") === String(item.id || "")) {
-        setTimeout(refreshRemoteStatus, 300);
-      }
-    }).catch(() => {});
+    const loading = pushToDevice(state.playTarget, item).then(loaded => {
+      if (!loaded || loadToken !== state.playbackLoadToken
+        || String(currentItem()?.id || "") !== String(item.id || "")) return false;
+      setTimeout(refreshRemoteStatus, 300);
+      return true;
+    }).catch(() => false);
     nativeRemoteEnter(true);
     // Repaint on the click, not on the reply: the length comes from the library
     // row until the device declares its own, and `currentSeconds` now counts from
@@ -5049,13 +5052,14 @@ async function loadCurrent() {
     updateRemoteUi();
     syncPlayerProgress();
     updateNowMarquee();
-    return;
+    return loading;
   }
   // TODO.md:72 ruling D-2: reaching this point means the user asked *this* browser to
   // play, which now takes the output back from an incoming cast instead of decoding
   // both at once. The branch above is the opposite intent - the user pushed this
   // track to another device deliberately - so it preempt nothing. The call has no
   // suspension point, so the load token taken at the top still matches afterwards.
+  const loadToken = ++state.playbackLoadToken;
   preemptIncomingRendererForLocalPlayback();
   const needsMp3 = shouldTranscodeToMp3(item);
   if (needsMp3 && !state.transcodeCacheReady) {
@@ -10989,7 +10993,6 @@ function bindNeteaseDialog() {
   const playlists = $("neteasePlaylists");
   const results = $("neteaseResults");
   const playAll = $("neteasePlayAll");
-  const currentSimilar = $("neteaseCurrentSimilar");
   let tracks = [];
   let request = 0;
   let starting = false;
@@ -11001,9 +11004,15 @@ function bindNeteaseDialog() {
       return;
     }
     starting = true;
+    const revision = request;
+    status.textContent = "正在交给 NAS 播放…";
     try {
       cacheLibraryItems(tracks);
-      if (await playTracks(tracks, id)) dialog.close();
+      const playing = await playTracks(tracks, id);
+      if (revision === request) {
+        if (playing && dialog.open) dialog.close();
+        else if (!playing) status.textContent = "NAS 未能开始播放，请重试。";
+      }
     } finally {
       starting = false;
     }
@@ -11035,6 +11044,7 @@ function bindNeteaseDialog() {
         button.type = "button";
         button.className = "nav-item";
         button.textContent = [item.title, item.artist].filter(Boolean).join(" · ");
+        button.setAttribute("aria-label", `播放 ${button.textContent}`);
         button.addEventListener("click", () => play(item.id));
         const similar = document.createElement("button");
         similar.type = "button";
@@ -11058,11 +11068,12 @@ function bindNeteaseDialog() {
     }
   }
 
-  $("neteaseBtn").addEventListener("click", async () => {
-    const revision = request;
+  async function openDialog(item) {
     setMobileNavigation(false);
-    currentSimilar.hidden = !currentItem()?.id?.startsWith("netease:");
+    dialog.dataset.dialogInitialFocus = item ? "neteaseClose" : "neteaseKeyword";
     dialog.showModal();
+    if (item) showSimilar(item);
+    const revision = request;
     try {
       const data = await fetchJsonChecked("api/netease/playlists", {}, "无法读取网易云歌单");
       const selected = playlists.value;
@@ -11070,8 +11081,14 @@ function bindNeteaseDialog() {
         ...data.playlists.map(playlist => new Option(playlist.name, playlist.id)));
       playlists.value = selected;
     } catch (error) {
-      if (revision === request) status.textContent = error.message;
+      if (!item && revision === request) status.textContent = error.message;
     }
+  }
+
+  $("neteaseBtn").addEventListener("click", () => openDialog());
+  $("playerSimilarBtn")?.addEventListener("click", () => {
+    const item = currentItem();
+    if (isNeteaseTrack(item?.id)) openDialog(item);
   });
   $("neteaseSearch").addEventListener("submit", event => {
     event.preventDefault();
@@ -11083,7 +11100,6 @@ function bindNeteaseDialog() {
   playlists.addEventListener("change", () => {
     if (playlists.value) showTracks(`api/netease/playlists/${encodeURIComponent(playlists.value)}`);
   });
-  currentSimilar.addEventListener("click", () => showSimilar(currentItem()));
   playAll.addEventListener("click", () => play(tracks[0]?.id));
   $("neteaseOutput").addEventListener("click", () => {
     dialog.close();
