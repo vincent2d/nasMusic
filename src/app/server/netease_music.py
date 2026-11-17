@@ -102,12 +102,15 @@ class MusicBox:
                     continue
                 track_id = "netease:" + value
                 milliseconds = row.get("duration_ms")
+                if type(milliseconds) is not int:
+                    seconds = row.get("duration")
+                    milliseconds = seconds * 1000 if type(seconds) is int else 0
                 item = {
                     "id": track_id,
-                    "title": _text(row.get("name")) or "网易云歌曲",
+                    "title": _text(row.get("name")) or _text(row.get("song_name")) or "网易云歌曲",
                     "artist": _text(row.get("artist")),
                     "album": _text(row.get("album_name")),
-                    "duration": max(0, min(milliseconds, 86400000)) / 1000 if type(milliseconds) is int else 0,
+                    "duration": max(0, min(milliseconds, 86400000)) / 1000,
                     "cover_url": _netease_url(row.get("album_pic_url")),
                     "format": "网易云",
                 }

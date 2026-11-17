@@ -31,6 +31,15 @@ class NeteaseMusicTests(unittest.TestCase):
         self.assertNotIn("path", row)
         self.assertEqual(music.track(row["id"]), row)
 
+    def test_search_accepts_musicbox_cli_song_name_and_duration_in_seconds(self):
+        music = netease_music.MusicBox()
+        with mock.patch("netease_music._request", return_value=[{
+            "song_id": 254574, "song_name": "后来", "artist": "刘若英", "duration": 341,
+        }]):
+            row, = music.search("后来 刘若英")
+        self.assertEqual(row["title"], "后来")
+        self.assertEqual(row["duration"], 341)
+
     def test_similar_songs_follow_netease_order_and_use_musicbox_metadata(self):
         music = netease_music.MusicBox()
         recommendations = {"code": 200, "songs": [
