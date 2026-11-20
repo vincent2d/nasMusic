@@ -192,8 +192,8 @@ for (const [name, after, host] of [
 assert.match(guardSource(),
   /function writeStoredPreference\(key, value\) \{[\s\S]{0,600}?try \{[\s\S]{0,80}?localStorage\.setItem\(key, value\);[\s\S]{0,40}?\} catch \(_\) \{/,
   "the guarded writer must wrap exactly the storage call, and only that call");
-assert.equal(writesOf(app, "writeStoredPreference("), 5,
-  "the writer plus exactly the four preference call sites this round converted, no more");
+assert.equal(writesOf(app, "writeStoredPreference("), 7,
+  "the writer, four existing preferences, and search history save/clear must use the guarded writer");
 assert.match(app, /function writeStoredUserMedia\(key, value\) \{/,
   "the user-media writer stays separate: its payload is JSON, the preference payload is not");
 

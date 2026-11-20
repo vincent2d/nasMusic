@@ -556,7 +556,7 @@ if (targetAccepted < 0 || targetSwitch.includes('remoteControl("stop"')
 if (!source.includes("async function remoteControl(action, position = null, quiet = false) {\n  if (state.deviceSwitchInFlight || !isRemoteTarget()) return false;")
     || !source.includes("async function coreControl(action, position = null, payload = {}) {\n  if (state.deviceSwitchInFlight) return false;")
     || !source.includes("async function pushToDevice(deviceId, item = currentItem()) {\n  if (state.deviceSwitchInFlight) return false;")
-    || !source.includes('$("playBtn").onclick = () => {\n  if (state.deviceSwitchInFlight) return;')) {
+    || !source.includes('$("playBtn").onclick = event => withButtonLoading(event.currentTarget, async () => {\n  if (state.deviceSwitchInFlight) return;')) {
   throw new Error("Playback commands must be gated while a target transition is in flight");
 }
 requireText("A browser tab/WebView is a controller", "Leaving a browser/WebView must not stop a remote output");

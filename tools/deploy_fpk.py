@@ -4,7 +4,8 @@ Usage:
     python tools/deploy_fpk.py --host 192.168.5.141 --user root --password ... \
         --fpk artifacts/0.2.139/fnaudio-0.2.139-fnpack.fpk [--sudo]
 
-Both plain-root and password-sudo hosts are supported. The remote side keeps the
+Requires fnAudio to already be installed through App Center. Both plain-root and
+password-sudo hosts are supported. The remote side keeps the
 previous app/control trees under /vol1/1000/fnaudio/upgrade-backups/<stamp> and
 rolls back automatically if the new build fails to start.
 """
@@ -36,16 +37,18 @@ say(){ echo ">> $*"; }
 fail(){ echo "!! $*" >&2; exit 1; }
 
 start_app(){
-  TRIM_APPDEST="$APPDEST" TRIM_PKGETC="$CONF" TRIM_PKGVAR="$DATA" \
-    bash "$CONTROL/cmd/main" start
+  appcenter-cli start fnaudio
+}
+
+stop_app(){
+  appcenter-cli stop fnaudio
 }
 
 rollback(){
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "ROLLBACK rc=$rc" >&2
-    TRIM_APPDEST="$APPDEST" TRIM_PKGETC="$CONF" TRIM_PKGVAR="$DATA" \
-      bash "$CONTROL/cmd/main" stop >/dev/null 2>&1 || true
+    stop_app >/dev/null 2>&1 || true
     if [ -d "$BACKUP/control" ]; then rm -rf "$CONTROL"; mv "$BACKUP/control" "$CONTROL"; fi
     if [ -d "$BACKUP/app" ]; then rm -rf "$APPDEST"; mv "$BACKUP/app" "$APPDEST"; fi
     # The package's upgrade_callback rewrites $CONF/config.json, and that runs
@@ -63,10 +66,11 @@ rollback(){
   rm -rf "$RUN"
   exit "$rc"
 }
-trap rollback EXIT
-
 say "whoami=$(id -un) pkg=$PACKAGE"
 [ -f "$PACKAGE" ] || fail "package missing"
+command -v appcenter-cli >/dev/null 2>&1 || fail "fnOS App Center CLI missing"
+[ -f "$CONTROL/cmd/main" ] || fail "install fnAudio through App Center before redeploying"
+trap rollback EXIT
 mkdir -p "$BACKUP" "$RUN" || fail "cannot create work dirs"
 
 # Snapshot the settings as early as possible. The package's upgrade_callback
@@ -87,8 +91,7 @@ REDEPLOY=0
 if [ -f "$CONTROL/cmd/main" ]; then
   REDEPLOY=1
   say "stopping current instance"
-  TRIM_APPDEST="$APPDEST" TRIM_PKGETC="$CONF" TRIM_PKGVAR="$DATA" \
-    bash "$CONTROL/cmd/main" stop || say "stop returned non-zero (continuing)"
+  stop_app || fail "App Center could not stop fnAudio"
   for i in $(seq 1 20); do
     pgrep -f "fnaudio/server/server.py" >/dev/null 2>&1 || break
     sleep 0.5
@@ -115,8 +118,7 @@ if [ "$REDEPLOY" -eq 1 ] && [ -f "$CONTROL/cmd/upgrade_callback" ]; then
 fi
 
 say "starting"
-if ! TRIM_APPDEST="$APPDEST" TRIM_PKGETC="$CONF" TRIM_PKGVAR="$DATA" \
-      bash "$CONTROL/cmd/main" start; then
+if ! start_app; then
   echo 'START_FAILED_LOG_BEGIN' >&2
   tail -40 "$DATA/info.log" >&2 || true
   echo 'START_FAILED_LOG_END' >&2

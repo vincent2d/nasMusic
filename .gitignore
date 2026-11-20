@@ -40,6 +40,10 @@ artifacts/excluded-generated-cache/
 artifacts/*/fast-deploy-*.log
 
 # Local inspection output
+/artifacts/
+/CHANGELOG_AI.md
+/PROJECT_CONTEXT.md
+/TODO.md
 builds/
 $inspect/
 tmp-*/

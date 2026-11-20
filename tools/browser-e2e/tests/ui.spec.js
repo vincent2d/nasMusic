@@ -38,8 +38,218 @@ async function loadLibrary(page, viewport) {
   return consoleErrors;
 }
 
-test("NetEase discovery preserves playlist position and updates the current track in place", async ({ page }) => {
-  const target = "mpd:alsa:pch:dev0";
+test("mobile player keeps secondary actions in a roomy sheet and preserves desktop controls", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 780 });
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".track")).toHaveCount(4);
+  const more = page.locator("#playerMoreBtn");
+  const sheet = page.locator("#playerMoreDialog");
+  for (const viewport of [{ width: 320, height: 740 }, { width: 360, height: 780 }, { width: 390, height: 780 }, { width: 430, height: 844 }, { width: 667, height: 375 }]) {
+    await page.setViewportSize(viewport);
+    await expect(more).toBeVisible();
+    await expect(page.locator("#volumeBtn")).toBeHidden();
+    const geometry = await page.locator(".player").evaluate(player => {
+      const rect = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
+      return { player: rect(player), summary: rect(document.getElementById("nowPlayingSummary")), favorite: rect(document.getElementById("favoriteCurrentBtn")), more: rect(document.getElementById("playerMoreBtn")), transport: [...player.querySelectorAll(".transport button")].map(rect) };
+    });
+    expect(geometry.favorite.left - geometry.summary.right).toBeGreaterThanOrEqual(4);
+    expect(geometry.more.left - geometry.favorite.right).toBeGreaterThanOrEqual(8);
+    for (const rect of [geometry.favorite, geometry.more, ...geometry.transport]) {
+      expect(rect.width).toBeGreaterThanOrEqual(44);
+      expect(rect.height).toBeGreaterThanOrEqual(44);
+      expect(rect.left).toBeGreaterThanOrEqual(geometry.player.left);
+      expect(rect.right).toBeLessThanOrEqual(geometry.player.right);
+    }
+    for (let i = 1; i < geometry.transport.length; i++) expect(geometry.transport[i].left - geometry.transport[i - 1].right).toBeGreaterThanOrEqual(4);
+    if (viewport.width === 390) await page.screenshot({ path: info.outputPath("mobile-player-390.png") });
+    await more.click();
+    await expect(sheet).toBeVisible();
+    await expect(more).toHaveAttribute("aria-expanded", "true");
+    await expect(sheet.locator('[data-player-action="playerCommentsBtn"]')).toBeHidden();
+    await expect(sheet.locator('[data-player-action="playerSimilarBtn"]')).toBeHidden();
+    for (const rect of await sheet.locator("[data-player-action]:visible").evaluateAll(nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return { width: r.width, height: r.height }; }))) {
+      expect(rect.width).toBeGreaterThan(200);
+      expect(rect.height).toBeGreaterThanOrEqual(52);
+    }
+    if (viewport.width === 390) await page.screenshot({ path: info.outputPath("mobile-player-more-390.png") });
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+  }
+  await page.setViewportSize({ width: 390, height: 780 });
+  await more.click();
+  await sheet.getByRole("button", { name: "调节音量" }).click();
+  const volume = page.locator("#volumePanel");
+  await expect(sheet).toBeHidden();
+  await expect(volume).toBeVisible();
+  const before = await page.locator("#volume").inputValue();
+  await page.locator("#volumeDownBtn").click();
+  expect(Number(await page.locator("#volume").inputValue())).toBeLessThan(Number(before));
+  await more.click();
+  await expect(volume).toBeHidden();
+  await sheet.getByRole("button", { name: "播放设备" }).click();
+  await expect(page.locator("#deviceDialog")).toBeVisible();
+  await page.locator("#closeDialog").click();
+  await more.click();
+  await page.mouse.click(10, 80);
+  await expect(sheet).toBeHidden();
+  await more.click();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(sheet).toBeHidden();
+  await expect(more).toBeHidden();
+  await expect(page.locator("#volumeBtn")).toBeVisible();
+  await expect(page.locator("#deviceBtn")).toBeVisible();
+  await expect(page.locator("#lyricsBtn")).toBeVisible();
+});
+
+for (const width of [390, 1280]) {
+  test(`NetEase search history persists and comments paginate safely at ${width}px`, async ({ page }) => {
+    const song = { id: "netease:123", title: "测试歌曲", artist: "测试歌手", duration: 120, format: "网易云" };
+    await page.route("**/api/netease/recommended-playlists", route => route.fulfill({ json: { ok: true, playlists: [] } }));
+    let releaseSearch;
+    let holdSearch = true;
+    await page.route("**/api/netease/search?*", async route => {
+      if (holdSearch) await new Promise(resolve => { releaseSearch = resolve; setTimeout(resolve, 5000); });
+      await route.fulfill({ json: { ok: true, items: [song] } });
+    });
+    let failComments = true;
+    let releaseComments;
+    await page.route("**/api/netease/comments?*", async route => {
+      if (failComments) {
+        await new Promise(resolve => { releaseComments = resolve; setTimeout(resolve, 5000); });
+        return route.fulfill({ status: 502, json: { ok: false, message: "评论暂时不可用" } });
+      }
+      const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+      return route.fulfill({ json: { ok: true, total: 21, more: offset === 0, offset,
+        hot_comments: offset === 0 ? [{ user: "热门听众", content: "热门评论", likes: 9, time: 1700000000000 }] : [],
+        comments: [{ user: "听众", content: offset === 0 ? '<img src=x onerror="window.commentXss=true">\n第二行' : "第二页评论", likes: 1, time: 1700000000000 }],
+      } });
+    });
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".track")).toHaveCount(4);
+    if (width < 760) await page.locator("#mobileNavBtn").click();
+    await page.locator("#neteaseBtn").click();
+    await page.locator('[data-netease-tab="search"]').click();
+    const input = page.locator("#neteaseKeyword");
+    const history = page.locator("#neteaseSearchHistory");
+    const searchButton = page.locator('#neteaseSearch button[type="submit"]');
+    await input.click();
+    await expect(history).toContainText("暂无搜索历史");
+    await input.fill("周杰伦");
+    await searchButton.click();
+    await expect(searchButton).toHaveAttribute("aria-busy", "true");
+    await expect(history).toBeHidden();
+    holdSearch = false;
+    await expect.poll(() => typeof releaseSearch).toBe("function");
+    releaseSearch();
+    const songButton = page.getByRole("button", { name: "播放 测试歌曲", exact: true });
+    await expect(songButton).toBeVisible();
+    await expect(searchButton).not.toHaveAttribute("aria-busy", "true");
+    await input.click();
+    await expect(history.getByRole("button", { name: "周杰伦", exact: true })).toBeVisible();
+    await history.getByRole("button", { name: "周杰伦", exact: true }).click();
+    await expect(songButton).toBeVisible();
+    await input.click();
+    await expect(history.getByRole("button", { name: "周杰伦", exact: true })).toHaveCount(1);
+    await input.press("Escape");
+    await expect(history).toBeHidden();
+    await input.click();
+    await expect(history).toBeVisible();
+    await page.locator('[data-netease-tab="search"]').click();
+    await expect(history).toBeHidden();
+    await page.getByRole("button", { name: "查看《测试歌曲》的评论", exact: true }).click();
+    await expect(history).toBeHidden();
+    await expect(page.getByRole("heading", { name: "《测试歌曲》的评论" })).toBeVisible();
+    await expect(page.locator('[data-netease-tab="search"]')).toHaveAttribute("aria-busy", "true");
+    await expect.poll(() => typeof releaseComments).toBe("function");
+    releaseComments();
+    await expect(page.locator("#neteaseContent")).toContainText("评论暂时不可用");
+    failComments = false;
+    await page.getByRole("button", { name: "重试", exact: true }).click();
+    await expect(page.locator(".netease-comments")).toHaveCount(2);
+    await expect(page.locator(".netease-comments").last()).toContainText('<img src=x onerror="window.commentXss=true">');
+    expect(await page.evaluate(() => window.commentXss)).toBeUndefined();
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
+    await expect(page.locator(".netease-comments")).toContainText("第二页评论");
+    await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeHidden();
+    await page.getByRole("button", { name: "上一页", exact: true }).click();
+    await expect(page.locator(".netease-comments")).toHaveCount(2);
+    await page.getByRole("button", { name: "‹ 返回", exact: true }).click();
+    await expect(songButton).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator(".track")).toHaveCount(4);
+    if (width < 760) await page.locator("#mobileNavBtn").click();
+    await page.locator("#neteaseBtn").click();
+    await page.locator('[data-netease-tab="search"]').click();
+    await input.click();
+    await expect(history.getByRole("button", { name: "周杰伦", exact: true })).toBeVisible();
+    await history.getByRole("button", { name: "清空", exact: true }).click();
+    await expect(history).toContainText("暂无搜索历史");
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("fnaudio.neteaseSearchHistory.v1")))).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`NetEase search loads playback artwork without adding search thumbnails at ${width}px`, async ({ page }) => {
+    const song = { id: "netease:123", title: "搜索歌曲", artist: "测试歌手", album: "测试专辑", duration: 120, format: "网易云" };
+    const target = "mpd:alsa:pch:dev0";
+    const cover = "https://p1.music.126.net/playback-cover.jpg";
+    await page.route("**/api/netease/recommended-playlists", route => route.fulfill({ json: { ok: true, playlists: [] } }));
+    await page.route("**/api/netease/search?*", route => route.fulfill({ json: { ok: true, items: [song] } }));
+    await page.route("**/api/netease/lyrics?*", route => route.fulfill({ json: { ok: true, lyrics: "[00:00.00]测试歌词" } }));
+    await page.route("**/api/playback/targets**", route => route.fulfill({ json: {
+      current_target: target, current_target_name: "NAS", targets: [{ id: "local", name: "当前设备" }, { id: target, name: "NAS", kind: "mpd" }],
+    } }));
+    await page.route("**/api/playback/events**", route => route.abort());
+    await page.route("**/api/playback/queue", route => route.fulfill({ json: { ok: true, core: { current: song.id } } }));
+    await page.route("**/api/playback/load", route => route.fulfill({ json: { ok: true, core: { current: song.id, transport: "PLAYING" } } }));
+    let releaseArtwork;
+    let artworkRequests = 0;
+    await page.route("**/api/library/items?*", async route => {
+      if (new URL(route.request().url()).searchParams.get("ids") !== song.id) return route.fallback();
+      artworkRequests += 1;
+      await new Promise(resolve => { releaseArtwork = resolve; setTimeout(resolve, 8000); });
+      return route.fulfill({ json: { items: [{ ...song, cover_url: cover }] } });
+    });
+    await page.route("https://p1.music.126.net/playback-cover.jpg?*", route => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="red"/></svg>' }));
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".track")).toHaveCount(4);
+    if (width < 760) await page.locator("#mobileNavBtn").click();
+    await page.locator("#neteaseBtn").click();
+    await page.locator('[data-netease-tab="search"]').click();
+    await page.locator("#neteaseKeyword").fill("搜索歌曲");
+    await page.locator('#neteaseSearch button[type="submit"]').click();
+    const row = page.getByRole("button", { name: "播放 搜索歌曲", exact: true });
+    await expect(row).toBeVisible();
+    await expect(row.locator(".netease-cover, img")).toHaveCount(0);
+    await page.locator("#neteaseOutput").click();
+    await expect(page.locator('#deviceList [data-target="mpd:alsa:pch:dev0"]')).toHaveClass(/is-current/);
+    await page.locator("#closeDialog").click();
+    await row.click();
+    await expect(page.locator("#nowTitle")).toHaveText(song.title);
+    await expect(row).not.toHaveAttribute("aria-busy", "true");
+    await expect.poll(() => typeof releaseArtwork).toBe("function");
+    await page.locator("#nowPlayingSummary").click();
+    await expect(page.locator("#lyricsView")).toBeVisible();
+    await expect(page.locator("#lyricsLines")).toContainText("测试歌词");
+    expect(artworkRequests).toBe(1);
+    releaseArtwork();
+    const image = page.locator("#lyricsCover img");
+    await expect(image).toHaveAttribute("src", /playback-cover\.jpg/);
+    await expect.poll(() => image.evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true);
+    await expect(page.locator("#nowCover img")).toHaveAttribute("src", /playback-cover\.jpg/);
+    await expect(page.locator("#lyricsBg")).toHaveCSS("background-image", /playback-cover\.jpg/);
+    await page.locator("#lyricsBackBtn").click();
+    await expect(row.locator(".netease-cover, img")).toHaveCount(0);
+  });
+}
+
+for (const targetKind of ["mpd", "dlna_push"]) {
+test(`NetEase discovery preserves playlist position and plays through ${targetKind}`, async ({ page }) => {
+  const target = targetKind === "mpd" ? "mpd:alsa:pch:dev0" : "xiaoai-l05b";
   const tracks = [
     { id: "netease:123", title: "第一首", artist: "测试歌手", duration: 120, format: "网易云" },
     { id: "netease:456", title: "第二首", artist: "测试歌手", duration: 150, format: "网易云" },
@@ -55,16 +265,18 @@ test("NetEase discovery preserves playlist position and updates the current trac
   await page.route("**/api/netease/recommended-playlists/*", route => route.fulfill({ json: { ok: true, items: tracks } }));
   await page.route("**/api/playback/targets**", route => route.fulfill({ json: {
     current_target: target, current_target_name: "NAS", targets: [
-      { id: "local", name: "当前设备" }, { id: target, name: "NAS", kind: "mpd" },
+      { id: "local", name: "当前设备" }, { id: target, name: targetKind === "mpd" ? "NAS" : "小爱音箱Play", kind: targetKind },
     ],
   } }));
   await page.route("**/api/playback/events**", route => route.abort());
   await page.route("**/api/playback/queue", route => route.fulfill({
     json: { ok: true, core: { current: route.request().postDataJSON().current_id } },
   }));
-  await page.route("**/api/playback/load", route => route.fulfill({
-    json: { ok: true, core: { current: route.request().postDataJSON().track_id, transport: "PLAYING" } },
-  }));
+  let releaseLoad;
+  await page.route("**/api/playback/load", async route => {
+    await new Promise(resolve => { releaseLoad = resolve; setTimeout(resolve, 5000); });
+    return route.fulfill({ json: { ok: true, core: { current: route.request().postDataJSON().track_id, transport: "PLAYING" } } });
+  });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -87,16 +299,75 @@ test("NetEase discovery preserves playlist position and updates the current trac
   await expect(discovery.getByRole("heading", { name: "歌单 14" })).toBeVisible();
 
   await discovery.locator("#neteaseOutput").click();
-  await expect(page.locator('#deviceList [data-target="mpd:alsa:pch:dev0"]')).toHaveClass(/is-current/);
+  await expect(page.locator(`#deviceList [data-target="${target}"]`)).toHaveClass(/is-current/);
   await page.locator("#closeDialog").click();
   const load = page.waitForRequest(request => request.url().endsWith("/api/playback/load"));
   const song = discovery.getByRole("button", { name: "播放 第二首" });
   await song.click();
   expect((await load).postDataJSON()).toMatchObject({ target_id: target, track_id: "netease:456" });
+  await expect(song).toHaveAttribute("aria-busy", "true");
+  await expect(discovery.locator('[data-netease-action="play-all"]')).toHaveAttribute("aria-busy", "true");
+  releaseLoad();
+  await expect(song).not.toHaveAttribute("aria-busy", "true");
   await expect(song).toHaveAttribute("aria-current", "true");
+  let releaseControl;
+  let controlCount = 0;
+  await page.route("**/api/playback/control", async route => {
+    controlCount += 1;
+    await new Promise(resolve => { releaseControl = resolve; setTimeout(resolve, 5000); });
+    return route.fulfill({ status: 502, json: { ok: false, message: "测试控制失败" } });
+  });
+  const acceptDialog = dialog => dialog.accept();
+  page.on("dialog", acceptDialog);
+  for (const id of ["playBtn", "nextBtn", "prevBtn"]) {
+    const button = page.locator(`#${id}`);
+    releaseControl = null;
+    await button.click();
+    await expect(button).toHaveAttribute("aria-busy", "true");
+    await expect.poll(() => typeof releaseControl).toBe("function");
+    const before = controlCount;
+    await button.click();
+    expect(controlCount).toBe(before);
+    releaseControl();
+    await expect(button).not.toHaveAttribute("aria-busy", "true");
+  }
+  page.off("dialog", acceptDialog);
+  await page.locator("#playerMoreBtn").click();
+  await page.locator('[data-player-action="playerCommentsBtn"]').click();
+  await expect(discovery.getByRole("heading", { name: "《第二首》的评论" })).toBeVisible();
+  await discovery.getByRole("button", { name: "‹ 返回" }).click();
   await expect(discovery.getByRole("heading", { name: "歌单 14" })).toBeVisible();
   await discovery.getByRole("button", { name: "‹ 返回" }).click();
   expect(await scroll.evaluate(node => node.scrollTop)).toBeCloseTo(before, 0);
+});
+}
+
+test("NetEase DLNA volume panel reads and changes speaker volume", async ({ page }) => {
+  const target = "xiaoai-l05b";
+  await page.route("**/api/state/user", route => route.fulfill({json:{ok:true,state:{initialized:true,revision:1,favorites:[],playlists:[],playback:{target_id:target}}}}));
+  await page.route("**/api/playback/core", route => route.fulfill({json:{state:{target_id:target,target_kind:"dlna_push",queue:[],current:"",transport:"STOPPED"}}}));
+  await page.route("**/api/netease/recommended-playlists", route => route.fulfill({ json: { ok:true, playlists:[] } }));
+  await page.route("**/api/playback/targets**", route => route.fulfill({ json: {
+    current_target:target, current_target_name:"小爱音箱Play", targets:[
+      {id:"local",name:"当前设备"}, {id:target,name:"小爱音箱Play",kind:"dlna_push",online:true},
+    ],
+  } }));
+  await page.route("**/api/playback/status?*", route => route.fulfill({ json: {
+    kind:"upnp",transport:{state:"STOPPED"},position:{rel_seconds:0,duration_seconds:0},
+    ...(new URL(route.request().url()).searchParams.get("volume") === "1" ? {volume:37} : {}),
+  } }));
+  await page.route("**/api/playback/events**", route => route.abort());
+  await page.route("**/api/playback/control", route => route.fulfill({json:{ok:true}}));
+  await page.setViewportSize({width:1280,height:900});
+  await page.goto(baseUrl,{waitUntil:"domcontentloaded"});
+  await expect(page.locator(".track")).toHaveCount(4);
+  await page.locator("#neteaseBtn").click();
+  await expect(page.locator("#neteaseOutput")).toHaveText("小爱音箱Play");
+  await page.locator("#volumeBtn").click();
+  await expect(page.locator("#volume")).toHaveValue("0.37");
+  const request = page.waitForRequest(r => r.url().endsWith("/api/playback/control") && r.postDataJSON().action === "volume");
+  await page.locator("#volumeDownBtn").click();
+  expect((await request).postDataJSON()).toMatchObject({target_id:target,action:"volume",position:35});
 });
 
 test("NetEase favorite waits for account confirmation and the mixed favorites list routes both sources", async ({ page }) => {
@@ -119,10 +390,12 @@ test("NetEase favorite waits for account confirmation and the mixed favorites li
     json: { ok: true, core: { current: route.request().postDataJSON().track_id, transport: "PLAYING" } },
   }));
   let fail = true;
+  let releaseFavorite;
   await page.route("**/api/netease/favorite", async route => {
     const payload = route.request().postDataJSON();
     expect(payload.track_id).toBe(song.id);
     if (fail) return route.fulfill({ status: 502, json: { ok: false, message: "测试同步失败" } });
+    await new Promise(resolve => { releaseFavorite = resolve; setTimeout(resolve, 5000); });
     userState.revision += 1;
     userState.favorites = payload.liked ? [song.id, "fixture-1"] : ["fixture-1"];
     return route.fulfill({ json: { ok: true, state: userState } });
@@ -154,7 +427,12 @@ test("NetEase favorite waits for account confirmation and the mixed favorites li
   const like = page.waitForRequest(request => request.url().endsWith("/api/netease/favorite"));
   await heart.click();
   expect((await like).postDataJSON().liked).toBe(true);
+  await expect(heart).toHaveAttribute("aria-busy", "true");
+  await expect(heart).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(() => typeof releaseFavorite).toBe("function");
+  releaseFavorite();
   await expect(heart).toHaveAttribute("aria-pressed", "true");
+  await expect(heart).not.toHaveAttribute("aria-busy", "true");
   await page.locator("#mobileNavBtn").click();
   await page.locator('.sidebar [data-view="favorites"]').click();
   const onlineRow = page.locator('.track[data-track-id="netease:123"]');
@@ -167,8 +445,12 @@ test("NetEase favorite waits for account confirmation and the mixed favorites li
     expect((await load).postDataJSON()).toMatchObject({ target_id: target, track_id: id });
   }
   const unlike = page.waitForRequest(request => request.url().endsWith("/api/netease/favorite"));
+  releaseFavorite = null;
   await heart.click();
   expect((await unlike).postDataJSON().liked).toBe(false);
+  await expect(heart).toHaveAttribute("aria-busy", "true");
+  await expect.poll(() => typeof releaseFavorite).toBe("function");
+  releaseFavorite();
   await expect(onlineRow).toHaveCount(0);
   await expect(localRow).toHaveCount(1);
 });

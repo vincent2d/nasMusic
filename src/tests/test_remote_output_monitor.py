@@ -12,9 +12,96 @@ from server import (DLNA_MONITOR_GUARD, _dlna_stalled_track_expired,
                     dlna_output_open, start_remote_output_monitor,
                     stop_remote_output_monitor)
 import server
+from playback.core import PlaybackCore
+from playback.plugins import DlnaPushOutput
 
 
 class RemoteOutputMonitorTests(unittest.TestCase):
+    def run_monitor_samples(self, core, transports, positions):
+        worker = mock.Mock()
+        stop = mock.Mock()
+        stop.wait.side_effect = [False] * len(transports) + [True]
+        old_stop, old_thread = server.REMOTE_OUTPUT_MONITOR_STOP, server.REMOTE_OUTPUT_MONITOR_THREAD
+        old_guard = dict(DLNA_MONITOR_GUARD)
+        DLNA_MONITOR_GUARD.clear()
+        try:
+            with patch.object(server, "PLAYBACK_CORE", core), \
+                    patch("server.threading.Thread", return_value=worker) as thread, \
+                    patch("server._remote_output_monitor_is_current", return_value=True), \
+                    patch("server.find_upnp_device", return_value={"id": "speaker"}), \
+                    patch("server.upnp_transport_state", side_effect=transports), \
+                    patch("server.upnp_position_info", side_effect=positions), \
+                    patch("server.save_current_playback_session"):
+                server._start_remote_output_monitor_locked(SimpleNamespace(config={}), stop, 1)
+                thread.call_args.kwargs["target"]()
+        finally:
+            server.REMOTE_OUTPUT_MONITOR_STOP, server.REMOTE_OUTPUT_MONITOR_THREAD = old_stop, old_thread
+            DLNA_MONITOR_GUARD.clear()
+            DLNA_MONITOR_GUARD.update(old_guard)
+
+    def playing_core(self):
+        core = PlaybackCore()
+        core.registry.register(DlnaPushOutput())
+        core.set_target("speaker", "dlna_push")
+        core.set_queue([{"id": "one", "duration": 100}, {"id": "two", "duration": 100}], "two")
+        core.sync_output_status("dlna_push", "PLAYING", 20, 100)
+        return core
+
+    def test_stale_renderer_uri_never_rewinds_an_active_queue(self):
+        core = self.playing_core()
+        with patch.object(core, "dispatch") as dispatch:
+            self.run_monitor_samples(core, [{"state": "PLAYING"}], [{
+                "track_uri": "http://nas/upnp/media/one/song.mp3", "rel_seconds": 98, "duration_seconds": 100,
+            }])
+        self.assertEqual(core.state.current_track_id, "two")
+        self.assertEqual(core.state.position, 20)
+        dispatch.assert_not_called()
+
+    def test_command_completed_during_soap_poll_is_not_overwritten(self):
+        core = self.playing_core()
+        def position(_device):
+            core.select_current("one")
+            core.sync_output_status("dlna_push", "PLAYING", 0, 100)
+            return {"track_uri": "http://nas/upnp/media/two/song.mp3", "rel_seconds": 99, "duration_seconds": 100}
+        self.run_monitor_samples(core, [{"state": "STOPPED"}], position)
+        self.assertEqual(core.state.current_track_id, "one")
+        self.assertTrue(core.state.playing)
+        self.assertEqual(core.state.position, 0)
+
+    def test_renderer_error_at_mid_track_does_not_advance_the_queue(self):
+        core = self.playing_core()
+        positions = [{"track_uri": "http://nas/upnp/media/two/song.mp3", "rel_seconds": 20, "duration_seconds": 100}] * 2
+        with patch.object(core, "dispatch") as dispatch:
+            self.run_monitor_samples(core, [{"state": "PLAYING"}, {"state": "STOPPED", "status": "ERROR_OCCURRED"}], positions)
+        dispatch.assert_not_called()
+        self.assertEqual(core.state.current_track_id, "two")
+        self.assertFalse(core.state.playing)
+        self.assertEqual(core.state.transport, "ERROR")
+        self.assertIn("音频中断", core.state.error)
+
+    def test_l05b_pause_at_eof_advances_once_but_mid_track_pause_does_not(self):
+        for position, count in ((100, 1), (30, 0)):
+            with self.subTest(position=position):
+                core = self.playing_core()
+                frames = [{"track_uri": "http://nas/upnp/media/two/song.mp3", "rel_seconds": value, "duration_seconds": 100} for value in (20, position)]
+                with patch.object(core, "dispatch", return_value={"result": {"ok": True}}) as dispatch:
+                    self.run_monitor_samples(core, [{"state": "PLAYING"}, {"state": "PAUSED_PLAYBACK"}], frames)
+                self.assertEqual(dispatch.call_count, count)
+
+    def test_explicit_pause_at_eof_is_not_overridden_by_an_old_end_sample(self):
+        core = self.playing_core()
+        calls = 0
+        def position(_device):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                core.sync_output_status("dlna_push", "PAUSED_PLAYBACK", 100, 100)
+            return {"track_uri": "http://nas/upnp/media/two/song.mp3", "rel_seconds": 100 if calls == 2 else 20, "duration_seconds": 100}
+        with patch.object(core, "dispatch") as dispatch:
+            self.run_monitor_samples(core, [{"state": "PLAYING"}, {"state": "PAUSED_PLAYBACK"}], position)
+        dispatch.assert_not_called()
+        self.assertFalse(core.state.playing)
+
     def test_remote_monitor_start_failure_clears_published_handles(self):
         original_stop = server.REMOTE_OUTPUT_MONITOR_STOP
         original_thread = server.REMOTE_OUTPUT_MONITOR_THREAD

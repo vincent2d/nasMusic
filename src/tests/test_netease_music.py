@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 
 import netease_music
 from playback.core import PlaybackCore
+from playback.plugins import DlnaPushOutput
 from server import Handler, playback_queue
 from state_store import load_user_state, save_netease_favorite, save_user_state
 
@@ -65,12 +66,20 @@ class NeteaseMusicTests(unittest.TestCase):
     def test_provider_uses_explicit_desired_state_and_reports_expired_login(self):
         music = netease_music.MusicBox()
         with mock.patch("netease_music.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "ok\n", "")
+            run.return_value = subprocess.CompletedProcess([], 0, '{"ok": true, "verified": true}\n', "")
             music.set_liked("123", False)
             self.assertEqual(run.call_args.args[0][-2:], ("123", "false"))
-            run.return_value = subprocess.CompletedProcess([], 0, "not_logged_in\n", "")
+            run.return_value = subprocess.CompletedProcess([], 0, '{"ok": false, "error": "not_logged_in"}\n', "")
             with self.assertRaisesRegex(netease_music.MusicBoxError, "登录网易云"):
                 music.set_liked("123", True)
+
+    def test_favorite_does_not_accept_an_unverified_success(self):
+        music = netease_music.MusicBox()
+        for response in ('{"ok": true}', '{"ok": true, "verified": false}', 'ok', '[]'):
+            with self.subTest(response=response), mock.patch("netease_music.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, response, "")
+                with self.assertRaises(netease_music.MusicBoxError):
+                    music.set_liked("123", True)
 
     def test_online_queue_requires_a_nas_target_and_accepts_legacy_track_keys(self):
         core = PlaybackCore()
@@ -79,6 +88,46 @@ class NeteaseMusicTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertFalse(response["ok"])
         self.assertEqual(core.snapshot()["queue"], [])
+
+    def test_online_queue_accepts_dlna_and_uses_provider_metadata(self):
+        core = PlaybackCore()
+        core.registry.register(DlnaPushOutput())
+        core.set_target("speaker", "dlna_push")
+        with tempfile.TemporaryDirectory() as cache, mock.patch("server.PLAYBACK_CORE", core), mock.patch(
+            "server.NETEASE.track", return_value={"id": "netease:123", "title": "Trusted song", "duration": 120}
+        ):
+            response, status = playback_queue({"cache_dir": cache}, {
+                "queue": [{"track_id": "netease:123", "title": "Spoofed", "uri": "http://untrusted"}],
+                "current_id": "netease:123",
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(core.current_item()["title"], "Trusted song")
+        self.assertNotIn("uri", core.current_item())
+
+    def test_upnp_online_resource_routes_to_the_lan_stream(self):
+        handler = mock.Mock()
+        Handler.serve_upnp_media(handler, "netease%3A123/song.mp3", {}, True)
+        handler.serve_netease_stream.assert_called_once_with("123", True, dlna=True)
+
+    def test_dlna_stream_is_lan_only_and_preserves_range(self):
+        for peer, mobile in (("8.8.8.8", False), ("192.168.1.2", True)):
+            handler = mock.Mock(client_address=(peer, 1234), mobile_proxy=mobile, headers={})
+            with mock.patch("server.NETEASE.open_stream") as source:
+                Handler.serve_netease_stream(handler, "123", dlna=True)
+                source.assert_not_called()
+            self.assertEqual(handler.send_json.call_args.args[1], 403)
+        handler = mock.Mock(client_address=("192.168.1.2", 1234), mobile_proxy=False,
+                            headers={"Range": "bytes=2-3"})
+        source = io.BytesIO(b"cd")
+        source.status = 206
+        source.headers = Message()
+        source.headers["Content-Type"] = "audio/mpeg"
+        source.headers["Content-Length"] = "2"
+        source.headers["Content-Range"] = "bytes 2-3/4"
+        with mock.patch("server.NETEASE.open_stream", return_value=source):
+            Handler.serve_netease_stream(handler, "123", dlna=True)
+        handler.send_response.assert_called_once_with(206)
+        handler.wfile.write.assert_called_once_with(b"cd")
 
     def test_catalog_normalizes_and_remembers_a_playback_row(self):
         music = netease_music.MusicBox()
@@ -102,6 +151,29 @@ class NeteaseMusicTests(unittest.TestCase):
             row, = music.search("后来 刘若英")
         self.assertEqual(row["title"], "后来")
         self.assertEqual(row["duration"], 341)
+
+    def test_search_rows_without_artwork_are_hydrated_from_song_details(self):
+        music = netease_music.MusicBox()
+        search_row = {"song_id": 254574, "song_name": "后来", "artist": "刘若英", "duration": 341}
+        cover = "https://p1.music.126.net/album.jpg"
+        with mock.patch("netease_music._request", return_value=[search_row]):
+            self.assertEqual(music.search("后来")[0]["cover_url"], "")
+        with mock.patch("netease_music._request", return_value=[{**search_row, "album_pic_url": cover}]) as detail:
+            for _ in range(2):
+                self.assertEqual(music.hydrate(["netease:254574"])[0]["cover_url"], cover)
+            detail.assert_called_once_with("/songs/detail", ids="254574")
+        with mock.patch("netease_music._request", return_value=[search_row]):
+            self.assertEqual(music.search("后来")[0]["cover_url"], cover)
+
+    def test_missing_artwork_detail_failure_keeps_search_metadata_retryable(self):
+        music = netease_music.MusicBox()
+        music._remember([{"song_id": 123, "name": "Song"}])
+        with mock.patch("netease_music._request", side_effect=netease_music.MusicBoxError("暂时不可用")):
+            row, = music.hydrate(["netease:123"])
+            self.assertEqual(row["title"], "Song")
+            self.assertEqual(row["cover_url"], "")
+        with mock.patch("netease_music._request", return_value=[{"song_id": 123, "name": "Song", "album_pic_url": "https://p1.music.126.net/cover.jpg"}]):
+            self.assertTrue(music.hydrate(["netease:123"])[0]["cover_url"])
 
     def test_similar_songs_follow_netease_order_and_use_musicbox_metadata(self):
         music = netease_music.MusicBox()
@@ -135,6 +207,53 @@ class NeteaseMusicTests(unittest.TestCase):
             Handler.serve_netease_catalog(handler, "/api/netease/similar", {"id": ["123/456"]})
             self.assertEqual(handler.send_json.call_args.args[1], 400)
             similar.assert_not_called()
+
+    def test_comments_normalize_hot_and_latest_rows_and_keep_page_boundaries(self):
+        music = netease_music.MusicBox()
+        payload = {"code": 200, "total": 42, "more": True, "comments": [
+            {"content": "第一行\n第二行", "user": {"nickname": " 听众 "}, "likedCount": 3, "time": 1700000000000},
+            None, {"content": 123}, {"content": "匿名", "likedCount": -1, "time": "bad"},
+        ], "hotComments": [{"content": "热门", "user": None}]}
+        with mock.patch("netease_music._read_json", return_value=payload) as source:
+            result = music.comments("123")
+            self.assertEqual(result["comments"], [
+                {"user": "听众", "content": "第一行\n第二行", "likes": 3, "time": 1700000000000},
+                {"user": "", "content": "匿名", "likes": 0, "time": 0},
+            ])
+            self.assertEqual(result["hot_comments"][0]["content"], "热门")
+            self.assertEqual(result["total"], 42)
+            self.assertTrue(result["more"])
+            self.assertEqual(music.comments("123", 20)["hot_comments"], [])
+            request = source.call_args.args[0]
+            self.assertEqual(request.full_url, "https://music.163.com/api/v1/resource/comments/R_SO_4_123?offset=20&limit=20&total=true")
+            self.assertIsNone(request.get_header("Cookie"))
+
+    def test_comments_distinguish_no_comments_from_provider_failure(self):
+        music = netease_music.MusicBox()
+        with mock.patch("netease_music._read_json", return_value={"code": 200, "comments": []}):
+            self.assertEqual(music.comments("123")["comments"], [])
+        for payload in ({"code": 403}, {"code": 200, "comments": {}}, []):
+            with mock.patch("netease_music._read_json", return_value=payload):
+                with self.assertRaises(netease_music.MusicBoxError):
+                    music.comments("123")
+
+    def test_comments_endpoint_validates_id_and_offset_and_reports_provider_failure(self):
+        handler = mock.Mock()
+        handler.path = "/api/netease/comments?id=123&offset=20"
+        Handler.handle_get(handler)
+        handler.authorize_api_request.assert_called_once_with("GET", "/api/netease/comments")
+        with mock.patch("server.NETEASE.comments", return_value={"comments": [], "total": 0}) as provider:
+            for query in ({"id": ["bad"]}, {"id": ["123"], "offset": ["-1"]},
+                          {"id": ["123"], "offset": ["1000001"]}, {"id": ["123"], "offset": ["1.5"]}):
+                Handler.serve_netease_catalog(handler, "/api/netease/comments", query)
+                self.assertEqual(handler.send_json.call_args.args[1], 400)
+            provider.assert_not_called()
+            Handler.serve_netease_catalog(handler, "/api/netease/comments", {"id": ["123"], "offset": ["20"]})
+            provider.assert_called_once_with("123", 20)
+            self.assertEqual(handler.send_json.call_args.args[0], {"ok": True, "comments": [], "total": 0})
+            provider.side_effect = netease_music.MusicBoxError("暂时不可用")
+            Handler.serve_netease_catalog(handler, "/api/netease/comments", {"id": ["123"]})
+            self.assertEqual(handler.send_json.call_args.args[1], 502)
 
     def test_online_lyrics_request_uses_only_the_song_id_and_caches_the_result(self):
         music = netease_music.MusicBox()
@@ -184,12 +303,12 @@ class NeteaseMusicTests(unittest.TestCase):
     def test_daily_and_private_radar_produce_playback_rows(self):
         music = netease_music.MusicBox()
         rows = [{"song_id": 123, "name": "Song", "duration_ms": 63000}]
-        with mock.patch("netease_music._request", side_effect=[rows, None, rows]) as source:
+        with mock.patch("netease_music._request", side_effect=[{"logged_in": True, "user_id": 1}, rows, rows]) as source:
             self.assertEqual(music.daily()[0]["id"], "netease:123")
             self.assertEqual(music.radar()[0]["duration"], 63)
         self.assertEqual(source.call_args_list, [
-            mock.call("/recommend/songs", limit=30),
             mock.call("/auth/status"),
+            mock.call("/recommend/songs", limit=30),
             mock.call("/user/playlists/3136952023/tracks"),
         ])
 

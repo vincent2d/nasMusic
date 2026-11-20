@@ -5,8 +5,9 @@ import math
 import os
 import urllib.parse
 from typing import Any, Callable, Dict
+from netease_music import song_id as netease_song_id
 
-from .control_point import soap_request
+from .control_point import soap_fault, soap_request
 from .profiles import DSD_CAPABILITY_UNSUPPORTED, dsd_capability_state, protocol_info
 from .text_policy import MAX_DLNA_ID_CHARS, dlna_text
 
@@ -28,6 +29,8 @@ def _dlna_duration(seconds: Any) -> str:
 
 
 def upnp_resource_mime(item: Dict[str, Any]) -> str:
+    if netease_song_id(item.get("id")):
+        return "audio/mpeg"
     source = _source_path(item)
     if item.get("cue_track"):
         return "audio/flac"
@@ -70,7 +73,9 @@ def upnp_media_url(
     upnp_base_url: Callable[[Any], str],
 ) -> str:
     source = _source_path(item)
-    if item.get("cue_track"):
+    if netease_song_id(item.get("id")):
+        filename = safe_filename(item.get("title") or "网易云歌曲") + ".mp3"
+    elif item.get("cue_track"):
         filename = safe_filename(item.get("title") or os.path.basename(source)) + ".flac"
     elif os.path.splitext(source)[1].lower() == ".ape":
         filename = safe_filename(item.get("title") or os.path.splitext(os.path.basename(source))[0]) + ".flac"
@@ -219,7 +224,10 @@ def soap_push(
         ("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>"),
     ):
         try:
-            soap_request(control, "urn:schemas-upnp-org:service:AVTransport:1", action, args)
+            response = soap_request(control, "urn:schemas-upnp-org:service:AVTransport:1", action, args)
+            fault = soap_fault(response)
+            if fault:
+                return False, fault
         except Exception as exc:
             return False, str(exc)
     return True, "pushed and started"

@@ -91,6 +91,7 @@ from dlna.control_point import (
     upnp_control,
     upnp_position_info,
     upnp_transport_state,
+    upnp_volume,
 )
 from dlna.diagnostics import DlnaDiagnostics
 from dlna.media_server import (
@@ -151,6 +152,7 @@ from metadata_lane_policy import lane_workers_alive, service_was_started
 from metadata_response_policy import has_cached_lyrics, has_cached_track_projection, is_pending_result
 from metadata_unavailable_policy import local_cached_projection, local_lyrics_projection, local_pending_projection, lyrics_pending_projection, merge_pending_projection
 from api_auth import authorize_api, requires_resource_auth
+from network_host import is_private_host
 from api_token_policy import trim_api_token
 from dlna.request_context import request_context
 from observability import OBSERVABILITY, request_id
@@ -979,11 +981,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/netease/search":
                 result = {"items": NETEASE.search((query.get("q") or [""])[0])}
-            elif path in ("/api/netease/similar", "/api/netease/lyrics"):
+            elif path in ("/api/netease/similar", "/api/netease/lyrics", "/api/netease/comments"):
                 value = netease_song_id("netease:" + (query.get("id") or [""])[0])
                 if not value:
                     return self.send_json({"ok": False, "message": "无效的网易云歌曲"}, 400)
-                if path == "/api/netease/lyrics":
+                if path == "/api/netease/comments":
+                    offset = (query.get("offset") or ["0"])[0]
+                    if not re.fullmatch(r"[0-9]{1,7}", offset) or int(offset) > 1000000:
+                        return self.send_json({"ok": False, "message": "无效的评论页码"}, 400)
+                    result = NETEASE.comments(value, int(offset))
+                elif path == "/api/netease/lyrics":
                     result = {"lyrics": NETEASE.lyrics(value), "source": "网易云音乐"}
                 else:
                     result = {"items": NETEASE.similar(value)}
@@ -1030,9 +1037,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "message": "网易云已更新，fnAudio 收藏保存失败，请重试。"}, 500)
         return self.send_json({"ok": True, "state": state})
 
-    def serve_netease_stream(self, value, head_only=False):
-        if (self.mobile_proxy or self.client_address[0] not in ("127.0.0.1", "::1")
-                or self.headers.get("X-Fnaudio-Internal")):
+    def serve_netease_stream(self, value, head_only=False, *, dlna=False):
+        allowed = (is_private_host(self.client_address[0]) if dlna else
+                   self.client_address[0] in ("127.0.0.1", "::1") and not self.headers.get("X-Fnaudio-Internal"))
+        if self.mobile_proxy or not allowed:
             return self.send_json({"ok": False, "message": "此地址仅供 NAS 播放器使用"}, 403)
         if not netease_song_id("netease:" + value):
             return self.send_json({"ok": False, "message": "无效的网易云曲目"}, 404)
@@ -2405,6 +2413,9 @@ class Handler(BaseHTTPRequestHandler):
         # Split before decoding: an encoded separator inside the ID must
         # stay one path segment, and the advertised DIDL always encodes it.
         item_id = urllib.parse.unquote(item_path.split("/", 1)[0])
+        online_id = netease_song_id(item_id)
+        if online_id:
+            return self.serve_netease_stream(online_id, head_only, dlna=True)
         item = find_library_item(self.server.config, item_id)
         if not item or not os.path.isfile(item["path"]):
             self.record_dlna("media_missing", item_id=item_id)
@@ -2851,8 +2862,8 @@ def playback_queue(config, payload):
         for track in tracks
     ]
     if any(online_ids):
-        if playback_target_kind(PLAYBACK_CORE.state.target_id) != "mpd":
-            return {"ok": False, "message": "请先选择 NAS 本机播放设备"}, 409
+        if playback_target_kind(PLAYBACK_CORE.state.target_id) not in ("mpd", "dlna_push"):
+            return {"ok": False, "message": "请先选择 NAS 或 DLNA 播放设备"}, 409
         # Ignore fields supplied by the browser for online tracks. The stable
         # provider ID is the only thing we accept from the queue request.
         tracks = [NETEASE.track("netease:" + value) if value else track for track, value in zip(tracks, online_ids)]
@@ -3058,11 +3069,17 @@ def _playback_command_accepted(result):
 
 def playback_control(handler, payload):
     target_id = payload_target_id(payload)
-    # FAST_PATH_VOLUME: ultra-low-latency direct volume response (<5ms)
     action_val = str(payload.get("action") or "").strip().lower()
     if action_val == "volume" and target_id is not None:
         target_kind = playback_target_kind(target_id)
-        vol = safe_float(payload.get("position"))
+        current_target = PLAYBACK_CORE.state.target_id
+        mpd_alias = (target_kind == "mpd" and PLAYBACK_CORE.state.target_kind == "mpd"
+                     and "mpd" in (target_id, current_target))
+        if target_id != current_target and not mpd_alias:
+            return {"ok": False, "message": "播放设备已切换，请重试"}, 409
+        vol = payload.get("position")
+        if isinstance(vol, bool) or not isinstance(vol, (int, float)) or not math.isfinite(vol) or not 0 <= vol <= 100:
+            return {"ok": False, "message": "音量必须在 0 到 100 之间"}, 400
         result = PLAYBACK_CORE.dispatch(
             PlaybackCommand("volume", vol, context={"handler": handler, "config": handler.server.config})
         )
@@ -3117,9 +3134,9 @@ def playback_control(handler, payload):
             "message": "unsupported playback action",
             "core": PLAYBACK_CORE.snapshot(),
         }, 400
-    if (target_kind != "mpd" and action in ("play", "resume", "next", "previous")
+    if (target_kind not in ("mpd", "dlna_push") and action in ("play", "resume", "next", "previous")
             and netease_song_id(PLAYBACK_CORE.state.current_track_id)):
-        return {"ok": False, "message": "网易云歌曲仅支持 NAS 本机播放"}, 409
+        return {"ok": False, "message": "网易云歌曲需要 NAS 或 DLNA 播放设备"}, 409
     if action == "repeat" and "repeat" in payload:
         if payload.get("repeat") not in ("off", "all", "one"):
             return {
@@ -3151,8 +3168,8 @@ def playback_control(handler, payload):
         }, 404
     if action == "load":
         item_id = normalize_track_id(payload.get("track_id"))
-        if netease_song_id(item_id) and target_kind != "mpd":
-            return {"ok": False, "message": "网易云歌曲仅支持 NAS 本机播放"}, 409
+        if netease_song_id(item_id) and target_kind not in ("mpd", "dlna_push"):
+            return {"ok": False, "message": "网易云歌曲需要 NAS 或 DLNA 播放设备"}, 409
         item = find_playback_item(handler.server.config, item_id) if item_id else None
         if not item:
             return {
@@ -3342,12 +3359,17 @@ def playback_status(payload_or_query):
     try:
         # The renderer receives a trimmed segment, so its seconds are already
         # segment-relative and need no client-side offset.
-        return upnp_response(
+        response = upnp_response(
             upnp_transport_state(device),
             upnp_position_info(device),
             PLAYBACK_CORE.snapshot(),
             cue_segment=cue_segment_declaration(PLAYBACK_CORE.current_item()),
-        ), 200
+        )
+        if (payload_or_query.get("volume") or [""])[0] == "1":
+            volume = upnp_volume(device)
+            if volume is not None:
+                response["volume"] = volume
+        return response, 200
     except Exception as exc:
         return backend_error_response(str(exc)), 502
 
@@ -3432,7 +3454,7 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
 
     def loop():
         while not stop_event.wait(1.25):
-            snapshot = PLAYBACK_CORE.state
+            snapshot = copy.copy(PLAYBACK_CORE.state)
             if not _remote_output_monitor_is_current(stop_event, generation):
                 return
             if snapshot.target_kind != "dlna_push" or not snapshot.target_id:
@@ -3451,10 +3473,19 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
             except Exception as exc:
                 if not _remote_output_monitor_is_current(stop_event, generation):
                     return
+                if PLAYBACK_CORE.state.state_version != snapshot.state_version:
+                    continue
                 PLAYBACK_CORE.sync_output_status("dlna_push", "ERROR", error=str(exc))
                 continue
             if not _remote_output_monitor_is_current(stop_event, generation):
                 return
+            current = PLAYBACK_CORE.state
+            if (current.state_version != snapshot.state_version
+                    or current.target_id != snapshot.target_id
+                    or current.current_track_id != snapshot.current_track_id):
+                # A Play/seek/queue command may finish while SOAP is in flight.
+                # Its old URI and STOPPED sample belong to the previous state.
+                continue
             transport = str(transport_payload.get("state") or "UNKNOWN").upper()
             previous = monitor.get("transport") if monitor.get("target") == snapshot.target_id else ""
             monitor["target"] = snapshot.target_id
@@ -3472,6 +3503,10 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
 
             backend_track_id = _upnp_track_id_from_uri(position_payload.get("track_uri"))
             if backend_track_id and backend_track_id != snapshot.current_track_id:
+                if snapshot.playing:
+                    # A newly loaded source can briefly expose the old URI.
+                    # fnAudio owns this active queue; never rewind its cursor.
+                    continue
                 if not _remote_output_monitor_is_current(stop_event, generation):
                     return
                 before = snapshot.current_track_id
@@ -3486,7 +3521,13 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
             # Otherwise the monitor loses the only reliable end boundary.
             effective_duration = reported_duration or safe_float(monitor.get("expected_duration"))
 
-            ended = previous in ("PLAYING", "TRANSITIONING") and transport in ("STOPPED", "NO_MEDIA_PRESENT")
+            # L05B pauses at EOF in play-once mode. A pause before EOF is a
+            # real pause; an explicit user pause also clears snapshot.playing.
+            paused_at_end = (transport == "PAUSED_PLAYBACK" and effective_duration > 0
+                             and reported_position >= effective_duration)
+            ended = previous in ("PLAYING", "TRANSITIONING") and (
+                transport in ("STOPPED", "NO_MEDIA_PRESENT") or paused_at_end
+            )
             managed_playing = bool(snapshot.playing)
             stop_suppressed = _dlna_stop_is_suppressed(snapshot.target_id, transport)
             if stop_suppressed:
@@ -3499,6 +3540,12 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
                     "STOPPED",
                     reported_position,
                     effective_duration,
+                )
+                continue
+            if str(transport_payload.get("status") or "").upper() == "ERROR_OCCURRED":
+                PLAYBACK_CORE.sync_output_status(
+                    "dlna_push", "ERROR", reported_position, effective_duration,
+                    "音箱播放失败或音频中断，请重试当前歌曲。",
                 )
                 continue
             if ended and managed_playing:
@@ -3515,7 +3562,7 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
                         context={
                             "handler": handler,
                             "config": server.config,
-                            "resolve_track": lambda track_id: find_library_item(server.config, track_id),
+                            "resolve_track": lambda track_id: find_playback_item(server.config, track_id),
                         },
                     )
                 )
@@ -3552,7 +3599,7 @@ def _start_remote_output_monitor_locked(server, stop_event, generation):
                         context={
                             "handler": handler,
                             "config": server.config,
-                            "resolve_track": lambda track_id: find_library_item(server.config, track_id),
+                            "resolve_track": lambda track_id: find_playback_item(server.config, track_id),
                         },
                     )
                 )
@@ -3762,6 +3809,7 @@ def shutdown_runtime(server=None):
     cleanup_steps = (
         lambda: cancel_playback_restore_retry(),
         lambda: stop_remote_output_monitor(),
+        lambda: NETEASE.stop_catalog_cache(),
         lambda: shutdown_library_refresh(wait=True),
         lambda: stop_library_watcher(wait=True),
         lambda: shutdown_transcode_cache_worker(wait=True),
@@ -3891,6 +3939,7 @@ def main():
         server.config = config
         server.config_path = args.config
         server.web_root = web_root
+        NETEASE.start_catalog_cache(config)
         # Bind and listen before the audio backend starts.
         #
         # `src/cmd/main` gives the new server 6 s to answer on its port before it

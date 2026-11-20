@@ -169,7 +169,9 @@ def soap_request(control, service, action, args=""):
         },
         method="POST",
     )
-    return fetch_lan(request, timeout=6)
+    # A Xiaomi bridge may need a cloud round trip to accept Play. Timing out
+    # early rolls back fnAudio's queue even though the speaker starts later.
+    return fetch_lan(request, timeout=10 if action == "Play" else 6)
 
 
 def soap_text(response, tag):
@@ -247,6 +249,7 @@ def upnp_transport_state(device):
     response = upnp_soap_action(control, "GetTransportInfo", "<InstanceID>0</InstanceID>")
     return {
         "state": soap_text(response, "CurrentTransportState") or "UNKNOWN",
+        "status": soap_text(response, "CurrentTransportStatus") or "OK",
         "rate": soap_text(response, "CurrentSpeed") or "1",
     }
 
@@ -275,12 +278,17 @@ def upnp_position_info(device):
 
 
 def upnp_control(device, action, position=None):
-    control = device.get("control_url")
+    control = device.get("rendering_url") if action == "volume" else device.get("control_url")
     if not control:
-        return False, "设备没有 AVTransport 服务"
+        return False, "设备没有音量控制服务" if action == "volume" else "设备没有 AVTransport 服务"
     try:
         response = None
-        if action == "seek":
+        if action == "volume":
+            if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(position) or not 0 <= position <= 100:
+                return False, "音量必须在 0 到 100 之间"
+            response = soap_request(control, "urn:schemas-upnp-org:service:RenderingControl:1", "SetVolume",
+                                    "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>%d</DesiredVolume>" % round(position))
+        elif action == "seek":
             target = seconds_to_upnp_time(position)
             response = upnp_soap_action(control, "Seek", "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>%s</Target>" % target)
         elif action == "play":
@@ -301,6 +309,19 @@ def upnp_control(device, action, position=None):
     except Exception as exc:
         return False, str(exc)
     return True, "ok"
+
+
+def upnp_volume(device):
+    control = device.get("rendering_url")
+    if not control:
+        return None
+    try:
+        response = soap_request(control, "urn:schemas-upnp-org:service:RenderingControl:1", "GetVolume",
+                                "<InstanceID>0</InstanceID><Channel>Master</Channel>")
+        value = soap_text(response, "CurrentVolume")
+        return int(value) if not soap_fault(response) and re.fullmatch(r"[0-9]{1,3}", value) and int(value) <= 100 else None
+    except Exception:
+        return None
 
 
 def device_protocol_info(control):
@@ -378,6 +399,7 @@ def probe_device_capabilities(device):
     now_monotonic = time.monotonic()
     protocol = device_protocol_info(_device_value(device, "connection_url"))
     actions = scpd_actions(_device_value(device, "avtransport_scpd_url"))
+    volume_actions = scpd_actions(_device_value(device, "rendering_scpd_url"))
     capabilities = {
         "probed_at": now_wall,
         "probed_at_monotonic": now_monotonic,
@@ -388,6 +410,7 @@ def probe_device_capabilities(device):
         "next": "Next" in actions,
         "previous": "Previous" in actions,
         "pause": "Pause" in actions,
+        "volume": "SetVolume" in volume_actions,
         "eventing": bool(_identity_text(_device_value(device, "avtransport_event_url"))),
     }
     if cache_key:
@@ -501,10 +524,13 @@ def discover_upnp():
             device["name"] = names[0] if names else "UPnP 播放器"
             avtransport = find_service(root, device["location"], "AVTransport") or {}
             connection = find_service(root, device["location"], "ConnectionManager") or {}
+            rendering = find_service(root, device["location"], "RenderingControl") or {}
             device["control_url"] = avtransport.get("control_url")
             device["avtransport_scpd_url"] = avtransport.get("scpd_url")
             device["avtransport_event_url"] = avtransport.get("event_url")
             device["connection_url"] = connection.get("control_url")
+            device["rendering_url"] = rendering.get("control_url")
+            device["rendering_scpd_url"] = rendering.get("scpd_url")
             # Every fnAudio renderer uses the same control URL path. Compare
             # the exact SSDP identity so another NAS is not mistaken for us.
             if is_local_renderer(device, udns):

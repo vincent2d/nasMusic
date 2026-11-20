@@ -109,6 +109,7 @@ async function checkOnlineLyrics() {
     isNeteaseTrack: id => id.startsWith("netease:"),
     currentItem: () => item,
     updateLyricsMeta: () => {},
+    prefetchNeteaseArtwork: () => {},
     updateLyricHighlight: () => {},
     showLyricsMessage: message => messages.push(message),
     renderLyrics: value => rendered.push(value),

@@ -4,15 +4,47 @@ import tempfile
 import unittest
 import urllib.parse
 import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, "app/server")
 
 from dlna.media_server import renderer_track_metadata, soap_push, upnp_media_url, upnp_resource_mime, upnp_resource_size
 from dlna.profiles import protocol_info, should_direct_push
+from dlna.control_point import soap_request, upnp_transport_state
 
 
 class DlnaMediaServerTests(unittest.TestCase):
+    def test_play_allows_cloud_acknowledgement_without_slowing_status_polls(self):
+        with mock.patch("dlna.control_point.fetch_lan", return_value=b"<ok/>") as fetch:
+            soap_request("http://192.168.1.2/control", "service", "Play")
+            self.assertEqual(fetch.call_args.kwargs["timeout"], 10)
+            soap_request("http://192.168.1.2/control", "service", "GetTransportInfo")
+            self.assertEqual(fetch.call_args.kwargs["timeout"], 6)
+
+    def test_transport_status_preserves_renderer_playback_error(self):
+        response = b"<r><CurrentTransportState>STOPPED</CurrentTransportState><CurrentTransportStatus>ERROR_OCCURRED</CurrentTransportStatus></r>"
+        with mock.patch("dlna.control_point.upnp_soap_action", return_value=response):
+            result = upnp_transport_state({"control_url": "http://speaker/control"})
+        self.assertEqual(result["status"], "ERROR_OCCURRED")
+
+    def test_soap_fault_is_not_reported_as_successful_playback(self):
+        item = {"id": "netease:123", "title": "Song", "duration": 100}
+        handler = SimpleNamespace(server=SimpleNamespace(config={}))
+        fault = b"<Envelope><Fault><faultstring>Source unavailable</faultstring></Fault></Envelope>"
+        with mock.patch("dlna.media_server.soap_request", side_effect=[b"<ok/>", fault]) as soap:
+            result = soap_push({"control_url": "http://speaker/control"}, item, handler,
+                               lambda value: value, lambda _handler: "http://nas", mock.Mock())
+        self.assertEqual(result, (False, "Source unavailable"))
+        self.assertEqual(soap.call_count, 2)
+
+    def test_netease_push_uses_a_lan_resource_with_matching_audio_metadata(self):
+        item = {"id": "netease:123", "title": "Online Song", "duration": 120}
+        url = upnp_media_url(object(), item, lambda value: value, lambda _h: "http://192.168.1.2:53199")
+        self.assertEqual(url, "http://192.168.1.2:53199/upnp/media/netease%3A123/Online%20Song.mp3")
+        self.assertEqual(upnp_resource_mime(item), "audio/mpeg")
+        self.assertNotIn("127.0.0.1", url)
+
     def test_ape_renderer_resource_is_advertised_as_lossless_flac(self):
         item = {"id": "ape", "path": "/music/album.ape", "mime": "audio/ape"}
 

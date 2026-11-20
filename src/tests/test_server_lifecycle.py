@@ -108,6 +108,7 @@ class ServerLifecycleTests(unittest.TestCase):
 
         with mock.patch.object(server, "cancel_playback_restore_retry", side_effect=record("restore-retry")), \
              mock.patch.object(server, "stop_remote_output_monitor", side_effect=record("output-monitor")), \
+             mock.patch.object(server.NETEASE, "stop_catalog_cache", side_effect=record("netease-preload")), \
              mock.patch.object(server, "shutdown_library_refresh", side_effect=record("library-refresh")), \
              mock.patch.object(server, "stop_library_watcher", side_effect=record("library-watcher")), \
              mock.patch.object(server, "shutdown_transcode_cache_worker", side_effect=record("transcode-worker")), \
@@ -121,7 +122,7 @@ class ServerLifecycleTests(unittest.TestCase):
              mock.patch.object(server, "stop_library_connections", side_effect=record("library-drain")):
             server.shutdown_runtime()
         self.assertEqual(calls, [
-            "restore-retry", "output-monitor", "library-refresh", "library-watcher",
+            "restore-retry", "output-monitor", "netease-preload", "library-refresh", "library-watcher",
             "transcode-worker", "cover-prewarm", "upnp-cache", "dlna-ssdp",
             "dlna-protocol", "mpd", "airplay", "metadata", "library-drain",
         ])

@@ -196,6 +196,7 @@ class DlnaPushOutput(CallbackOutput):
                 "pause": True,
                 "stop": True,
                 "next_previous": True,
+                "volume": True,
                 "native_dsd": True,
                 "server_transcode": False,
             },
